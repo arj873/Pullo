@@ -1,0 +1,65 @@
+{
+  "id": "standard-candidate",
+  "roles": {
+    "investigator": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "claude",
+      "model": "claude-sonnet-5-5",
+      "outputSchema": "InvestigatorOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": null,
+      "promptVersion": "investigator.generalist@v1",
+      "provider": "anthropic",
+      "resolved": false
+    },
+    "judge": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "claude",
+      "model": "claude-sonnet-5-5",
+      "outputSchema": "JudgeOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": null,
+      "promptVersion": "judge.wording@v1",
+      "provider": "anthropic",
+      "resolved": false
+    },
+    "verifier": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "gpt",
+      "model": "gpt-5.6-terra",
+      "outputSchema": "VerifierOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": null,
+      "promptVersion": "verifier.refute@v1",
+      "provider": "openai",
+      "resolved": false
+    }
+  },
+  "tier": "standard",
+  "triage": "fixed-rule@1",
+  "version": 1
+}

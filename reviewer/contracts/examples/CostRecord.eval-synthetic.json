@@ -1,0 +1,23 @@
+{
+  "basis": "synthetic",
+  "callId": "call_f97125f22eb2ec7e",
+  "evalCaseId": "auth-bypass-001",
+  "evalRunId": "evr_fa54f1f7c6152a76",
+  "id": "cost_3fc115986e05f321",
+  "kind": "eval",
+  "model": "synthetic-fixture",
+  "priceVersion": "synthetic@1",
+  "provider": "synthetic",
+  "reservedUsdMicros": 61234,
+  "role": "investigator",
+  "runId": "run_2aff2913f20c9190",
+  "stage": "INVESTIGATE",
+  "usage": {
+    "cacheWriteInputTokens": null,
+    "cachedInputTokens": null,
+    "outputTokens": null,
+    "reasoningTokens": null,
+    "uncachedInputTokens": null
+  },
+  "usdMicros": null
+}

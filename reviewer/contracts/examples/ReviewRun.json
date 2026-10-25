@@ -1,0 +1,21 @@
+{
+  "access": "read-only@1",
+  "attempt": 1,
+  "baseSnapshotId": "snap:sha256:a35368dec51671273631f777354de99ffc2b801f79ab44196b8b3f8b80445cf5",
+  "configSnapshotId": "sha256:4a774ef9380933fd46443423d3fac1f874068666420597d5c765a2598b2823c5",
+  "evalCaseId": "auth-bypass-001",
+  "evalRunId": "evr_fa54f1f7c6152a76",
+  "headSnapshotId": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+  "id": "run_2aff2913f20c9190",
+  "idempotencyKey": "idem:eval:c71255118a4091b02046085cf870a57d3846522898f677af694be5d72945003e",
+  "incomplete": [],
+  "mode": "strict-replay",
+  "planVersion": 1,
+  "profile": "smoke-synthetic@1",
+  "repeat": 0,
+  "replayOf": "run_2f148e14368b7cea",
+  "repo": "fixture-auth",
+  "source": "local",
+  "status": "completed",
+  "trigger": "eval"
+}

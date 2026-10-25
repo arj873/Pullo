@@ -1,0 +1,18 @@
+{
+  "bugs": [
+    {
+      "category": "bug",
+      "id": "smoke-money-truncation",
+      "lines": [
+        5,
+        5
+      ],
+      "path": "src/money.py",
+      "severity": "P1"
+    }
+  ],
+  "caseId": "smoke-c05",
+  "expect": "partial",
+  "expectReason": "verifier-failure",
+  "schema": "case-labels@1"
+}

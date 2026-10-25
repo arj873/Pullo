@@ -1,0 +1,83 @@
+{
+  "id": "smoke-synthetic",
+  "roles": {
+    "investigator": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "synthetic",
+      "model": "synthetic-fixture",
+      "outputSchema": "InvestigatorOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 3750000,
+        "cachedInputPerMTokUsdMicros": 300000,
+        "inputPerMTokUsdMicros": 3000000,
+        "outputPerMTokUsdMicros": 15000000,
+        "priceVersion": "synthetic@1"
+      },
+      "promptVersion": "investigator.generalist@v1",
+      "provider": "synthetic",
+      "resolved": true
+    },
+    "judge": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "synthetic",
+      "model": "synthetic-fixture",
+      "outputSchema": "JudgeOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 3750000,
+        "cachedInputPerMTokUsdMicros": 300000,
+        "inputPerMTokUsdMicros": 3000000,
+        "outputPerMTokUsdMicros": 15000000,
+        "priceVersion": "synthetic@1"
+      },
+      "promptVersion": "judge.wording@v1",
+      "provider": "synthetic",
+      "resolved": true
+    },
+    "verifier": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 1,
+        "maxRetries": 2,
+        "timeoutSec": 60
+      },
+      "fallbacks": [],
+      "family": "synthetic",
+      "model": "synthetic-fixture",
+      "outputSchema": "VerifierOutput",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 3750000,
+        "cachedInputPerMTokUsdMicros": 300000,
+        "inputPerMTokUsdMicros": 3000000,
+        "outputPerMTokUsdMicros": 15000000,
+        "priceVersion": "synthetic@1"
+      },
+      "promptVersion": "verifier.refute@v1",
+      "provider": "synthetic",
+      "resolved": true
+    }
+  },
+  "tier": "standard",
+  "triage": "fixed-rule@1",
+  "version": 1
+}

@@ -1,0 +1,6 @@
+{
+  "bugs": [],
+  "caseId": "smoke-c02",
+  "expect": "silence",
+  "schema": "case-labels@1"
+}

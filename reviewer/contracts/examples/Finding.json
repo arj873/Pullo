@@ -1,0 +1,60 @@
+{
+  "category": "security",
+  "claim": "Missing token is treated as authenticated",
+  "evidence": [
+    {
+      "commit": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+      "excerpt": "if token == None:\n    return True\n",
+      "kind": "code",
+      "lines": [
+        10,
+        12
+      ],
+      "path": "src/auth.py",
+      "resolved": true,
+      "source": "diff"
+    }
+  ],
+  "id": "hyp_9c3143aeef6c1758",
+  "impact": "auth-bypass",
+  "location": {
+    "endLine": 12,
+    "line": 10,
+    "path": "src/auth.py"
+  },
+  "mechanism": "require_auth returns True when token is None",
+  "modelFamily": "synthetic",
+  "reach": "GET /admin without a token",
+  "runId": "run_2aff2913f20c9190",
+  "severityBasis": {
+    "impact": "auth-bypass",
+    "reachable": true
+  },
+  "sourceCallId": "call_f97125f22eb2ec7e",
+  "specialist": "generalist",
+  "suspectedSeverity": "P0",
+  "verification": {
+    "callIds": [
+      "call_a826610a08df9771"
+    ],
+    "evidence": [
+      {
+        "commit": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+        "excerpt": "@app.get('/admin')\ndef admin(): require_auth(request.token)\n",
+        "kind": "code",
+        "lines": [
+          4,
+          6
+        ],
+        "path": "src/routes.py",
+        "resolved": true,
+        "source": "read_file",
+        "toolCallId": "tool_5df523cc58d87daf"
+      }
+    ],
+    "notes": "No guard before require_auth on /admin",
+    "refutationAttempts": 1,
+    "verdict": "confirmed",
+    "verifierFamily": "synthetic"
+  }
+}

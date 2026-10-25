@@ -1,0 +1,139 @@
+{
+  "entries": [
+    {
+      "agentId": "generalist",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": null,
+        "rawText": "{\"hypotheses\": [{\"claim\": \"truncated scripted output",
+        "resolvedModel": "synthetic-fixture",
+        "status": "invalid-output",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "generalist",
+      "attempt": 1,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "hypotheses": [
+            {
+              "category": "bug",
+              "claim": "page_slice skips the first page",
+              "evidence": [
+                {
+                  "commit": "snap:sha256:4894faf56c3b798b6d27a7c9fc1e675da2ea21554770d6df013499f148b00f14",
+                  "excerpt": "    offset = page * size",
+                  "kind": "code",
+                  "lines": [
+                    5,
+                    5
+                  ],
+                  "path": "src/pager.py"
+                }
+              ],
+              "impact": "incorrect-result",
+              "location": {
+                "endLine": 5,
+                "line": 5,
+                "path": "src/pager.py"
+              },
+              "mechanism": "offset is page*size instead of (page-1)*size.",
+              "suspectedSeverity": "P1"
+            }
+          ]
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "evidence": [
+            {
+              "commit": "snap:sha256:4894faf56c3b798b6d27a7c9fc1e675da2ea21554770d6df013499f148b00f14",
+              "excerpt": "    return page_slice(rows, 1, 25)",
+              "kind": "code",
+              "lines": [
+                5,
+                5
+              ],
+              "path": "src/views.py"
+            }
+          ],
+          "impact": "incorrect-result",
+          "notes": "The caller exercises the changed lines.",
+          "reachable": true,
+          "verdict": "confirmed"
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "verifier",
+      "stage": "VERIFY"
+    },
+    {
+      "agentId": "judge",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "comments": [
+            {
+              "body": "`offset = page * size` makes page 1 start at row `size`, so `first_page` never returns row 0.",
+              "findingIds": [
+                "hyp_421e296c447b9837"
+              ],
+              "title": "First page is skipped"
+            }
+          ]
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "judge",
+      "stage": "JUDGE"
+    }
+  ],
+  "schemaVersion": 1
+}

@@ -1,0 +1,17 @@
+{
+  "bugs": [
+    {
+      "category": "bug",
+      "id": "smoke-cache-off-by-one",
+      "lines": [
+        11,
+        11
+      ],
+      "path": "src/cache.py",
+      "severity": "P1"
+    }
+  ],
+  "caseId": "smoke-c03",
+  "expect": "findings",
+  "schema": "case-labels@1"
+}

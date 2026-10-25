@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c02/base",
+    "snapshotId": "snap:sha256:2e51cb0a0b2b70baf4dc243fee0fb7f67b46de04ae77c2ab0153679ba66ad0f4"
+  },
+  "head": {
+    "root": "cases/smoke-c02/head",
+    "snapshotId": "snap:sha256:865bad94ea2efbd369f56157d840f079c4a2c4766ab4414e44a59fa8ad8554df"
+  },
+  "id": "smoke-c02",
+  "pr": {
+    "body": "Rename build_row to format_row.",
+    "title": "Rename row helper"
+  },
+  "repo": "fixture-report",
+  "schema": "case-input@1",
+  "synthetic": true
+}

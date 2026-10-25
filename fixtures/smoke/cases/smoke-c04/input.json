@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c04/base",
+    "snapshotId": "snap:sha256:ee1d0c8ac6fcc21e81e6a2db46969f6d25889080e5cb3ebabb85faebc1763b8c"
+  },
+  "head": {
+    "root": "cases/smoke-c04/head",
+    "snapshotId": "snap:sha256:4894faf56c3b798b6d27a7c9fc1e675da2ea21554770d6df013499f148b00f14"
+  },
+  "id": "smoke-c04",
+  "pr": {
+    "body": "Inline the offset arithmetic.",
+    "title": "Simplify offset"
+  },
+  "repo": "fixture-pager",
+  "schema": "case-input@1",
+  "synthetic": true
+}

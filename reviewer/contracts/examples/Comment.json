@@ -1,0 +1,50 @@
+{
+  "anchor": {
+    "endLine": 12,
+    "path": "src/auth.py",
+    "snapshotId": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+    "startLine": 10
+  },
+  "body": "`require_auth` returns True when the token is missing, so `GET /admin` (src/routes.py:4-6) is reachable unauthenticated.",
+  "category": "security",
+  "evidence": [
+    {
+      "commit": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+      "excerpt": "if token == None:\n    return True\n",
+      "kind": "code",
+      "lines": [
+        10,
+        12
+      ],
+      "path": "src/auth.py",
+      "resolved": true,
+      "source": "diff"
+    },
+    {
+      "commit": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+      "excerpt": "@app.get('/admin')\ndef admin(): require_auth(request.token)\n",
+      "kind": "code",
+      "lines": [
+        4,
+        6
+      ],
+      "path": "src/routes.py",
+      "resolved": true,
+      "source": "read_file",
+      "toolCallId": "tool_5df523cc58d87daf"
+    }
+  ],
+  "evidenceStrength": "verifier-traced",
+  "findingIds": [
+    "hyp_9c3143aeef6c1758"
+  ],
+  "fingerprint": "fp2:8fa4819430471c42f24c3344975a76f0",
+  "id": "cmt_7bd080aed97e3dc2",
+  "proposedSeverity": "P0",
+  "qualityScore": null,
+  "runId": "run_2aff2913f20c9190",
+  "severity": "P0",
+  "severityCeiling": "P0",
+  "state": "draft",
+  "title": "Requests without a token pass authentication"
+}

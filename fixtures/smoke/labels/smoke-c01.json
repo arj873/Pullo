@@ -1,0 +1,17 @@
+{
+  "bugs": [
+    {
+      "category": "security",
+      "id": "smoke-auth-bypass",
+      "lines": [
+        18,
+        19
+      ],
+      "path": "src/auth.py",
+      "severity": "P0"
+    }
+  ],
+  "caseId": "smoke-c01",
+  "expect": "findings",
+  "schema": "case-labels@1"
+}

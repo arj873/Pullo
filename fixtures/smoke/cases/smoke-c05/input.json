@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c05/base",
+    "snapshotId": "snap:sha256:0f4184e98eda88d3687ecd0e9fe94e098ca6586355178fda29c233fdca774c49"
+  },
+  "head": {
+    "root": "cases/smoke-c05/head",
+    "snapshotId": "snap:sha256:27e49308383d93a23b454c73942e468b16e8c7e482d6254d85bd42d2c0447adc"
+  },
+  "id": "smoke-c05",
+  "pr": {
+    "body": "Avoid float rounding helper.",
+    "title": "Use int conversion"
+  },
+  "repo": "fixture-money",
+  "schema": "case-input@1",
+  "synthetic": true
+}

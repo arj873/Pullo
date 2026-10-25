@@ -1,0 +1,19 @@
+{
+  "costRecordIds": [],
+  "incomplete": [
+    {
+      "reason": "disabled-in-eval",
+      "stage": "LEARN"
+    }
+  ],
+  "inputDigest": "sha256:a22b4c9af7a3222e9bacdd621df0751fad9abb7fc2a903843f18b31dee0033e6",
+  "payload": {
+    "enabled": false,
+    "stage": "LEARN"
+  },
+  "planVersion": 1,
+  "runId": "run_2aff2913f20c9190",
+  "schema": "stage-artifact@1",
+  "stage": "LEARN",
+  "status": "skipped"
+}

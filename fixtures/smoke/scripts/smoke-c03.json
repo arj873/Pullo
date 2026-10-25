@@ -1,0 +1,180 @@
+{
+  "entries": [
+    {
+      "agentId": "generalist",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "hypotheses": [
+            {
+              "category": "bug",
+              "claim": "Cache holds limit+1 entries",
+              "evidence": [
+                {
+                  "commit": "snap:sha256:bd2bfc6ad7156d2f220a7a39bff03eeb7220b3dd46d475a6cbbe2dc0f7bb6e63",
+                  "excerpt": "        while len(self.items) > self.limit + 1:",
+                  "kind": "code",
+                  "lines": [
+                    11,
+                    11
+                  ],
+                  "path": "src/cache.py"
+                }
+              ],
+              "impact": "incorrect-result",
+              "location": {
+                "endLine": 11,
+                "line": 11,
+                "path": "src/cache.py"
+              },
+              "mechanism": "The loop only evicts above limit+1.",
+              "suspectedSeverity": "P1"
+            },
+            {
+              "category": "bug",
+              "claim": "Eviction threshold admits one entry over the limit",
+              "evidence": [
+                {
+                  "commit": "snap:sha256:bd2bfc6ad7156d2f220a7a39bff03eeb7220b3dd46d475a6cbbe2dc0f7bb6e63",
+                  "excerpt": "        while len(self.items) > self.limit + 1:",
+                  "kind": "code",
+                  "lines": [
+                    11,
+                    11
+                  ],
+                  "path": "src/cache.py"
+                }
+              ],
+              "impact": "incorrect-result",
+              "location": {
+                "endLine": 11,
+                "line": 11,
+                "path": "src/cache.py"
+              },
+              "mechanism": "The loop only evicts above limit+1.",
+              "suspectedSeverity": "P1"
+            }
+          ]
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "evidence": [
+            {
+              "commit": "snap:sha256:bd2bfc6ad7156d2f220a7a39bff03eeb7220b3dd46d475a6cbbe2dc0f7bb6e63",
+              "excerpt": "    assert len(recent.items) <= recent.limit",
+              "kind": "code",
+              "lines": [
+                8,
+                8
+              ],
+              "path": "src/service.py"
+            }
+          ],
+          "impact": "incorrect-result",
+          "notes": "The caller exercises the changed lines.",
+          "reachable": true,
+          "verdict": "confirmed"
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "verifier",
+      "stage": "VERIFY"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 0,
+      "ordinal": 1,
+      "response": {
+        "output": {
+          "evidence": [
+            {
+              "commit": "snap:sha256:bd2bfc6ad7156d2f220a7a39bff03eeb7220b3dd46d475a6cbbe2dc0f7bb6e63",
+              "excerpt": "    assert len(recent.items) <= recent.limit",
+              "kind": "code",
+              "lines": [
+                8,
+                8
+              ],
+              "path": "src/service.py"
+            }
+          ],
+          "impact": "incorrect-result",
+          "notes": "The caller exercises the changed lines.",
+          "reachable": true,
+          "verdict": "confirmed"
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "verifier",
+      "stage": "VERIFY"
+    },
+    {
+      "agentId": "judge",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "comments": [
+            {
+              "body": "The eviction loop uses `limit + 1`, so `service.remember` can see `len(items) == limit + 1`.",
+              "findingIds": [
+                "hyp_a5b0459ec8f444ac"
+              ],
+              "title": "Cache can hold one entry more than its limit"
+            }
+          ]
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "judge",
+      "stage": "JUDGE"
+    }
+  ],
+  "schemaVersion": 1
+}

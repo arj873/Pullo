@@ -1,0 +1,15 @@
+{
+  "expiresAt": "2026-12-31T00:00:00Z",
+  "id": "s0a-synthetic-recording",
+  "issuedBy": "operator",
+  "maxUsdMicrosPerRun": 4000000,
+  "maxUsdMicrosTotal": 100000000,
+  "models": [
+    "synthetic-fixture"
+  ],
+  "providers": [
+    "synthetic"
+  ],
+  "purpose": "Record Stage 0A smoke traces from scripted synthetic responses; no provider spend.",
+  "schema": "spend-authorization@1"
+}

@@ -1,0 +1,22 @@
+{
+  "budget": {
+    "maxRetriesPerCall": 2,
+    "maxToolCalls": 60,
+    "maxToolCallsPerAgent": 30,
+    "maxToolOutputTokensPerAgent": 60000,
+    "maxUsdMicros": 4000000,
+    "softDeadlineSec": 240,
+    "verifyReserveBp": 3000,
+    "wallClockSec": 360
+  },
+  "modelProfile": "smoke-synthetic@1",
+  "reasons": [
+    "Stage 0A fixed standard Plan"
+  ],
+  "specialists": [
+    "generalist"
+  ],
+  "tier": "standard",
+  "triage": "fixed-rule@1",
+  "version": 1
+}

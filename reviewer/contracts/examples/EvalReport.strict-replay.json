@@ -1,0 +1,118 @@
+{
+  "cases": [
+    {
+      "caseId": "auth-bypass-001",
+      "comments": 1,
+      "duplicates": 0,
+      "error": null,
+      "expect": "findings",
+      "expectationMet": true,
+      "falseNegatives": 0,
+      "falsePositives": 0,
+      "incomplete": [],
+      "latencyMs": {
+        "original": 41000,
+        "replay": 120
+      },
+      "runId": "run_2aff2913f20c9190",
+      "status": "completed",
+      "truePositives": 1
+    }
+  ],
+  "configDigest": "sha256:4a774ef9380933fd46443423d3fac1f874068666420597d5c765a2598b2823c5",
+  "contractsVersion": "s0a-contracts@5",
+  "cost": {
+    "byBasis": {
+      "estimated": {
+        "records": 0,
+        "usdMicros": null
+      },
+      "measured": {
+        "records": 0,
+        "usdMicros": null
+      },
+      "replayed": {
+        "records": 0,
+        "usdMicros": null
+      },
+      "synthetic": {
+        "records": 3,
+        "usdMicros": null
+      },
+      "unknown": {
+        "records": 0,
+        "usdMicros": null
+      }
+    },
+    "liveCalls": 0
+  },
+  "coverage": {
+    "cancelled": 0,
+    "completed": 1,
+    "expectationMet": 1,
+    "failed": 0,
+    "partial": 0
+  },
+  "dataset": {
+    "caseCount": 1,
+    "suiteDigest": "sha256:99629731457ddaed02fdcf63834990420bafc71db0472bcc103a0e596e986441",
+    "suiteId": "smoke",
+    "suiteVersion": 1,
+    "synthetic": true
+  },
+  "evalRunId": "evr_fa54f1f7c6152a76",
+  "latency": {
+    "original": {
+      "max": 41000,
+      "n": 1,
+      "p50": 41000,
+      "p95": 41000
+    },
+    "replay": {
+      "max": 120,
+      "n": 1,
+      "p50": 120,
+      "p95": 120
+    }
+  },
+  "limitations": [
+    "Synthetic smoke data; says nothing about review quality or parity.",
+    "Strict replay of one recording does not measure model variance."
+  ],
+  "matching": {
+    "rule": "path-line-overlap@1",
+    "scope": "synthetic-smoke"
+  },
+  "metrics": {
+    "f1": {
+      "undefinedReason": null,
+      "value": 1.0
+    },
+    "precision": {
+      "denominator": 1,
+      "numerator": 1,
+      "undefinedReason": null,
+      "value": 1.0
+    },
+    "recall": {
+      "denominator": 1,
+      "numerator": 1,
+      "undefinedReason": null,
+      "value": 1.0
+    }
+  },
+  "mode": "strict-replay",
+  "profiles": [
+    {
+      "digest": "sha256:7d528911fabf6eb378c2f7dbca4767e2d3b6acc52109c214b26d655cfb262971",
+      "ref": "smoke-synthetic@1"
+    }
+  ],
+  "promptVersions": [
+    "investigator.generalist@v1",
+    "judge.wording@v1",
+    "verifier.refute@v1"
+  ],
+  "replayOf": "evr_10d15075584d575b",
+  "schema": "eval-report@1"
+}

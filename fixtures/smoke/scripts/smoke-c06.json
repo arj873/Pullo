@@ -1,0 +1,44 @@
+{
+  "entries": [
+    {
+      "agentId": "generalist",
+      "attempt": 0,
+      "error": {
+        "code": "provider-timeout",
+        "message": "scripted provider timeout (no real request was made)",
+        "retryable": true,
+        "stage": "INVESTIGATE"
+      },
+      "ordinal": 0,
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "generalist",
+      "attempt": 1,
+      "error": {
+        "code": "provider-timeout",
+        "message": "scripted provider timeout (no real request was made)",
+        "retryable": true,
+        "stage": "INVESTIGATE"
+      },
+      "ordinal": 0,
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "generalist",
+      "attempt": 2,
+      "error": {
+        "code": "provider-timeout",
+        "message": "scripted provider timeout (no real request was made)",
+        "retryable": true,
+        "stage": "INVESTIGATE"
+      },
+      "ordinal": 0,
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    }
+  ],
+  "schemaVersion": 1
+}

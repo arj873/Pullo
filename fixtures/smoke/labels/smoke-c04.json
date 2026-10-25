@@ -1,0 +1,17 @@
+{
+  "bugs": [
+    {
+      "category": "bug",
+      "id": "smoke-pager-offset",
+      "lines": [
+        5,
+        5
+      ],
+      "path": "src/pager.py",
+      "severity": "P1"
+    }
+  ],
+  "caseId": "smoke-c04",
+  "expect": "findings",
+  "schema": "case-labels@1"
+}

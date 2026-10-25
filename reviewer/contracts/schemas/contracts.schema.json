@@ -1,0 +1,4356 @@
+{
+  "$defs": {
+    "Budget": {
+      "additionalProperties": false,
+      "description": "Hard caps (run ceiling <= $1000). Admission rules in budget.py; calls that would exceed are refused. Effective retries = min(maxRetriesPerCall, role caps.maxRetries); repairs <= 1; each is a new admission.",
+      "properties": {
+        "maxRetriesPerCall": {
+          "maximum": 3,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxToolCalls": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxToolCallsPerAgent": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxToolOutputTokensPerAgent": {
+          "maximum": 100000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxUsdMicros": {
+          "maximum": 1000000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "softDeadlineSec": {
+          "maximum": 86400,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "verifyReserveBp": {
+          "maximum": 10000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wallClockSec": {
+          "maximum": 86400,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxUsdMicros",
+        "maxToolCalls",
+        "maxToolCallsPerAgent",
+        "maxToolOutputTokensPerAgent",
+        "wallClockSec",
+        "softDeadlineSec",
+        "verifyReserveBp",
+        "maxRetriesPerCall"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "budget-order: soft <= hard deadline; per-agent <= total"
+      ]
+    },
+    "CaseInput": {
+      "additionalProperties": false,
+      "description": "Everything the reviewer may see. Closed object: labels, fix commits and expectations cannot be added here.",
+      "properties": {
+        "base": {
+          "additionalProperties": false,
+          "properties": {
+            "root": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+              "type": "string"
+            },
+            "snapshotId": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshotId",
+            "root"
+          ],
+          "type": "object"
+        },
+        "head": {
+          "additionalProperties": false,
+          "properties": {
+            "root": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+              "type": "string"
+            },
+            "snapshotId": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshotId",
+            "root"
+          ],
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "pr": {
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "maxLength": 20000,
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 500,
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "body"
+          ],
+          "type": "object"
+        },
+        "repo": {
+          "description": "GitHub 'Owner/Name' with display case preserved (identity is case-folded, canonical.repo_key), or an opaque lowercase slug for synthetic/local fixtures.",
+          "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.{1,2}$)[A-Za-z0-9._-]{1,100}|[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "schema": {
+          "const": "case-input@1"
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "repo",
+        "synthetic",
+        "base",
+        "head",
+        "pr"
+      ],
+      "type": "object"
+    },
+    "CaseLabels": {
+      "additionalProperties": false,
+      "description": "Scorer-only. Must live under the suite's labels/ directory.",
+      "properties": {
+        "bugs": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "category": {
+                "$ref": "#/$defs/Category"
+              },
+              "id": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                "type": "string"
+              },
+              "lines": {
+                "items": {
+                  "maximum": 10000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "note": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "path": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              },
+              "severity": {
+                "$ref": "#/$defs/Severity"
+              }
+            },
+            "required": [
+              "id",
+              "path",
+              "lines",
+              "category",
+              "severity"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "caseId": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "expect": {
+          "enum": [
+            "findings",
+            "silence",
+            "partial",
+            "failed"
+          ]
+        },
+        "expectReason": {
+          "enum": [
+            "deadline",
+            "soft-deadline",
+            "budget",
+            "cancelled",
+            "verifier-failure",
+            "agent-failure",
+            "tool-calls-exhausted",
+            "disabled-in-eval",
+            "replay-miss",
+            "replay-mismatch",
+            "live-calls-disabled",
+            "model-unresolved",
+            "schema-invalid",
+            "repair-exhausted",
+            "provider-error",
+            "provider-timeout",
+            "budget-exhausted",
+            "deadline-exceeded",
+            "cancelled",
+            "tool-denied",
+            "path-escape",
+            "invalid-citation",
+            "contract-violation",
+            "internal"
+          ]
+        },
+        "schema": {
+          "const": "case-labels@1"
+        }
+      },
+      "required": [
+        "schema",
+        "caseId",
+        "expect",
+        "bugs"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "labels-consistent: expectation vs bugs"
+      ]
+    },
+    "Category": {
+      "enum": [
+        "bug",
+        "security",
+        "breaking-change",
+        "duplicate-logic",
+        "test-gap",
+        "ticket-compliance",
+        "rule-violation",
+        "performance",
+        "style"
+      ]
+    },
+    "Comment": {
+      "additionalProperties": false,
+      "description": "Local/eval PUBLISH writes state=draft (read-only reviews never post). severity <= severityCeiling; proposedSeverity vs severity shows any cap. suggestion is explanatory text for the author; it is never applied. qualityScore null = not scored (no quality model in Stage 0A).",
+      "properties": {
+        "anchor": {
+          "additionalProperties": false,
+          "properties": {
+            "endLine": {
+              "maximum": 10000000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+              "type": "string"
+            },
+            "snapshotId": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "startLine": {
+              "maximum": 10000000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "startLine",
+            "endLine",
+            "snapshotId"
+          ],
+          "type": "object"
+        },
+        "body": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        },
+        "evidenceStrength": {
+          "$ref": "#/$defs/EvidenceStrength"
+        },
+        "findingIds": {
+          "items": {
+            "pattern": "^(?:hyp_[0-9a-f]{16})$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "fingerprint": {
+          "pattern": "^(?:fp2:[0-9a-f]{32})$",
+          "type": "string"
+        },
+        "hostCommentId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^(?:cmt_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "postedAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "proposedSeverity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "qualityScore": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            }
+          ]
+        },
+        "runId": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "severityCeiling": {
+          "$ref": "#/$defs/Severity"
+        },
+        "severityReason": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "draft",
+            "posted",
+            "resolved",
+            "retracted",
+            "superseded"
+          ]
+        },
+        "suggestion": {
+          "maxLength": 8000,
+          "type": "string"
+        },
+        "supersedes": {
+          "pattern": "^(?:cmt_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "findingIds",
+        "severity",
+        "proposedSeverity",
+        "severityCeiling",
+        "evidenceStrength",
+        "category",
+        "anchor",
+        "title",
+        "body",
+        "evidence",
+        "qualityScore",
+        "fingerprint",
+        "state"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "comment-state: state fields, anchor, id derivation, severity bounds",
+        "no-secrets: persisted Comment contains no protected text (redact first)"
+      ]
+    },
+    "CostRecord": {
+      "additionalProperties": false,
+      "description": "Eval executions are ReviewRuns booked as kind=eval (amends 14). Replayed records repeat recorded values and are never summed as new spend. Ids are unique per run only; aggregate by (runId, id). overrun=true when actual > reservation.",
+      "properties": {
+        "basis": {
+          "enum": [
+            "measured",
+            "estimated",
+            "unknown",
+            "replayed",
+            "synthetic"
+          ]
+        },
+        "callId": {
+          "pattern": "^(?:call_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "evalCaseId": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "evalRunId": {
+          "pattern": "^(?:evr_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^(?:cost_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "review",
+            "chat",
+            "index",
+            "eval"
+          ]
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "overrun": {
+          "type": "boolean"
+        },
+        "priceVersion": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          ]
+        },
+        "provider": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "replayOf": {
+          "pattern": "^(?:cost_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "reservedUsdMicros": {
+          "maximum": 1000000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retryOf": {
+          "pattern": "^(?:call_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "role": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "runId": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "stage": {
+          "enum": [
+            "INGEST",
+            "PREPARE",
+            "TRIAGE",
+            "INVESTIGATE",
+            "VERIFY",
+            "JUDGE",
+            "PUBLISH",
+            "LEARN"
+          ]
+        },
+        "toolCallId": {
+          "pattern": "^(?:tool_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "toolMs": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "usdMicros": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 1000000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "basis",
+        "usage",
+        "usdMicros",
+        "reservedUsdMicros",
+        "priceVersion"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "cost-attribution: kind/basis attribution and id derivation"
+      ]
+    },
+    "DropRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "reason": {
+          "enum": [
+            "refuted",
+            "uncertain",
+            "verifier-failed",
+            "invalid-citation",
+            "merged",
+            "ignored-by-config",
+            "suppressed",
+            "below-threshold",
+            "over-cap",
+            "already-posted",
+            "deadline",
+            "budget",
+            "cancelled"
+          ]
+        },
+        "stage": {
+          "enum": [
+            "VERIFY",
+            "JUDGE"
+          ]
+        },
+        "subjectIds": {
+          "items": {
+            "pattern": "^(?:hyp_[0-9a-f]{16})$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "subjectIds",
+        "stage",
+        "reason"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "no-secrets: persisted DropRecord contains no protected text (redact first)"
+      ]
+    },
+    "EvalReport": {
+      "additionalProperties": false,
+      "description": "Micro-averaged P/R. Matching path-line-overlap@1 (synthetic smoke only): duplicates count as false positives and are also reported separately; F1 is null if P or R is null and 0 if P+R=0. Real-PR datasets are unscored (unadjudicated@1): metrics null with reason. Never a parity claim.",
+      "properties": {
+        "cases": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "caseId": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                "type": "string"
+              },
+              "comments": {
+                "maximum": 1000000000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "duplicates": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/TypedError"
+                  }
+                ]
+              },
+              "expect": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "enum": [
+                      "findings",
+                      "silence",
+                      "partial",
+                      "failed"
+                    ]
+                  }
+                ]
+              },
+              "expectationMet": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ]
+              },
+              "falseNegatives": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              },
+              "falsePositives": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              },
+              "incomplete": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "detail": {
+                      "maxLength": 2000,
+                      "type": "string"
+                    },
+                    "reason": {
+                      "enum": [
+                        "deadline",
+                        "soft-deadline",
+                        "budget",
+                        "cancelled",
+                        "verifier-failure",
+                        "agent-failure",
+                        "tool-calls-exhausted",
+                        "disabled-in-eval"
+                      ]
+                    },
+                    "stage": {
+                      "enum": [
+                        "INGEST",
+                        "PREPARE",
+                        "TRIAGE",
+                        "INVESTIGATE",
+                        "VERIFY",
+                        "JUDGE",
+                        "PUBLISH",
+                        "LEARN"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "stage",
+                    "reason"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              "latencyMs": {
+                "additionalProperties": false,
+                "properties": {
+                  "original": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "maximum": 1000000000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    ]
+                  },
+                  "replay": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "maximum": 1000000000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "original",
+                  "replay"
+                ],
+                "type": "object"
+              },
+              "runId": {
+                "pattern": "^(?:run_[0-9a-f]{16})$",
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "completed",
+                  "partial",
+                  "failed",
+                  "cancelled"
+                ]
+              },
+              "truePositives": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "caseId",
+              "runId",
+              "status",
+              "expect",
+              "expectationMet",
+              "truePositives",
+              "falsePositives",
+              "falseNegatives",
+              "duplicates",
+              "comments",
+              "incomplete",
+              "error",
+              "latencyMs"
+            ],
+            "type": "object"
+          },
+          "maxItems": 100000,
+          "type": "array"
+        },
+        "configDigest": {
+          "pattern": "^(?:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "contractsVersion": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cost": {
+          "additionalProperties": false,
+          "properties": {
+            "byBasis": {
+              "additionalProperties": false,
+              "properties": {
+                "estimated": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "records": {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "usdMicros": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "usdMicros"
+                  ],
+                  "type": "object"
+                },
+                "measured": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "records": {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "usdMicros": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "usdMicros"
+                  ],
+                  "type": "object"
+                },
+                "replayed": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "records": {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "usdMicros": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "usdMicros"
+                  ],
+                  "type": "object"
+                },
+                "synthetic": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "records": {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "usdMicros": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "usdMicros"
+                  ],
+                  "type": "object"
+                },
+                "unknown": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "records": {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "usdMicros": {
+                      "anyOf": [
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "records",
+                    "usdMicros"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "measured",
+                "estimated",
+                "unknown",
+                "replayed",
+                "synthetic"
+              ],
+              "type": "object"
+            },
+            "liveCalls": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "liveCalls",
+            "byBasis"
+          ],
+          "type": "object"
+        },
+        "coverage": {
+          "additionalProperties": false,
+          "properties": {
+            "cancelled": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "completed": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "expectationMet": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "failed": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "partial": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "completed",
+            "partial",
+            "failed",
+            "cancelled",
+            "expectationMet"
+          ],
+          "type": "object"
+        },
+        "createdAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "dataset": {
+          "additionalProperties": false,
+          "properties": {
+            "caseCount": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "suiteDigest": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "suiteId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "suiteVersion": {
+              "maximum": 1000000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "synthetic": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "suiteId",
+            "suiteVersion",
+            "suiteDigest",
+            "synthetic",
+            "caseCount"
+          ],
+          "type": "object"
+        },
+        "evalRunId": {
+          "pattern": "^(?:evr_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "latency": {
+          "additionalProperties": false,
+          "properties": {
+            "original": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "n": {
+                  "maximum": 1000000000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "p50": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "p95": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "n",
+                "p50",
+                "p95",
+                "max"
+              ],
+              "type": "object"
+            },
+            "replay": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "n": {
+                  "maximum": 1000000000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "p50": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "p95": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "n",
+                "p50",
+                "p95",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "original",
+            "replay"
+          ],
+          "type": "object"
+        },
+        "limitations": {
+          "items": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        },
+        "matching": {
+          "additionalProperties": false,
+          "properties": {
+            "rule": {
+              "enum": [
+                "path-line-overlap@1",
+                "unadjudicated@1"
+              ]
+            },
+            "scope": {
+              "enum": [
+                "synthetic-smoke",
+                "unscored"
+              ]
+            }
+          },
+          "required": [
+            "rule",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "metrics": {
+          "additionalProperties": false,
+          "properties": {
+            "f1": {
+              "additionalProperties": false,
+              "properties": {
+                "undefinedReason": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  ]
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "number"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "value",
+                "undefinedReason"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "derived-defined: value xor reason"
+              ]
+            },
+            "precision": {
+              "$ref": "#/$defs/Ratio"
+            },
+            "recall": {
+              "$ref": "#/$defs/Ratio"
+            }
+          },
+          "required": [
+            "precision",
+            "recall",
+            "f1"
+          ],
+          "type": "object"
+        },
+        "mode": {
+          "enum": [
+            "live",
+            "fresh-repeat",
+            "strict-replay",
+            "stage-replay"
+          ]
+        },
+        "profiles": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "digest": {
+                "pattern": "^(?:sha256:[0-9a-f]{64})$",
+                "type": "string"
+              },
+              "ref": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "ref",
+              "digest"
+            ],
+            "type": "object"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "promptVersions": {
+          "items": {
+            "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "replayOf": {
+          "pattern": "^(?:evr_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "schema": {
+          "const": "eval-report@1"
+        }
+      },
+      "required": [
+        "schema",
+        "evalRunId",
+        "mode",
+        "dataset",
+        "matching",
+        "configDigest",
+        "profiles",
+        "promptVersions",
+        "contractsVersion",
+        "cases",
+        "metrics",
+        "coverage",
+        "cost",
+        "latency",
+        "limitations"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "report-honesty: tallies, F1, coverage, matching scope and replay cost accounting recompute from the cases",
+        "no-secrets: persisted EvalReport contains no protected text (redact first)"
+      ]
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "description": "Pipeline-built evidence. Non-code kinds are copied from trusted tool.call results (severity.materialize_evidence), never taken from model output. resolved=true is set only by the pipeline/tool layer after the citation was checked against the pinned snapshot (snapshot.snapshot_resolver); code evidence without it is untrusted. ModelEvidence cannot carry it.",
+      "properties": {
+        "commit": {
+          "pattern": "^(?:snap:sha256:[0-9a-f]{64}|[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "excerpt": {
+          "maxLength": 8000,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "code",
+            "tool-result",
+            "history",
+            "test-run",
+            "analyzer"
+          ]
+        },
+        "lines": {
+          "items": {
+            "maximum": 10000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+          "type": "string"
+        },
+        "resolved": {
+          "const": true
+        },
+        "source": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "toolCallId": {
+          "pattern": "^(?:tool_[0-9a-f]{16})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "excerpt",
+        "source"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "evidence-shape: code needs path+lines+commit; others need toolCallId",
+        "no-secrets: persisted Evidence contains no protected text (redact first)"
+      ]
+    },
+    "EvidenceStrength": {
+      "description": "Evidence confidence derived from trusted traces (severity.evidence_strength), separate from impact and severity. Used for ranking, never minted by a model.",
+      "enum": [
+        "reproduced",
+        "analyzer",
+        "verifier-traced",
+        "cited",
+        "unsupported"
+      ]
+    },
+    "Finding": {
+      "additionalProperties": false,
+      "description": "Finding.id equals the Hypothesis id it came from: hypothesis_id(specialist, index, claim, location.path, location.line) of entry `index` in the output of sourceCallId, the INVESTIGATE investigator call that proposed it. verification.callIds are the distinct VERIFY verifier calls whose request names this id (ModelRequest.hypothesisId) and which confirmed it; severityBasis and verification.evidence are what those calls returned (check_finding_provenance). The verifier may cite the same pinned lines as the proposer.",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "claim": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^(?:hyp_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "impact": {
+          "$ref": "#/$defs/Impact"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "mechanism": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "modelFamily": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reach": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "runId": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "severityBasis": {
+          "additionalProperties": false,
+          "properties": {
+            "impact": {
+              "$ref": "#/$defs/Impact"
+            },
+            "reachable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "impact",
+            "reachable"
+          ],
+          "type": "object"
+        },
+        "sourceCallId": {
+          "pattern": "^(?:call_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "specialist": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "suspectedSeverity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "verification": {
+          "additionalProperties": false,
+          "properties": {
+            "callIds": {
+              "items": {
+                "pattern": "^(?:call_[0-9a-f]{16})$",
+                "type": "string"
+              },
+              "maxItems": 10,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "evidence": {
+              "items": {
+                "$ref": "#/$defs/Evidence"
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "notes": {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            "refutationAttempts": {
+              "maximum": 10,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "verdict": {
+              "const": "confirmed"
+            },
+            "verifierFamily": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "refutationAttempts",
+            "verifierFamily",
+            "notes",
+            "evidence",
+            "callIds"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "specialist",
+        "claim",
+        "category",
+        "suspectedSeverity",
+        "impact",
+        "location",
+        "evidence",
+        "modelFamily",
+        "sourceCallId",
+        "verification",
+        "severityBasis"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "independent-confirm: verifier calls are distinct from the proposer call; code evidence is snapshot-resolved",
+        "no-secrets: persisted Finding contains no protected text (redact first)"
+      ]
+    },
+    "Hypothesis": {
+      "additionalProperties": false,
+      "description": "confidence is never a gate or rank key on its own (42).",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "claim": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^(?:hyp_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "impact": {
+          "$ref": "#/$defs/Impact"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "mechanism": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "modelFamily": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "reach": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "runId": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "sourceCallId": {
+          "pattern": "^(?:call_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "specialist": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "suspectedSeverity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "specialist",
+        "claim",
+        "category",
+        "suspectedSeverity",
+        "impact",
+        "location",
+        "evidence",
+        "modelFamily"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "no-secrets: persisted Hypothesis contains no protected text (redact first)"
+      ]
+    },
+    "HypothesisDraft": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/Category"
+        },
+        "claim": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/ModelEvidence"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "impact": {
+          "$ref": "#/$defs/Impact"
+        },
+        "location": {
+          "$ref": "#/$defs/Location"
+        },
+        "mechanism": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "reach": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "suspectedSeverity": {
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "claim",
+        "category",
+        "suspectedSeverity",
+        "impact",
+        "location",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "Impact": {
+      "enum": [
+        "data-loss",
+        "auth-bypass",
+        "crash",
+        "security-exposure",
+        "corruption",
+        "incorrect-result",
+        "regression",
+        "breaking-change",
+        "ticket-unmet",
+        "performance",
+        "maintainability",
+        "none"
+      ]
+    },
+    "InvestigatorOutput": {
+      "additionalProperties": false,
+      "description": "Investigator role output schema. Empty list = nothing found.",
+      "properties": {
+        "hypotheses": {
+          "items": {
+            "$ref": "#/$defs/HypothesisDraft"
+          },
+          "maxItems": 20,
+          "type": "array"
+        }
+      },
+      "required": [
+        "hypotheses"
+      ],
+      "type": "object"
+    },
+    "JudgeOutput": {
+      "additionalProperties": false,
+      "description": "Wording only. Severity, dedup, citations, ranking and cap are deterministic.",
+      "properties": {
+        "comments": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "maxLength": 4000,
+                "minLength": 1,
+                "type": "string"
+              },
+              "findingIds": {
+                "items": {
+                  "pattern": "^(?:hyp_[0-9a-f]{16})$",
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              },
+              "suggestion": {
+                "maxLength": 8000,
+                "type": "string"
+              },
+              "title": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "findingIds",
+              "title",
+              "body"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
+        }
+      },
+      "required": [
+        "comments"
+      ],
+      "type": "object"
+    },
+    "Location": {
+      "additionalProperties": false,
+      "properties": {
+        "endLine": {
+          "maximum": 10000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "line": {
+          "maximum": 10000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "location-order: endLine >= line"
+      ]
+    },
+    "ModelEvidence": {
+      "description": "What a model may cite: a code citation (checked against the snapshot) or a reference to a logged tool call. Models cannot assert analyzer/test-run/history kinds.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64}|[0-9a-f]{40})$",
+              "type": "string"
+            },
+            "excerpt": {
+              "maxLength": 8000,
+              "type": "string"
+            },
+            "kind": {
+              "const": "code"
+            },
+            "lines": {
+              "items": {
+                "maximum": 10000000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path",
+            "lines",
+            "commit",
+            "excerpt"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "lines-order: start <= end"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "tool-ref"
+            },
+            "note": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "toolCallId": {
+              "pattern": "^(?:tool_[0-9a-f]{16})$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "toolCallId"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModelProfile": {
+      "additionalProperties": false,
+      "description": "Immutable; a change is a new version. Referenced as '<id>@<version>'.",
+      "properties": {
+        "id": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "roles": {
+          "additionalProperties": false,
+          "properties": {
+            "investigator": {
+              "additionalProperties": false,
+              "description": "resolved=false (e.g. exact Terra id pending) blocks live use. No fallbacks in Stage 0A: an unapproved fallback is a typed failure.",
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxRetries": {
+                      "maximum": 3,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outputSchema": {
+                  "enum": [
+                    "InvestigatorOutput",
+                    "VerifierOutput",
+                    "JudgeOutput"
+                  ]
+                },
+                "params": {},
+                "price": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cacheWriteInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "cachedInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "inputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "outputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "priceVersion": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "priceVersion",
+                        "inputPerMTokUsdMicros",
+                        "cachedInputPerMTokUsdMicros",
+                        "cacheWriteInputPerMTokUsdMicros",
+                        "outputPerMTokUsdMicros"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "enum": [
+                    "anthropic",
+                    "openai",
+                    "synthetic"
+                  ]
+                },
+                "resolved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "role-pinning: pinned, runtime-eligible, priced"
+              ]
+            },
+            "judge": {
+              "additionalProperties": false,
+              "description": "resolved=false (e.g. exact Terra id pending) blocks live use. No fallbacks in Stage 0A: an unapproved fallback is a typed failure.",
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxRetries": {
+                      "maximum": 3,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outputSchema": {
+                  "enum": [
+                    "InvestigatorOutput",
+                    "VerifierOutput",
+                    "JudgeOutput"
+                  ]
+                },
+                "params": {},
+                "price": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cacheWriteInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "cachedInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "inputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "outputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "priceVersion": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "priceVersion",
+                        "inputPerMTokUsdMicros",
+                        "cachedInputPerMTokUsdMicros",
+                        "cacheWriteInputPerMTokUsdMicros",
+                        "outputPerMTokUsdMicros"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "enum": [
+                    "anthropic",
+                    "openai",
+                    "synthetic"
+                  ]
+                },
+                "resolved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "role-pinning: pinned, runtime-eligible, priced"
+              ]
+            },
+            "verifier": {
+              "additionalProperties": false,
+              "description": "resolved=false (e.g. exact Terra id pending) blocks live use. No fallbacks in Stage 0A: an unapproved fallback is a typed failure.",
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxRetries": {
+                      "maximum": 3,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outputSchema": {
+                  "enum": [
+                    "InvestigatorOutput",
+                    "VerifierOutput",
+                    "JudgeOutput"
+                  ]
+                },
+                "params": {},
+                "price": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cacheWriteInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "cachedInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "inputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "outputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "priceVersion": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "priceVersion",
+                        "inputPerMTokUsdMicros",
+                        "cachedInputPerMTokUsdMicros",
+                        "cacheWriteInputPerMTokUsdMicros",
+                        "outputPerMTokUsdMicros"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "enum": [
+                    "anthropic",
+                    "openai",
+                    "synthetic"
+                  ]
+                },
+                "resolved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "role-pinning: pinned, runtime-eligible, priced"
+              ]
+            }
+          },
+          "required": [
+            "investigator",
+            "verifier",
+            "judge"
+          ],
+          "type": "object"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "triage": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "maximum": 999999,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "tier",
+        "triage",
+        "roles"
+      ],
+      "type": "object"
+    },
+    "ModelRequest": {
+      "additionalProperties": false,
+      "description": "Redacted before hashing. Must not contain run ids or timestamps. requestHash = canonical.request_hash(request), which enforces both. hypothesisId names the hypothesis a verifier request checks and is covered by requestHash; a verifier call without it cannot confirm a Finding (check_finding_provenance). Other calls omit it.",
+      "properties": {
+        "hypothesisId": {
+          "pattern": "^(?:hyp_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "maxLength": 2000000,
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "system",
+                  "user",
+                  "assistant",
+                  "tool"
+                ]
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
+        },
+        "model": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "outputSchema": {
+          "enum": [
+            "InvestigatorOutput",
+            "VerifierOutput",
+            "JudgeOutput"
+          ]
+        },
+        "params": {},
+        "profile": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+          "type": "string"
+        },
+        "promptVersion": {
+          "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "anthropic",
+            "openai",
+            "synthetic"
+          ]
+        },
+        "role": {
+          "enum": [
+            "investigator",
+            "verifier",
+            "judge"
+          ]
+        },
+        "tools": {
+          "items": {},
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "profile",
+        "role",
+        "promptVersion",
+        "outputSchema",
+        "params",
+        "messages",
+        "tools"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "request-subject: hypothesisId only on verifier requests",
+        "no-secrets: persisted ModelRequest contains no protected text (redact first)"
+      ]
+    },
+    "ModelResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "output": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {}
+          ]
+        },
+        "providerRequestId": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "rawText": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maxLength": 2000000,
+              "type": "string"
+            }
+          ]
+        },
+        "resolvedModel": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "invalid-output"
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "required": [
+        "status",
+        "resolvedModel",
+        "output",
+        "rawText",
+        "usage"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "ok-has-output: ok => output",
+        "no-secrets: persisted ModelResponse contains no protected text (redact first)"
+      ]
+    },
+    "Plan": {
+      "additionalProperties": false,
+      "description": "Stage 0A: version 1, tier standard, triage 'fixed-rule@1' (no TRIAGE LLM).",
+      "properties": {
+        "authorFamily": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "modelProfile": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+          "type": "string"
+        },
+        "reasons": {
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "specialists": {
+          "items": {
+            "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "triage": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "version": {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "tier",
+        "specialists",
+        "budget",
+        "modelProfile",
+        "triage",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "Ratio": {
+      "additionalProperties": false,
+      "properties": {
+        "denominator": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "numerator": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "undefinedReason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            }
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "required": [
+        "value",
+        "numerator",
+        "denominator",
+        "undefinedReason"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "ratio-defined: undefined/unscored values are null with reason"
+      ]
+    },
+    "ReviewRun": {
+      "additionalProperties": false,
+      "description": "id = run_id(idempotencyKey, attempt). Duplicate host events return the existing run; resume keeps the id; manual rerun = same key, attempt+1. access is always read-only: no target writes, no target execution, no posting.",
+      "properties": {
+        "access": {
+          "const": "read-only@1"
+        },
+        "attempt": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "baseSnapshotId": {
+          "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "configSnapshotId": {
+          "pattern": "^(?:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "endedAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "error": {
+          "$ref": "#/$defs/TypedError"
+        },
+        "evalCaseId": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "evalRunId": {
+          "pattern": "^(?:evr_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "fromStage": {
+          "enum": [
+            "TRIAGE",
+            "INVESTIGATE",
+            "VERIFY",
+            "JUDGE",
+            "PUBLISH"
+          ]
+        },
+        "headSha": {
+          "pattern": "^(?:[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "headSnapshotId": {
+          "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "idempotencyKey": {
+          "pattern": "^(?:idem:(?:pr|local|eval):[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "incomplete": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "deadline",
+                  "soft-deadline",
+                  "budget",
+                  "cancelled",
+                  "verifier-failure",
+                  "agent-failure",
+                  "tool-calls-exhausted",
+                  "disabled-in-eval"
+                ]
+              },
+              "stage": {
+                "enum": [
+                  "INGEST",
+                  "PREPARE",
+                  "TRIAGE",
+                  "INVESTIGATE",
+                  "VERIFY",
+                  "JUDGE",
+                  "PUBLISH",
+                  "LEARN"
+                ]
+              }
+            },
+            "required": [
+              "stage",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "mode": {
+          "enum": [
+            "live",
+            "fresh-repeat",
+            "strict-replay",
+            "stage-replay"
+          ]
+        },
+        "planVersion": {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "prNumber": {
+          "maximum": 1000000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "profile": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+          "type": "string"
+        },
+        "repeat": {
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replayOf": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "repo": {
+          "description": "GitHub 'Owner/Name' with display case preserved (identity is case-folded, canonical.repo_key), or an opaque lowercase slug for synthetic/local fixtures.",
+          "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\\.{1,2}$)[A-Za-z0-9._-]{1,100}|[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "rerunOf": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "pull_request",
+            "local"
+          ]
+        },
+        "spendAuthorization": {
+          "pattern": "^(?:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "startedAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "partial",
+            "superseded",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "trigger": {
+          "enum": [
+            "host-event",
+            "manual-rerun",
+            "eval",
+            "cli"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "idempotencyKey",
+        "attempt",
+        "trigger",
+        "source",
+        "mode",
+        "access",
+        "repo",
+        "baseSnapshotId",
+        "headSnapshotId",
+        "profile",
+        "planVersion",
+        "configSnapshotId",
+        "status",
+        "incomplete"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "run-rules: source, rerun, eval, replay, auth and status rules",
+        "run-identity: id, key and rerunOf recompute from the run's fields"
+      ]
+    },
+    "Severity": {
+      "description": "P0 ships a bug/security hole; P1 likely bug; P2 worthwhile improvement. Ceilings are executable in severity.py.",
+      "enum": [
+        "P0",
+        "P1",
+        "P2"
+      ]
+    },
+    "SnapshotEntry": {
+      "additionalProperties": false,
+      "description": "symlink entries hash the link target text; links are never followed.",
+      "properties": {
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^(?:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "size": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "enum": [
+            "file",
+            "executable",
+            "symlink"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "type",
+        "size",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "SnapshotManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/SnapshotEntry"
+          },
+          "maxItems": 200000,
+          "type": "array"
+        },
+        "gitCommit": {
+          "pattern": "^(?:[0-9a-f]{40})$",
+          "type": "string"
+        },
+        "schema": {
+          "const": "snapshot-manifest@1"
+        },
+        "snapshotId": {
+          "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema",
+        "snapshotId",
+        "entries"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "snapshot-digest: sorted unique entries, none under a file/symlink, id = digest"
+      ]
+    },
+    "SpendAuthorization": {
+      "additionalProperties": false,
+      "description": "Trusted, operator-issued, loaded by the gateway from out-of-band config. Never read from repo, case, PR or model content. ReviewRun.spendAuthorization is its digest; budget.check_spend_authorization binds it to profile and Plan.",
+      "properties": {
+        "expiresAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "issuedBy": {
+          "const": "operator"
+        },
+        "maxUsdMicrosPerRun": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxUsdMicrosTotal": {
+          "maximum": 1000000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "providers": {
+          "items": {
+            "enum": [
+              "anthropic",
+              "openai",
+              "synthetic"
+            ]
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "purpose": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "schema": {
+          "const": "spend-authorization@1"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "issuedBy",
+        "providers",
+        "models",
+        "maxUsdMicrosPerRun",
+        "maxUsdMicrosTotal",
+        "expiresAt",
+        "purpose"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "auth-bounds: per-run <= total; runtime models only"
+      ]
+    },
+    "StageArtifact": {
+      "additionalProperties": false,
+      "description": "inputDigest = canonical.artifact_digest(previous stage artifact); null for INGEST. A stage reads only the previous artifact, the run and the Plan.",
+      "properties": {
+        "costRecordIds": {
+          "items": {
+            "pattern": "^(?:cost_[0-9a-f]{16})$",
+            "type": "string"
+          },
+          "maxItems": 10000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "error": {
+          "$ref": "#/$defs/TypedError"
+        },
+        "incomplete": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "deadline",
+                  "soft-deadline",
+                  "budget",
+                  "cancelled",
+                  "verifier-failure",
+                  "agent-failure",
+                  "tool-calls-exhausted",
+                  "disabled-in-eval"
+                ]
+              },
+              "stage": {
+                "enum": [
+                  "INGEST",
+                  "PREPARE",
+                  "TRIAGE",
+                  "INVESTIGATE",
+                  "VERIFY",
+                  "JUDGE",
+                  "PUBLISH",
+                  "LEARN"
+                ]
+              }
+            },
+            "required": [
+              "stage",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "inputDigest": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            }
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/StagePayload"
+        },
+        "planVersion": {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "schema": {
+          "const": "stage-artifact@1"
+        },
+        "stage": {
+          "enum": [
+            "INGEST",
+            "PREPARE",
+            "TRIAGE",
+            "INVESTIGATE",
+            "VERIFY",
+            "JUDGE",
+            "PUBLISH",
+            "LEARN"
+          ]
+        },
+        "status": {
+          "enum": [
+            "completed",
+            "partial",
+            "skipped",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "runId",
+        "stage",
+        "planVersion",
+        "status",
+        "inputDigest",
+        "payload",
+        "costRecordIds"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "artifact-stage: payload/status consistency",
+        "no-secrets: persisted StageArtifact contains no protected text (redact first)"
+      ]
+    },
+    "StagePayload": {
+      "description": "PUBLISH has one sink, local-file: reviews are read-only and never post.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "run": {
+              "$ref": "#/$defs/ReviewRun"
+            },
+            "stage": {
+              "const": "INGEST"
+            }
+          },
+          "required": [
+            "stage",
+            "run"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseSnapshotId": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "diffDigest": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "additions": {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "deletions": {
+                    "maximum": 1000000000,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "oldPath": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                    "type": "string"
+                  },
+                  "path": {
+                    "maxLength": 1024,
+                    "minLength": 1,
+                    "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed"
+                    ]
+                  }
+                },
+                "required": [
+                  "path",
+                  "status",
+                  "additions",
+                  "deletions"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100000,
+              "type": "array"
+            },
+            "headSnapshotId": {
+              "pattern": "^(?:snap:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "stage": {
+              "const": "PREPARE"
+            }
+          },
+          "required": [
+            "stage",
+            "baseSnapshotId",
+            "headSnapshotId",
+            "diffDigest",
+            "files"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "plan": {
+              "$ref": "#/$defs/Plan"
+            },
+            "stage": {
+              "const": "TRIAGE"
+            }
+          },
+          "required": [
+            "stage",
+            "plan"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agents": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "agentId": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                    "type": "string"
+                  },
+                  "error": {
+                    "$ref": "#/$defs/TypedError"
+                  },
+                  "specialist": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "completed",
+                      "failed",
+                      "timeout",
+                      "cancelled",
+                      "budget"
+                    ]
+                  }
+                },
+                "required": [
+                  "agentId",
+                  "specialist",
+                  "status"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "hypotheses": {
+              "items": {
+                "$ref": "#/$defs/Hypothesis"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
+            "stage": {
+              "const": "INVESTIGATE"
+            }
+          },
+          "required": [
+            "stage",
+            "hypotheses",
+            "agents"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "drops": {
+              "items": {
+                "$ref": "#/$defs/DropRecord"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
+            "findings": {
+              "items": {
+                "$ref": "#/$defs/Finding"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
+            "stage": {
+              "const": "VERIFY"
+            },
+            "verifications": {
+              "items": {
+                "$ref": "#/$defs/VerificationRecord"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            }
+          },
+          "required": [
+            "stage",
+            "findings",
+            "verifications",
+            "drops"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "comments": {
+              "items": {
+                "$ref": "#/$defs/Comment"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
+            "drops": {
+              "items": {
+                "$ref": "#/$defs/DropRecord"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
+            "stage": {
+              "const": "JUDGE"
+            }
+          },
+          "required": [
+            "stage",
+            "comments",
+            "drops"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commentIds": {
+              "items": {
+                "pattern": "^(?:cmt_[0-9a-f]{16})$",
+                "type": "string"
+              },
+              "maxItems": 1000,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+              "type": "string"
+            },
+            "sink": {
+              "enum": [
+                "local-file"
+              ]
+            },
+            "stage": {
+              "const": "PUBLISH"
+            },
+            "summary": {
+              "maxLength": 8000,
+              "type": "string"
+            }
+          },
+          "required": [
+            "stage",
+            "sink",
+            "path",
+            "commentIds",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "stage": {
+              "const": "LEARN"
+            }
+          },
+          "required": [
+            "stage",
+            "enabled"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SuiteManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "cases": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                "type": "string"
+              },
+              "input": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              },
+              "labels": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "input",
+              "labels"
+            ],
+            "type": "object"
+          },
+          "maxItems": 100000,
+          "minItems": 1,
+          "type": "array"
+        },
+        "description": {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "matching": {
+          "description": "path-line-overlap@1 is SYNTHETIC SMOKE ONLY: it ignores the claim and its grade. Real PR datasets use unadjudicated@1 until a human-adjudicated rule exists.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "lineTolerance": {
+                  "maximum": 20,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "rule": {
+                  "const": "path-line-overlap@1"
+                }
+              },
+              "required": [
+                "rule",
+                "lineTolerance"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "rule": {
+                  "const": "unadjudicated@1"
+                }
+              },
+              "required": [
+                "rule"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "schema": {
+          "const": "suite@1"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "version": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "version",
+        "synthetic",
+        "description",
+        "matching",
+        "cases"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "suite-separation: unique ids; labels/ separation; smoke-only overlap"
+      ]
+    },
+    "Tier": {
+      "enum": [
+        "standard",
+        "deep",
+        "max"
+      ]
+    },
+    "ToolResult": {
+      "additionalProperties": false,
+      "properties": {
+        "completeness": {
+          "enum": [
+            "exact",
+            "approximate"
+          ]
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 500,
+          "type": "array"
+        },
+        "notice": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "partial",
+            "empty",
+            "error",
+            "denied",
+            "unavailable"
+          ]
+        },
+        "truncated": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "shown": {
+                  "maximum": 1000000000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "total": {
+                  "maximum": 1000000000,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "shown",
+                "total"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "evidence",
+        "completeness",
+        "truncated",
+        "notice"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "denied-silent: denied returns no evidence (no existence hint)",
+        "no-secrets: persisted ToolResult contains no protected text (redact first)"
+      ]
+    },
+    "TraceEvent": {
+      "description": "One JSON object per line in trace.jsonl. Whole-file rules: entities.validate_trace.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "run": {
+              "$ref": "#/$defs/ReviewRun"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "run.start"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "run"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "type": {
+              "const": "stage.start"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifactDigest": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "status": {
+              "enum": [
+                "completed",
+                "partial",
+                "skipped",
+                "failed"
+              ]
+            },
+            "type": {
+              "const": "stage.end"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "status"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "attempt": {
+              "maximum": 10,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "callId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "costRecordId": {
+              "pattern": "^(?:cost_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "latencyMs": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ordinal": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "redactions": {
+              "description": "map patternId -> count applied before persistence"
+            },
+            "repairOf": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "request": {
+              "$ref": "#/$defs/ModelRequest"
+            },
+            "requestHash": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/ModelResponse"
+                }
+              ]
+            },
+            "role": {
+              "enum": [
+                "investigator",
+                "verifier",
+                "judge"
+              ]
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "type": {
+              "const": "model.call"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "callId",
+            "stage",
+            "role",
+            "agentId",
+            "ordinal",
+            "attempt",
+            "requestHash",
+            "request",
+            "response",
+            "costRecordId",
+            "redactions"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "call-outcome: response xor error; callId, requestHash and costRecordId recompute from the payload; request role and outputSchema match the event role",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "args": {},
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "costRecordId": {
+              "pattern": "^(?:cost_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "latencyMs": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ordinal": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "redactions": {
+              "description": "map patternId -> count applied before persistence"
+            },
+            "result": {
+              "$ref": "#/$defs/ToolResult"
+            },
+            "resultHash": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "tool": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "toolCallId": {
+              "pattern": "^(?:tool_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "type": {
+              "const": "tool.call"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "toolCallId",
+            "stage",
+            "agentId",
+            "ordinal",
+            "tool",
+            "args",
+            "resultHash",
+            "result",
+            "redactions"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "tool-identity: toolCallId, resultHash and costRecordId recompute from the payload",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "record": {
+              "$ref": "#/$defs/CostRecord"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "cost"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "record"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifactDigest": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "planVersion": {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "type": {
+              "const": "checkpoint"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "planVersion",
+            "artifactDigest"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "error"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "error"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "incomplete": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "detail": {
+                    "maxLength": 2000,
+                    "type": "string"
+                  },
+                  "reason": {
+                    "enum": [
+                      "deadline",
+                      "soft-deadline",
+                      "budget",
+                      "cancelled",
+                      "verifier-failure",
+                      "agent-failure",
+                      "tool-calls-exhausted",
+                      "disabled-in-eval"
+                    ]
+                  },
+                  "stage": {
+                    "enum": [
+                      "INGEST",
+                      "PREPARE",
+                      "TRIAGE",
+                      "INVESTIGATE",
+                      "VERIFY",
+                      "JUDGE",
+                      "PUBLISH",
+                      "LEARN"
+                    ]
+                  }
+                },
+                "required": [
+                  "stage",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "queued",
+                "running",
+                "completed",
+                "partial",
+                "superseded",
+                "cancelled",
+                "failed"
+              ]
+            },
+            "type": {
+              "const": "run.end"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "status",
+            "incomplete"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        }
+      ]
+    },
+    "TypedError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "replay-miss",
+            "replay-mismatch",
+            "live-calls-disabled",
+            "model-unresolved",
+            "schema-invalid",
+            "repair-exhausted",
+            "provider-error",
+            "provider-timeout",
+            "budget-exhausted",
+            "deadline-exceeded",
+            "cancelled",
+            "tool-denied",
+            "path-escape",
+            "invalid-citation",
+            "contract-violation",
+            "internal"
+          ]
+        },
+        "detail": {},
+        "message": {
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "stage": {
+          "enum": [
+            "INGEST",
+            "PREPARE",
+            "TRIAGE",
+            "INVESTIGATE",
+            "VERIFY",
+            "JUDGE",
+            "PUBLISH",
+            "LEARN"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "no-secrets: persisted TypedError contains no protected text (redact first)"
+      ]
+    },
+    "Usage": {
+      "additionalProperties": false,
+      "description": "null means unknown, never zero.",
+      "properties": {
+        "cacheWriteInputTokens": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 10000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "cachedInputTokens": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 10000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "outputTokens": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 10000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "reasoningTokens": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 10000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        },
+        "uncachedInputTokens": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "maximum": 10000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ]
+        }
+      },
+      "required": [
+        "uncachedInputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "reasoningTokens"
+      ],
+      "type": "object"
+    },
+    "VerificationRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "callIds": {
+          "items": {
+            "pattern": "^(?:call_[0-9a-f]{16})$",
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "error": {
+          "$ref": "#/$defs/TypedError"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "hypothesisId": {
+          "pattern": "^(?:hyp_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "notes": {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "confirmed",
+            "refuted",
+            "uncertain",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "hypothesisId",
+        "verdict",
+        "evidence",
+        "callIds"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "failed-has-error: verdict failed carries a TypedError",
+        "no-secrets: persisted VerificationRecord contains no protected text (redact first)"
+      ]
+    },
+    "VerifierOutput": {
+      "additionalProperties": false,
+      "description": "An uncited or unresolvable refutation is converted to uncertain by VERIFY (33).",
+      "properties": {
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/ModelEvidence"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "impact": {
+          "$ref": "#/$defs/Impact"
+        },
+        "notes": {
+          "maxLength": 4000,
+          "type": "string"
+        },
+        "reachable": {
+          "type": "boolean"
+        },
+        "verdict": {
+          "enum": [
+            "confirmed",
+            "refuted",
+            "uncertain"
+          ]
+        }
+      },
+      "required": [
+        "verdict",
+        "reachable",
+        "impact",
+        "evidence",
+        "notes"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "confirm-cited: confirmed requires evidence"
+      ]
+    }
+  },
+  "$id": "reviewer-contracts-s0a-contracts@5",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from reviewer/contracts/entities.py; do not edit by hand. The Python validator is authoritative and stricter than this bundle: (1) x-invariants (cross-field rules) are enforced only in Python; (2) Python rejects integer-valued floats such as 1.0 where JSON Schema 'integer' accepts them; (3) nesting depth (64), node/size limits, duplicate keys and lone surrogates cannot be expressed here; use reviewer.contracts.loads_strict; (4) every pattern uses the Python/ECMA-262 common subset ([0-9], no \\d) and is anchored with ^(?:...)$, while Python uses fullmatch. Canonical hashes are recomputed only by Python (see canonical.py).",
+  "title": "Reviewer Stage 0A contracts"
+}

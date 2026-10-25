@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c01/base",
+    "snapshotId": "snap:sha256:70294fda572c518d2e399ad07feb67bc847475927948bb8ab7380b272b0fac60"
+  },
+  "head": {
+    "root": "cases/smoke-c01/head",
+    "snapshotId": "snap:sha256:a21a9b1ece771267b0364a8c5b342986a47cf32d995eecf23076024ff1229fac"
+  },
+  "id": "smoke-c01",
+  "pr": {
+    "body": "Refactor the auth helper.",
+    "title": "Simplify key check"
+  },
+  "repo": "fixture-auth",
+  "schema": "case-input@1",
+  "synthetic": true
+}

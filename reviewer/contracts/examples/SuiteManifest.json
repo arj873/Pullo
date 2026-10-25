@@ -1,0 +1,18 @@
+{
+  "cases": [
+    {
+      "id": "auth-bypass-001",
+      "input": "cases/auth-bypass-001/input.json",
+      "labels": "labels/auth-bypass-001.json"
+    }
+  ],
+  "description": "Synthetic Stage 0A smoke suite (shape example).",
+  "id": "smoke",
+  "matching": {
+    "lineTolerance": 3,
+    "rule": "path-line-overlap@1"
+  },
+  "schema": "suite@1",
+  "synthetic": true,
+  "version": 1
+}

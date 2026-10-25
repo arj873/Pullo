@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c06/base",
+    "snapshotId": "snap:sha256:3cd5b9010c55c36b3d09a1be135561e35584019cc1bda24b574f45e8038141cf"
+  },
+  "head": {
+    "root": "cases/smoke-c06/head",
+    "snapshotId": "snap:sha256:4301b0a7c584dcf4f1a8724f407dae8354a28c25ee28e25139120fb96c800e13"
+  },
+  "id": "smoke-c06",
+  "pr": {
+    "body": "Default to no timeout.",
+    "title": "Change default timeout"
+  },
+  "repo": "fixture-config",
+  "schema": "case-input@1",
+  "synthetic": true
+}

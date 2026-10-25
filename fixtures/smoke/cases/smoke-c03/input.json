@@ -1,0 +1,18 @@
+{
+  "base": {
+    "root": "cases/smoke-c03/base",
+    "snapshotId": "snap:sha256:4512d579e5bc425c9b27fb3c4e5cc06a157dc76e21760bdf5760a6ff0502065f"
+  },
+  "head": {
+    "root": "cases/smoke-c03/head",
+    "snapshotId": "snap:sha256:bd2bfc6ad7156d2f220a7a39bff03eeb7220b3dd46d475a6cbbe2dc0f7bb6e63"
+  },
+  "id": "smoke-c03",
+  "pr": {
+    "body": "Tune cache eviction.",
+    "title": "Relax eviction check"
+  },
+  "repo": "fixture-cache",
+  "schema": "case-input@1",
+  "synthetic": true
+}

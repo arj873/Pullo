@@ -1,0 +1,17 @@
+{
+  "bugs": [
+    {
+      "category": "security",
+      "id": "bug-1",
+      "lines": [
+        10,
+        12
+      ],
+      "path": "src/auth.py",
+      "severity": "P0"
+    }
+  ],
+  "caseId": "auth-bypass-001",
+  "expect": "findings",
+  "schema": "case-labels@1"
+}

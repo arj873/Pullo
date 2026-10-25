@@ -1,0 +1,43 @@
+{
+  "cases": [
+    {
+      "id": "smoke-c01",
+      "input": "cases/smoke-c01/input.json",
+      "labels": "labels/smoke-c01.json"
+    },
+    {
+      "id": "smoke-c02",
+      "input": "cases/smoke-c02/input.json",
+      "labels": "labels/smoke-c02.json"
+    },
+    {
+      "id": "smoke-c03",
+      "input": "cases/smoke-c03/input.json",
+      "labels": "labels/smoke-c03.json"
+    },
+    {
+      "id": "smoke-c04",
+      "input": "cases/smoke-c04/input.json",
+      "labels": "labels/smoke-c04.json"
+    },
+    {
+      "id": "smoke-c05",
+      "input": "cases/smoke-c05/input.json",
+      "labels": "labels/smoke-c05.json"
+    },
+    {
+      "id": "smoke-c06",
+      "input": "cases/smoke-c06/input.json",
+      "labels": "labels/smoke-c06.json"
+    }
+  ],
+  "description": "Synthetic Stage 0A smoke suite: positive, bug-free, duplicate, malformed-output repair, verifier-failure and timeout cases. Mechanics only; not a quality benchmark, and never used for real PRs. Fixture excerpts were validated under redact@3.",
+  "id": "smoke",
+  "matching": {
+    "lineTolerance": 3,
+    "rule": "path-line-overlap@1"
+  },
+  "schema": "suite@1",
+  "synthetic": true,
+  "version": 1
+}

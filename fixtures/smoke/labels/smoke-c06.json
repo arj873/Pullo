@@ -1,0 +1,18 @@
+{
+  "bugs": [
+    {
+      "category": "bug",
+      "id": "smoke-config-no-timeout",
+      "lines": [
+        5,
+        5
+      ],
+      "path": "src/config.py",
+      "severity": "P1"
+    }
+  ],
+  "caseId": "smoke-c06",
+  "expect": "failed",
+  "expectReason": "provider-timeout",
+  "schema": "case-labels@1"
+}

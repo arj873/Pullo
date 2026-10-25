@@ -1,0 +1,91 @@
+{
+  "entries": [
+    {
+      "agentId": "generalist",
+      "attempt": 0,
+      "ordinal": 0,
+      "response": {
+        "output": {
+          "hypotheses": [
+            {
+              "category": "bug",
+              "claim": "to_cents truncates instead of rounding",
+              "evidence": [
+                {
+                  "commit": "snap:sha256:27e49308383d93a23b454c73942e468b16e8c7e482d6254d85bd42d2c0447adc",
+                  "excerpt": "    return int(amount * 100)",
+                  "kind": "code",
+                  "lines": [
+                    5,
+                    5
+                  ],
+                  "path": "src/money.py"
+                }
+              ],
+              "impact": "incorrect-result",
+              "location": {
+                "endLine": 5,
+                "line": 5,
+                "path": "src/money.py"
+              },
+              "mechanism": "int() drops the fraction of amount*100.",
+              "suspectedSeverity": "P1"
+            }
+          ]
+        },
+        "rawText": null,
+        "resolvedModel": "synthetic-fixture",
+        "status": "ok",
+        "usage": {
+          "cacheWriteInputTokens": null,
+          "cachedInputTokens": null,
+          "outputTokens": null,
+          "reasoningTokens": null,
+          "uncachedInputTokens": null
+        }
+      },
+      "role": "investigator",
+      "stage": "INVESTIGATE"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 0,
+      "error": {
+        "code": "provider-error",
+        "message": "scripted verifier provider error",
+        "retryable": true,
+        "stage": "VERIFY"
+      },
+      "ordinal": 0,
+      "role": "verifier",
+      "stage": "VERIFY"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 1,
+      "error": {
+        "code": "provider-error",
+        "message": "scripted verifier provider error",
+        "retryable": true,
+        "stage": "VERIFY"
+      },
+      "ordinal": 0,
+      "role": "verifier",
+      "stage": "VERIFY"
+    },
+    {
+      "agentId": "verifier",
+      "attempt": 2,
+      "error": {
+        "code": "provider-error",
+        "message": "scripted verifier provider error",
+        "retryable": true,
+        "stage": "VERIFY"
+      },
+      "ordinal": 0,
+      "role": "verifier",
+      "stage": "VERIFY"
+    }
+  ],
+  "schemaVersion": 1
+}
