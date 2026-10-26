@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 
-import finalreview_support as F
+from tests.contract_review import finalreview_support as F
 from reviewer.contracts import canonical as C
 
 STAGES = {"investigator": "INVESTIGATE", "verifier": "VERIFY"}

@@ -15,8 +15,7 @@ import threading
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _support import Base, g  # noqa: E402
+from tests.repoimport_review._support import Base, g  # noqa: E402
 
 from reviewer.contracts.canonical import canonical_json, digest  # noqa: E402
 from reviewer.contracts.redaction import redact  # noqa: E402

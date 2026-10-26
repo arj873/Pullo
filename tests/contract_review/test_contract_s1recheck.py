@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import unittest
 
-import finalreview_support as F
-import turn_support as T
+from tests.contract_review import finalreview_support as F
+from tests.contract_review import turn_support as T
 from reviewer.contracts import check_finding_provenance, check_turn_trace, citable_tool_calls, turn_chain
 from reviewer.contracts import usable_output, validate_trace
 

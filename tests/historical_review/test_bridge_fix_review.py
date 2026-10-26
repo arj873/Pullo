@@ -15,7 +15,7 @@ from pathlib import Path
 
 from reviewer.historical import (BridgeError, capture_bridge_pins, check_pins, discard, load_pins, materialize, write_pins)
 from reviewer.tools import ToolSession
-from test_historical_review import AT, CORPUS, CTX_CASE, REAL, Env, Tmp, make_writable
+from tests.historical_review.test_historical_review import AT, CORPUS, CTX_CASE, HAVE_CORPUS, REAL, Env, Tmp, make_writable
 
 
 class SealedDiscard(Env):
@@ -312,6 +312,7 @@ class TypedPins(Env):
         self.assertEqual(b.record["origin"], self.pins["origin"])
 
 
+@unittest.skipUnless(HAVE_CORPUS, "optional private input absent: fixtures/historical (unpublished historical corpus)")
 class PartialViews(Tmp):
     """All 9 real cases through the fixed `HistoricalBridge.view()`; 1347's two head-only context files are never A/D."""
     @classmethod

@@ -19,7 +19,7 @@ import copy
 import random
 import unittest
 
-import finalreview_support as F
+from tests.contract_review import finalreview_support as F
 from reviewer.contracts import canonical as C
 from reviewer.contracts import check_finding_provenance, validate, validate_trace
 from reviewer.contracts import redaction as R

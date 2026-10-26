@@ -26,8 +26,8 @@ import socket
 import unittest
 from unittest import mock
 
-import finalreview_support as F
-from test_contract_finalreview import ScenarioCase, provenance
+from tests.contract_review import finalreview_support as F
+from tests.contract_review.test_contract_finalreview import ScenarioCase, provenance
 from reviewer.contracts import canonical as C
 from reviewer.contracts import check_finding_provenance, citable_tool_calls, validate
 from reviewer.contracts import severity as S
