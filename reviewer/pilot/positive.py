@@ -20,6 +20,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from reviewer.config import ConfigError, EffectiveConfig, resolve_config
 from reviewer.contracts import require
 from reviewer.contracts.canonical import canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
 from reviewer.contracts.snapshot import SnapshotError, build_manifest
@@ -33,7 +34,7 @@ from reviewer.runtime.openrouter import OpenRouterProvider
 from reviewer.runtime.turn_canary import Refused, open_state
 
 from .launcher import REPO, PilotError, _Unused, _force_cleanup, gateway_costs, ledger_costs, utc_now
-from .profile import MODEL
+
 from .repository import (BOOK_NAME, RepositoryError, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, _check_ceiling,
                          _best_effort_report, _providers, _remove_if_empty, _request_facts, make_out, write_report)
 from .repository_profile import repository_plan, repository_policy, repository_profile
@@ -68,6 +69,7 @@ class PositiveOptions:
     confirm_live: bool = False
     replay_trace: str | None = None
     trace_digest: str | None = None
+    config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,8 +180,16 @@ def prepare(o: PositiveOptions) -> Prepared:
     return Prepared(case, snaps["base"], snaps["head"], source, FIXTURE)
 
 
-def _profile_parts():
-    profile = repository_profile(True)
+def effective_config(o: PositiveOptions, cfg: EffectiveConfig | None = None) -> EffectiveConfig:
+    """Resolved (and validated) before the fixture, output, state, key or any model action."""
+    if cfg is not None:
+        return cfg
+    return resolve_config(o.config, forbidden_roots=(FIXTURE, o.out_dir, o.source_baseline))
+
+
+def _profile_parts(cfg: EffectiveConfig | None = None):
+    cfg = cfg or resolve_config()
+    profile = repository_profile(True, cfg.models)
     return profile, repository_plan(profile), repository_policy(True)
 
 
@@ -232,9 +242,10 @@ def check_out(o: PositiveOptions) -> Path:
 
 # ------------------------------------------------------------------ plan
 
-def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review) -> dict:
+def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     check_out(o)
-    profile, plan, policy = _profile_parts()
+    profile, plan, policy = _profile_parts(cfg)
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, Path(os.path.realpath(o.out_dir))])
     scratch = tempfile.TemporaryDirectory(prefix="pilot-positive-plan-")
     transport = CapturingTransport()
@@ -274,7 +285,7 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review) -> dict:
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
     return {**header(prep), "schema": REPORT_SCHEMA, "mode": "plan", "status": "planned" if planned else "plan-failed",
             "ok": planned,
-            "plan": {"model": MODEL, "retrievalPolicy": policy.to_doc(), "profile": f"{profile['id']}@{profile['version']}",
+            "plan": {"model": cfg.models.summary(), "models": cfg.report()["roles"], "retrievalPolicy": policy.to_doc(), "profile": f"{profile['id']}@{profile['version']}",
                      "capturedRequests": first, "capturedCount": len(first), "firstRequest": first[0] if first else None,
                      "worstCaseAdmissionUsdMicros": worst, "runCeilingUsdMicros": ceiling, "retries": 0, "repairs": 0,
                      "toolBudget": {k: plan["budget"][k] for k in ("maxToolCalls", "maxToolCallsPerAgent")},
@@ -306,9 +317,10 @@ def run_report(o, prep, res, *, provider_calls, ledger_before, ledger_after, boo
 
 
 def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=load_openrouter_key,
-              runner=run_review) -> dict:
+              runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     out = check_out(o)
-    profile, plan, policy = _profile_parts()
+    profile, plan, policy = _profile_parts(cfg)
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
@@ -369,9 +381,10 @@ def _interrupted(out, prep, o, exc, key, ledger, before, provider) -> None:
 
 # ------------------------------------------------------------------ replay
 
-def replay_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review) -> dict:
+def replay_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     out = check_out(o)
-    profile, plan, policy = _profile_parts()
+    profile, plan, policy = _profile_parts(cfg)
     backend = ReplayBackend(o.replay_trace, o.trace_digest, "operator-config")
     runs = make_out(out)
     spec = build_spec(o, prep, backend, runs, profile, plan, policy)
@@ -397,18 +410,24 @@ def replay_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review) -> dic
 
 def run_positive(o: PositiveOptions, *, transport=None, key_loader=load_openrouter_key, runner=run_review) -> dict:
     check_options(o)
+    cfg = effective_config(o)                            # before the fixture, output, state, key or model
     prep = prepare(o)
     if o.mode == "plan":
-        return plan_mode(o, prep, runner=runner)
-    if o.mode == "live":
-        return live_mode(o, prep, transport=transport, key_loader=key_loader, runner=runner)
-    return replay_mode(o, prep, runner=runner)
+        rep = plan_mode(o, prep, runner=runner, cfg=cfg)
+    elif o.mode == "live":
+        rep = live_mode(o, prep, transport=transport, key_loader=key_loader, runner=runner, cfg=cfg)
+    else:
+        rep = replay_mode(o, prep, runner=runner, cfg=cfg)
+    rep["reviewModels"] = cfg.report()
+    return rep
 
 
 def render(rep: dict) -> str:
     L = [f"mode: {rep['mode']}   status: {rep['status']}   ok: {rep['ok']}", f"case: {rep['case']} ({rep['repo']})",
          f"  source baseline: {rep['sourceBaseline']['fileCount']} files scope {rep['sourceBaseline']['scopeDigest']}",
          f"  {rep['quality']}"]
+    L.append(f"  review models: { {r: v['model'] for r, v in rep['reviewModels']['roles'].items()} } "
+             f"(config {rep['reviewModels']['source']} {rep['reviewModels']['digest']})")
     if rep["mode"] == "plan":
         p = rep["plan"]
         L += [f"  plan: {p['model']} ceiling ${p['runCeilingUsdMicros'] / 1e6:.2f} tools {p['toolBudget']} "
@@ -451,6 +470,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--confirm-live", action="store_true", help="required with --mode live")
     ap.add_argument("--replay-trace", help="recorded trace.jsonl (replay)")
     ap.add_argument("--trace-digest", help="operator-held sha256:<64 hex> of the trace (replay)")
+    ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
     return ap
 
@@ -461,10 +481,10 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
     o = PositiveOptions(mode=a.mode, source_baseline=a.source_baseline, out_dir=a.out, auth=a.auth,
                         state_dir=a.state_dir, env_file=a.env, baseline_micros=a.baseline_micros,
                         book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
-                        replay_trace=a.replay_trace, trace_digest=a.trace_digest)
+                        replay_trace=a.replay_trace, trace_digest=a.trace_digest, config=a.config)
     try:
         rep = run_positive(o, transport=transport, key_loader=key_loader, runner=runner)
-    except (PositiveError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
+    except (PositiveError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
         err.write(f"error: {type(e).__name__}: {str(e)[:400]}\n")
         return 2
     out.write(json.dumps(rep, indent=1, sort_keys=True, default=str) + "\n" if a.json else render(rep))

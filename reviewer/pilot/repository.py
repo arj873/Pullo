@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reviewer import historical
+from reviewer.config import ConfigError, EffectiveConfig, resolve_config
 from reviewer.contracts import require
 from reviewer.contracts.canonical import canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
 from reviewer.gateway import AuthorizationError, DisabledProvider, SpendBook, trusted_authorization
@@ -39,7 +40,7 @@ from reviewer.runtime.turn_canary import Refused, open_state
 
 from .launcher import QUALITY, REPO, gateway_costs, ledger_costs, load_baseline, utc_now
 from .launcher import PilotError, _Unused, _force_cleanup
-from .profile import MODEL, RUN_CEILING_USD_MICROS
+from .profile import RUN_CEILING_USD_MICROS
 from .repository_profile import repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
@@ -76,6 +77,7 @@ class RepositoryOptions:
     trace_digest: str | None = None
     retrieval: bool = True
     repeat: int = 0
+    config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -202,8 +204,17 @@ def ingest(o: RepositoryOptions) -> Ingested:
 
 # ------------------------------------------------------------------ identity
 
-def _profile_parts(o: RepositoryOptions):
-    profile = repository_profile(o.retrieval)
+def effective_config(o: RepositoryOptions, cfg: EffectiveConfig | None = None) -> EffectiveConfig:
+    """Resolved (and validated) before any case file, output, state, key or model action."""
+    if cfg is not None:
+        return cfg
+    case_dir = Path(os.path.abspath(o.case_dir))
+    return resolve_config(o.config, forbidden_roots=(case_dir, case_dir.parent, o.store, o.out_dir))
+
+
+def _profile_parts(o: RepositoryOptions, cfg: EffectiveConfig | None = None):
+    cfg = effective_config(o, cfg)
+    profile = repository_profile(o.retrieval, cfg.models)
     return profile, repository_plan(profile), repository_policy(o.retrieval)
 
 
@@ -330,9 +341,10 @@ def _request_facts(req) -> dict:
             "worstCaseRouterUsdMicros": worst_case_router_micros(body["model"], len(raw), body["max_tokens"])}
 
 
-def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review) -> dict:
+def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     check_out(o, ing)                                    # path rules only: nothing is created
-    profile, plan, policy = _profile_parts(o)
+    profile, plan, policy = _profile_parts(o, cfg)
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.case_dir.parent, ing.store, _real(o.out_dir), REPO])
     scratch = tempfile.TemporaryDirectory(prefix="pilot-repository-plan-")
     transport = CapturingTransport()
@@ -373,7 +385,7 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review) -> dict
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
     rep = {**disclosure_header(ing), "schema": REPORT_SCHEMA, "mode": "plan",
            "status": "planned" if planned else "plan-failed", "ok": planned,
-           "plan": {"model": MODEL, "retrieval": o.retrieval, "retrievalPolicy": None if policy is None else policy.to_doc(),
+           "plan": {"model": cfg.models.summary(), "models": cfg.report()["roles"], "retrieval": o.retrieval, "retrievalPolicy": None if policy is None else policy.to_doc(),
                     "profile": f"{profile['id']}@{profile['version']}", "authorization": "covers the profile and run ceiling"
                     if problem is None or problem["code"] != "config" else "NOT covered: " + problem["message"],
                     "capturedRequests": first, "capturedCount": len(first),
@@ -418,9 +430,10 @@ def run_report(o, ing, res, *, provider_calls, ledger_before, ledger_after, book
 
 
 def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader=load_openrouter_key,
-              runner=run_review) -> dict:
+              runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     out = check_out(o, ing)
-    profile, plan, policy = _profile_parts(o)
+    profile, plan, policy = _profile_parts(o, cfg)
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
@@ -490,9 +503,10 @@ def _remove_if_empty(out: Path, runs: Path) -> None:
 
 # ------------------------------------------------------------------ replay
 
-def replay_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review) -> dict:
+def replay_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=None) -> dict:
+    cfg = effective_config(o, cfg)
     out = check_out(o, ing)
-    profile, plan, policy = _profile_parts(o)
+    profile, plan, policy = _profile_parts(o, cfg)
     backend = ReplayBackend(o.replay_trace, o.trace_digest, "operator-config")
     runs = make_out(out)
     spec = build_spec(o, ing, backend, runs, profile, plan, policy)
@@ -518,18 +532,24 @@ def replay_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review) -> di
 
 def run_repository(o: RepositoryOptions, *, transport=None, key_loader=load_openrouter_key, runner=run_review) -> dict:
     check_options(o)
+    cfg = effective_config(o)                            # before ingestion, output, state, key or model
     ing = ingest(o)
     if o.mode == "plan":
-        return plan_mode(o, ing, runner=runner)
-    if o.mode == "live":
-        return live_mode(o, ing, transport=transport, key_loader=key_loader, runner=runner)
-    return replay_mode(o, ing, runner=runner)
+        rep = plan_mode(o, ing, runner=runner, cfg=cfg)
+    elif o.mode == "live":
+        rep = live_mode(o, ing, transport=transport, key_loader=key_loader, runner=runner, cfg=cfg)
+    else:
+        rep = replay_mode(o, ing, runner=runner, cfg=cfg)
+    rep["reviewModels"] = cfg.report()
+    return rep
 
 
 def render(rep: dict) -> str:
     c = rep["coverage"]
     L = [f"mode: {rep['mode']}   status: {rep['status']}   ok: {rep['ok']}", f"case: {rep['case']}",
          f"  coverage: {c['statement']}", f"  PR title/body: {c['prText']}"]
+    L.append(f"  review models: { {r: v['model'] for r, v in rep['reviewModels']['roles'].items()} } "
+             f"(config {rep['reviewModels']['source']} {rep['reviewModels']['digest']})")
     if rep["mode"] == "plan":
         p = rep["plan"]
         L += [f"  plan: {p['model']} retrieval={p['retrieval']} ceiling ${p['runCeilingUsdMicros'] / 1e6:.2f} "
@@ -579,6 +599,7 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--trace-digest", help="operator-held sha256:<64 hex> of the trace (replay)")
     ap.add_argument("--retrieval", choices=("on", "off"), default="on", help="Turn retrieval roles (ablation switch)")
     ap.add_argument("--repeat", type=int, default=0)
+    ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
     return ap
 
@@ -591,10 +612,10 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                           out_dir=a.out, auth=a.auth, state_dir=a.state_dir, env_file=a.env,
                           baseline_micros=a.baseline_micros, book_baseline_micros=a.book_baseline_micros,
                           confirm_live=a.confirm_live, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
-                          retrieval=a.retrieval == "on", repeat=a.repeat)
+                          retrieval=a.retrieval == "on", repeat=a.repeat, config=a.config)
     try:
         rep = run_repository(o, transport=transport, key_loader=key_loader, runner=runner)
-    except (RepositoryError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
+    except (RepositoryError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
         err.write(f"error: {type(e).__name__}: {str(e)[:400]}\n")
         return 2
     out.write(json.dumps(rep, indent=1, sort_keys=True, default=str) + "\n" if a.json else render(rep))

@@ -79,7 +79,7 @@ class Model:
              "is_byok": self.byok, "cost_details": {"upstream_inference_cost": 0.0042},
              "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
              "completion_tokens_details": {"reasoning_tokens": 0}}
-        d = {"id": f"gen-{len(self.requests)}", "model": SONNET, "provider": "Anthropic",
+        d = {"id": f"gen-{len(self.requests)}", "model": body["model"], "provider": "Anthropic",
              "choices": [{"index": 0, "finish_reason": "stop",
                           "message": {"role": "assistant", "content": json.dumps(self.content(role))}}], "usage": u}
         return HttpResponse(200, {}, json.dumps(d).encode())

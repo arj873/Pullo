@@ -6,11 +6,12 @@ import argparse
 import json
 import sys
 
+from reviewer.config import ConfigError
 from reviewer.runtime import load_openrouter_key, EnvFileError
 from reviewer.gateway import AuthorizationError
 
 from .launcher import PilotError, PilotOptions, run_cases
-from .profile import (MAX_OUTPUT_CAP, MODEL, OUTPUT_CAPS, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, ProfileError)
+from .profile import (MAX_OUTPUT_CAP, OUTPUT_CAPS, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, ProfileError)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -27,7 +28,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--replay-trace", help="recorded trace.jsonl to replay strictly (no provider, no key)")
     ap.add_argument("--trace-digest", help="operator-held sha256 of the recorded trace")
     ap.add_argument("--repeat", type=int, default=0, help="new eval identity, e.g. after recovery-required")
-    ap.add_argument("--model", default=MODEL, help="exact allowlisted OpenRouter model id (default Sonnet 5.5)")
+    ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
+    ap.add_argument("--model", help="DEPRECATED no-op: accepted only if it equals every role's configured model; "
+                    "conflicts with --config. Set models in pullo.toml")
     for r, v in OUTPUT_CAPS.items():
         ap.add_argument(f"--{r}-max-output-tokens", type=int, default=v, help=f"1..{MAX_OUTPUT_CAP} (default {v})")
     ap.add_argument("--wall-clock-sec", type=int, default=WALL_CLOCK_SEC)
@@ -49,7 +52,8 @@ def render(rep: dict) -> str:
         L += [f"  coverage: {d['statement']}", f"  PR title/body: {d['prText']}", f"  pins: {c['pinsDigest']}"]
         if c["mode"] == "plan":
             p = c["plan"]
-            L += [f"  plan: {p['model']}  ceiling ${p['runCeilingUsdMicros'] / 1e6:.2f}  retries={p['retries']} "
+            L += [f"  review models: {p['models']}",
+                  f"  plan: {p['model']}  ceiling ${p['runCeilingUsdMicros'] / 1e6:.2f}  retries={p['retries']} "
                   f"repairs={p['repairs']}  caps={p['outputCaps']}", f"  authorization: {p['authorization']}",
                   f"  first requests (nothing sent): {p['firstRequests']}",
                   f"  scratch pipeline run: {p['scratchPipelineRun']}   would write under: {p['wouldWriteUnder']}"]
@@ -86,12 +90,12 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
     caps = {r: getattr(a, f"{r}_max_output_tokens") for r in OUTPUT_CAPS}
     o = PilotOptions(corpus_root=a.corpus_root, pins_dir=a.pins_dir, out_dir=a.out, cases=tuple(a.case), mode=mode,
                      auth=a.auth, state_dir=a.state_dir, env_file=a.env, pins_baseline=a.pins_baseline,
-                     repeat=a.repeat, model=a.model, output_caps=caps, wall_clock_sec=a.wall_clock_sec,
+                     repeat=a.repeat, model=a.model, config=a.config, output_caps=caps, wall_clock_sec=a.wall_clock_sec,
                      soft_deadline_sec=a.soft_deadline_sec, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
                      keep_going=a.keep_going)
     try:
         rep = run_cases(o, transport=transport, key_loader=key_loader)
-    except (PilotError, ProfileError, EnvFileError, AuthorizationError) as e:
+    except (PilotError, ConfigError, ProfileError, EnvFileError, AuthorizationError) as e:
         err.write(f"error: {type(e).__name__}: {str(e)[:400]}\n")
         return 2
     out.write(json.dumps(rep, indent=1, sort_keys=True, default=str) + "\n" if a.json else render(rep))

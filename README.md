@@ -31,6 +31,30 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 - The test suite shows 6 errors on a clean clone at this commit (see Tests).
 - Source docstrings still mention private project-coordination documents that are not in this repository.
 
+## Review models
+
+Set the investigator, verifier and judge models in `pullo.toml`. Each role can use a different model:
+
+```toml
+schema = "pullo-config@1"
+
+[review.investigator]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
+
+[review.verifier]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
+
+[review.judge]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
+```
+
+The supported IDs are `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5` and `anthropic/claude-opus-5.5`, through OpenRouter. The OpenAI CLI path remains pending its isolation checks.
+
+The historical, repository and synthetic review commands accept `--config /path/to/pullo.toml`. By default they read Pullo's own file, independently of the current directory or reviewed repository. Model selection does not change spending limits or permissions. Keep API keys outside this file.
+
 ## Run the offline smoke suite
 
 ```sh

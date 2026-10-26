@@ -16,8 +16,8 @@ MAX_TOOL_CALLS = 160            # run-wide tool calls (matches RetrievalPolicy.r
 MAX_TOOL_CALLS_PER_AGENT = 60   # per (stage, agent) ToolSession (matches RetrievalPolicy.agent_tool_calls)
 
 
-def repository_profile(retrieval: bool = True) -> dict:
-    profile = live_profile(MODEL)
+def repository_profile(retrieval: bool = True, models=None) -> dict:
+    profile = live_profile(None if models is not None else MODEL, models=models)
     profile["id"] = PROFILE_ID
     if retrieval:
         profile["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion=INVESTIGATOR_PROMPT)

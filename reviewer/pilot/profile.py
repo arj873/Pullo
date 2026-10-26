@@ -7,6 +7,7 @@ tool limits are NOT set here: the pipeline defaults apply."""
 
 from __future__ import annotations
 
+from reviewer.config import ReviewModels
 from reviewer.contracts.budget import STANDARD_S0A_BUDGET
 from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS, gateway_price
 
@@ -25,9 +26,17 @@ class ProfileError(ValueError):
     pass
 
 
-def live_profile(model: str = MODEL, output_caps: dict | None = None, timeouts: dict | None = None) -> dict:
-    if model not in ALLOWED_ROUTER_MODELS:
-        raise ProfileError("model is not in the exact OpenRouter allowlist")
+def live_profile(model: str | None = None, output_caps: dict | None = None, timeouts: dict | None = None, *,
+                 models: ReviewModels | None = None) -> dict:
+    """`models` is the per-role selection (from pullo.toml). The legacy single `model` means all three roles and
+    may not be combined with `models`. Neither given: the default (Sonnet 5.5 everywhere)."""
+    if models is not None and model is not None:
+        raise ProfileError("pass either model or models, not both")
+    if models is None:
+        model = MODEL if model is None else model
+        if model not in ALLOWED_ROUTER_MODELS:
+            raise ProfileError("model is not in the exact OpenRouter allowlist")
+        models = ReviewModels.uniform(model)
     caps = {**OUTPUT_CAPS, **(output_caps or {})}
     tmo = {**TIMEOUTS, **(timeouts or {})}
     for role in _OUT:
@@ -36,10 +45,11 @@ def live_profile(model: str = MODEL, output_caps: dict | None = None, timeouts: 
             raise ProfileError(f"{role} output cap must be an integer in 1..{MAX_OUTPUT_CAP}")
 
     def role(r):
-        return {"provider": "anthropic", "model": model, "family": "claude", "resolved": True,
+        m = models.model(r)
+        return {"provider": "anthropic", "model": m, "family": "claude", "resolved": True,
                 "promptVersion": _PV[r], "outputSchema": _OUT[r], "params": {"maxOutputTokens": caps[r]},
                 "caps": {"maxOutputTokens": caps[r], "timeoutSec": tmo[r], "maxRetries": 0, "maxRepairs": 0},
-                "price": gateway_price(model), "fallbacks": []}
+                "price": gateway_price(m), "fallbacks": []}
     return {"id": PROFILE_ID, "version": 1, "tier": "standard", "triage": "fixed-rule@1",
             "roles": {r: role(r) for r in _OUT}}
 

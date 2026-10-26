@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from reviewer import historical
+from reviewer.config import EffectiveConfig, ConfigError, reconcile_legacy_model, resolve_config
 from reviewer.contracts.canonical import canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
 from reviewer.gateway import DisabledProvider, ProviderResult, SpendBook, trusted_authorization, typed_error
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend, ReviewSpec,
@@ -55,7 +56,8 @@ class PilotOptions:
     env_file: str | None = None
     pins_baseline: str | None = None
     repeat: int = 0
-    model: str = MODEL
+    model: str | None = None            # legacy: only a no-op that agrees with the config; see reconcile_legacy_model
+    config: str | None = None
     output_caps: dict = field(default_factory=dict)
     wall_clock_sec: int = WALL_CLOCK_SEC
     soft_deadline_sec: int = SOFT_DEADLINE_SEC
@@ -344,7 +346,8 @@ def _state_files(state: Path) -> tuple[Path, Path]:
 def run_cases(o: PilotOptions, *, transport=None, key_loader=load_openrouter_key) -> dict:
     """-> {"mode", "ok", "cases": [report | refusal]}. Plan and replay never call `key_loader`."""
     paths = check_options(o)
-    profile = live_profile(o.model, o.output_caps)
+    cfg = reconcile_legacy_model(resolve_config(o.config, forbidden_roots=(paths.corpus, paths.out)), o.model)
+    profile = live_profile(output_caps=o.output_caps, models=cfg.models)
     plan = live_plan(profile, wall_clock_sec=o.wall_clock_sec, soft_deadline_sec=o.soft_deadline_sec)
     baseline = load_baseline(o.pins_baseline) if o.pins_baseline else None
     pre = []
@@ -374,7 +377,8 @@ def run_cases(o: PilotOptions, *, transport=None, key_loader=load_openrouter_key
                 ledger = RuntimeLedger(sroot / LEDGER_NAME, TRIAL_TOTAL_USD_MICROS)
         for case, cd, pins in pre:
             rep = _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, work, transport,
-                       lambda: _key(box, o, paths, key_loader))
+                       lambda: _key(box, o, paths, key_loader), cfg)
+            rep["reviewModels"] = cfg.report()
             results.append(rep)
             if rep.get("status") not in ("completed", "planned"):
                 ok = False
@@ -414,13 +418,13 @@ def _force_cleanup(tmp: tempfile.TemporaryDirectory) -> None:
     tmp.cleanup()
 
 
-def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, work, transport, get_key) -> dict:
+def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, work, transport, get_key, cfg) -> dict:
     bridge = out = None
     try:
         bridge, out = _materialize(paths, case, cd, pins, work)
         record = bridge.record
         if o.mode == "plan":
-            rep = _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs)
+            rep = _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs, cfg)
             _discard(bridge, out)
             return rep
         if o.mode == "replay":
@@ -428,6 +432,8 @@ def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, wo
         else:
             # validate everything before the key is read or any provider exists
             validate_spec(_spec(o, paths, bridge, record, profile, plan, _Unused(handle), runs))
+            RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(
+                profile, plan["budget"])             # the authorization must cover every configured role model
             key = get_key()
             provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
                                           transport=transport, run_scope=_run_id(o, bridge, record, profile, plan))
@@ -463,7 +469,7 @@ class _Unused:
         self.authorization_digest = handle.digest
 
 
-def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs) -> dict:
+def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs, cfg) -> dict:
     """Run the REAL pipeline in a scratch dir against a provider that sends nothing: proves inputs, coverage,
     authorization and prompt building, and records the first request sizes. Touches nothing under --out."""
     prov = PlanProvider()
@@ -484,7 +490,7 @@ def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs) -> d
                      "worstCaseRouterUsdMicros": worst_case_router_micros(r["model"], size, cap)})
     return {"case": record["caseId"], "status": "planned", "mode": "plan", "disclosure": disclosure(record),
             "pinsDigest": record["pinsDigest"], "quality": QUALITY,
-            "plan": {"model": o.model, "authorization": "covers the profile and run ceiling",
+            "plan": {"model": cfg.models.summary(), "models": cfg.report()["roles"], "authorization": "covers the profile and run ceiling",
                      "firstRequests": reqs, "providerCalls": 0, "networkCalls": 0, "keyRead": False,
                      "scratchPipelineRun": dry, "wouldWriteUnder": str(_real(o.out_dir)),
                      "runCeilingUsdMicros": plan["budget"]["maxUsdMicros"], "retries": 0, "repairs": 0,
