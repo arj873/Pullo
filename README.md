@@ -4,7 +4,7 @@ Read-only AI code review with independent verification. Pullo investigates a cha
 
 **Status: pre-alpha.** Review quality has not been measured. There is no precision/recall figure, no competitive-quality claim and no cost-per-review claim (including any mid-sized-review price target). Treat everything below as mechanics, not capability.
 
-This repository state is a **checkpoint for review, not a release**: the test suite is not fully green on a clean clone (see Tests).
+This repository state is a **checkpoint for review, not a release**. The public default test suite currently exits successfully, with explicit optional skips and expected-failure repros (see Tests).
 
 The Python package is named `reviewer`; the product name is Pullo. Everything is stdlib-only (tested on Python 3.14).
 
@@ -28,7 +28,7 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 - General live fork and stage-replay run-mode binding are not implemented. There is no CLI resume of an interrupted evaluation.
 - Preventive isolation for the second (Terra-tier) model path is not done; that path is not claimed to work.
 - Retrieval quality, model-vs-model comparison and the benchmark pipeline are unmeasured.
-- The test suite shows 6 errors on a clean clone at this commit (see Tests).
+- The hosted public suite passes, but its 30 skips and 22 expected failures leave meaningful gates open (see Tests).
 - Source docstrings still mention private project-coordination documents that are not in this repository.
 
 ## Review models
@@ -71,14 +71,14 @@ No credential, network call or paid spend is possible from these commands. Price
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests -t .
+nice -n 19 python3 -B -m unittest discover -s tests -t .
 ```
 
-The suite is offline and needs no credentials or network. It is **not fully green on a public clone**, and that is deliberate rather than hidden:
+The suite is offline and needs no credentials or network. [Hosted CI for PR #9](https://github.com/arj873/Pullo/actions/runs/40306956738) ran 2,401 tests with zero errors or unexpected failures, 30 skips and 22 expected failures. A later provenance PR has its own check and is not included in these counts. Limits remain visible:
 
-- Raw third-party pull-request fixtures and private operator evidence are not published. Tests that need them (`tests/corpus*`, `tests/historical`, `tests/tools/test_tr_fixes.py`) are left out of this repository. A few tests inside otherwise-included files also read those private files and error with `FileNotFoundError` or a missing-case message on a clone; they are listed in `KNOWN_TEST_ISSUES.md`.
+- Raw third-party pull-request fixtures and private operator evidence are not published. Corpus-only test modules are left out of this repository; included tests requiring those inputs use explicit skips. Static historical import-boundary tests run without the private corpus.
 - Known defects are kept as expected-failure tests so the repro stays in the tree.
 - Some tests skip when a private fixture is absent.
-- One test error has occurred intermittently in full runs (a different pilot test each time, "store must be outside every Git repository work tree") and not when the affected tests are run alone; the cause is not yet identified.
+- Local tests under `/tmp` can encounter an unrelated intermittent `/tmp/.git`, which makes the importer correctly reject a temporary store. Use a verified non-Git `TMPDIR` locally; hosted CI did not encounter this.
 
 See `KNOWN_TEST_ISSUES.md` for the exact test IDs and counts at this checkpoint.
