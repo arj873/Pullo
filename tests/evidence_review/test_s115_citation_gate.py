@@ -181,10 +181,10 @@ class Gate(Rig):
             ids = [r["toolCallId"] for r in d["citations"]["citableRefs"]]
             self.assertIn(read_id, ids)
             self.assertNotIn(diff_id, ids)
-        # LIMIT (pre-existing contracts, unchanged by S1-15): the omitted result's id is in the chain's contextResults,
-        # so a model that cites it anyway still materializes evidence it was never shown. The rules call it uncitable.
-        self.assertEqual((res.status, len(res.findings)), ("completed", 1))
-        self.assertTrue(any(e.get("toolCallId") == diff_id for e in res.findings[0]["verification"]["evidence"]))
+        # S1-17 (was a LIMIT): the omitted result's id is still in the chain's contextResults, but it was never rendered,
+        # so citing it anyway no longer confirms a finding. The rules call it uncitable and contracts now enforce that.
+        self.assertEqual((res.status, len(res.findings)), ("completed", 0))
+        self.assertEqual([d["reason"] for d in res.drops], ["invalid-citation"])
 
     # ---- CONTROL: foreign, investigator-original, malformed, out-of-range and excerpt-mismatched cites still fail
     def test_foreign_malformed_and_mismatched_citations_fail(self):
