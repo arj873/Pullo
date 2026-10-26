@@ -1,0 +1,42 @@
+{
+  "agentId": "verifier",
+  "args": {
+    "end_line": 3,
+    "path": "src/store.h",
+    "side": "head",
+    "start_line": 1
+  },
+  "ordinal": 1,
+  "redactions": {},
+  "requestIndex": 0,
+  "requestedBy": "call_041e2d05d7cd8c26",
+  "result": {
+    "completeness": "exact",
+    "evidence": [
+      {
+        "commit": "snap:sha256:bd2863f4b52c8906367e921c1783a2b0505e25fe679e2b38d98a8912c91a2d86",
+        "excerpt": "void Close() { open = false; }",
+        "kind": "code",
+        "lines": [
+          1,
+          3
+        ],
+        "path": "src/store.h",
+        "resolved": true,
+        "source": "read_file",
+        "toolCallId": "tool_5ea8cee56d9b57fe"
+      }
+    ],
+    "notice": "",
+    "status": "ok",
+    "truncated": null
+  },
+  "resultHash": "sha256:6de68cdd72f366ac6c32f4a9f34993c4916740ad28ebf7d835852e7a405fe652",
+  "runId": "run_2aff2913f20c9190",
+  "schema": "trace-event@1",
+  "seq": 4,
+  "stage": "VERIFY",
+  "tool": "read_file",
+  "toolCallId": "tool_5ea8cee56d9b57fe",
+  "type": "tool.call"
+}

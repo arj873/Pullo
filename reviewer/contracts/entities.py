@@ -12,8 +12,8 @@ from .canonical import (GITHUB_REPO, call_id, comment_id, cost_id, digest, hypot
                         idempotency_key_eval, idempotency_key_local, idempotency_key_pr,
                         request_hash, run_id, tool_call_id)
 from .redaction import json_contains_protected
-from .schema import (REGISTRY, Arr, Bool, Const, Enum, Int, Invariant, Issue, Json, Nullable,
-                     Num, Obj, RelPath, Str, Union, define, validate)
+from .schema import (REGISTRY, Arr, Bool, Const, Enum, Int, Invariant, Issue, Json, Map, Nullable,
+                     Num, Obj, RelPath, Scalar, Str, Union, define, validate)
 from .severity import RANK, STRENGTHS, TRUSTED_TOOL_STATUSES
 from .stages import (ACCESS_POLICY, ERROR_CODES, INCOMPLETE_REASONS, LIVE_MODES, OFFLINE_MODES,
                      REPLAYABLE_FROM, RUN_MODES, RUN_STATUSES, STAGE_STATUSES, STAGES, TRIGGERS)
@@ -195,6 +195,52 @@ VerifierOutput = define("VerifierOutput", Obj(
     description="An uncited or unresolvable refutation is converted to uncertain by VERIFY (33).",
 ))
 
+# ---------------------------------------------------------------- retrieval turns (s0a-contracts@6)
+
+MAX_TURN_REQUESTS = 6
+MAX_HOP = 15
+
+ContextRequest = define("ContextRequest", Obj(
+    required={"tool": Str(pattern=r"[a-z][a-z0-9_-]{0,63}"),
+              "args": Map(Scalar(max_len=4096), key_pattern=r"[a-z][a-z0-9_]{0,31}", max_props=16),
+              "purpose": Str(min_len=1, max_len=300)},
+    description="Data, never authority: any grammatical tool name or argument key is schema-valid "
+                "and the host ToolSession alone decides what runs (unknown tools/args/values become a "
+                "logged denied ToolResult shown to the model). purpose never reaches a tool and never "
+                "changes policy, caps or tools.",
+))
+
+
+def _turn_ok(d):
+    if bool(d["contextRequests"]) == (d["output"] is not None):
+        yield "", "exactly one of non-empty contextRequests or non-null output"
+
+
+def _turn(name: str, payload) -> object:
+    return define(name, Obj(
+        required={"contextRequests": Arr(ContextRequest, max_items=MAX_TURN_REQUESTS),
+                  "output": Nullable(payload)},
+        invariants=[Invariant("turn-exclusive", "requests context xor returns the role output",
+                              _turn_ok)],
+        description="Retrieval envelope used for EVERY hop of a retrieval chain. A final envelope "
+                    "carries the unchanged legacy role output as `output`; the trace keeps the "
+                    "envelope as returned and terminal_payload() unwraps it."))
+
+
+InvestigatorTurn = _turn("InvestigatorTurn", InvestigatorOutput)
+VerifierTurn = _turn("VerifierTurn", VerifierOutput)
+
+ROLE_OUTPUT = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput",
+               "judge": "JudgeOutput"}            # the role's payload schema (plain profiles use it as is)
+ROLE_TURN = {"investigator": "InvestigatorTurn", "verifier": "VerifierTurn"}
+ROLE_SCHEMAS = {"investigator": ("InvestigatorOutput", "InvestigatorTurn"),
+                "verifier": ("VerifierOutput", "VerifierTurn"), "judge": ("JudgeOutput",)}
+TURN_PAYLOAD = {"InvestigatorTurn": "InvestigatorOutput", "VerifierTurn": "VerifierOutput"}
+OUTPUT_SCHEMAS = ("InvestigatorOutput", "VerifierOutput", "JudgeOutput", "InvestigatorTurn",
+                  "VerifierTurn")
+# Host-prepared (not model-requested) tool calls a call of this stage may be shown and cite.
+HOST_CONTEXT_STAGES = {"INVESTIGATE": ("PREPARE", "INVESTIGATE"), "VERIFY": ("PREPARE", "VERIFY")}
+
 JudgeOutput = define("JudgeOutput", Obj(
     required={"comments": Arr(Obj(
         required={"findingIds": Arr(Id("hyp"), min_items=1, unique=True),
@@ -276,38 +322,341 @@ def _repair_chain(cid: str, calls: dict) -> list[str]:
     return chain
 
 
-def _cited(e: dict, citations: list, tools: dict) -> bool:
-    """e is what severity.materialize_evidence makes of one of the model's `citations`: the same
-    code citation (excerpt included), or an item copied from the tool.call a tool-ref names."""
-    if e["kind"] == "code":
-        return any(c["kind"] == "code" and all(c[k] == e[k] for k in _CITATION_KEYS)
-                   for c in citations)
-    for c in citations:
-        tc = tools.get(c["toolCallId"]) if c["kind"] == "tool-ref" else None
-        if tc is None or c["toolCallId"] != e["toolCallId"]:
+# ---------------------------------------------------------------- turn helpers (s0a-contracts@6)
+
+def is_turn_schema(name) -> bool:
+    return name in TURN_PAYLOAD
+
+
+def usable_output(call_event) -> bool:
+    """A model.call answer the pipeline may act on: status ok AND output valid for the request's own
+    outputSchema. A status-ok answer that fails its schema (D3) is not usable."""
+    if not isinstance(call_event, dict):
+        return False
+    req, resp = call_event.get("request"), call_event.get("response")
+    if not isinstance(req, dict) or not isinstance(resp, dict) or resp.get("status") != "ok":
+        return False
+    schema = req.get("outputSchema")
+    return schema in OUTPUT_SCHEMAS and not validate(schema, resp.get("output"))
+
+
+def terminal_payload(call_event):
+    """The legacy role output a usable final call returned: the output itself for a plain schema, the
+    envelope's `output` for a final Turn. None for unusable or non-final calls. The traced envelope is
+    never rewritten; this only reads it."""
+    if not usable_output(call_event):
+        return None
+    out = call_event["response"]["output"]
+    return out["output"] if call_event["request"]["outputSchema"] in TURN_PAYLOAD else out
+
+
+def turn_requests(call_event):
+    """contextRequests of a usable non-final Turn call, else None."""
+    if not usable_output(call_event) or call_event["request"]["outputSchema"] not in TURN_PAYLOAD:
+        return None
+    return call_event["response"]["output"]["contextRequests"] or None
+
+
+def serves_request(context_request, tool_event) -> bool:
+    """The tool call ran the requested tool, and every requested argument equals (same JSON type) the
+    normalized argument the host executed. Defaults the host filled in are allowed."""
+    if not isinstance(context_request, dict) or not isinstance(tool_event, dict):
+        return False
+    want, got = context_request.get("args"), tool_event.get("args")
+    if tool_event.get("tool") != context_request.get("tool") or not isinstance(want, dict) \
+            or not isinstance(got, dict):
+        return False
+    return all(k in got and type(got[k]) is type(v) and got[k] == v for k, v in want.items())
+
+
+class _Index:
+    """Valid events of one run by id. A duplicated id is counted (and so unusable) even if invalid."""
+
+    def __init__(self, events, run: str | None = None):
+        self.logged: dict[str, int] = {}
+        self.calls: dict[str, dict] = {}
+        self.tools: dict[str, dict] = {}
+        self.cache: dict[str, dict] = {}
+        for ev in events if isinstance(events, list) else []:
+            if not isinstance(ev, dict) or (run is not None and ev.get("runId") != run):
+                continue
+            kind = ev.get("type")
+            key = ev.get("callId") if kind == "model.call" else ev.get("toolCallId") \
+                if kind == "tool.call" else None
+            if not isinstance(key, str):
+                continue
+            self.logged[key] = self.logged.get(key, 0) + 1
+            if not validate("TraceEvent", ev):
+                (self.calls if kind == "model.call" else self.tools)[key] = ev
+        self.continuations: dict[str, list] = {}
+        for ev in self.calls.values():
+            if "continuationOf" in ev["request"]:
+                self.continuations.setdefault(ev["request"]["continuationOf"], []).append(ev)
+        self.requested: dict[tuple, list] = {}
+        for t in self.tools.values():
+            if "requestedBy" in t:
+                self.requested.setdefault((t["requestedBy"], t["requestIndex"]), []).append(t)
+
+    def call(self, cid):
+        return self.calls.get(cid) if self.logged.get(cid, 0) == 1 else None
+
+    def tool(self, tid):
+        return self.tools.get(tid) if self.logged.get(tid, 0) == 1 else None
+
+
+_SAME_CHAIN = ("hypothesisId", "outputSchema", "promptVersion", "profile", "provider", "model")
+
+
+def _hops(ev: dict, idx: _Index) -> tuple[list[dict], list[str]]:
+    """The hops of ev's chain root-first, plus any problem walking it."""
+    hops = [ev]
+    while hops[-1]["request"].get("hop", 0) > 0:
+        pid = hops[-1]["request"]["continuationOf"]
+        prev = idx.call(pid)
+        if prev is None:
+            return hops[::-1], [f"continues {pid}, which is not a model call logged once in this run"]
+        if prev in hops or prev["request"].get("hop") != hops[-1]["request"]["hop"] - 1:
+            return hops[::-1], [f"continues {pid}, which is not the previous hop of this chain"]
+        hops.append(prev)
+    return hops[::-1], []
+
+
+def _repair_link_issues(ev: dict, idx: _Index) -> list[tuple[str, str]]:
+    """The repairOf link of one model.call (FRR1, FRR2): it names a call logged once that is the
+    previous attempt of the same logical call (stage, role, agentId, ordinal; attempt - 1) and whose
+    answer was unusable. Empty without repairOf."""
+    pid = ev.get("repairOf")
+    if pid is None:
+        return []
+    prev = idx.call(pid)
+    if prev is None:
+        return [(".repairOf", f"repairs {pid}, which is not a model call logged once in this run")]
+    out = []
+    if any(ev[k] != prev[k] for k in ("stage", "role", "agentId", "ordinal")) \
+            or ev["attempt"] != prev["attempt"] + 1:
+        out.append((".repairOf", "repairOf does not name the previous attempt of the same logical call"))
+    if usable_output(prev):
+        out.append((".repairOf", "is a repair of a usable response; only an unusable answer is repaired"))
+    return out
+
+
+def _turn_call_issues(ev: dict, idx: _Index) -> list[tuple[str, str]]:
+    """Rules for one Turn model.call: its continuation link and the results it shows."""
+    req, out = ev["request"], []
+    if "hop" not in req:
+        return out
+    results = req.get("contextResults", [])
+    if req["hop"] == 0:
+        allowed = HOST_CONTEXT_STAGES.get(ev["stage"], ())
+        for i, tid in enumerate(results):
+            p, t = f".request.contextResults[{i}]", idx.tool(tid)
+            if t is None:
+                out.append((p, f"{tid} is not a tool call logged once in this run"))
+            elif "requestedBy" in t:
+                out.append((p, "hop 0 shows only host-prepared tool calls"))
+            elif t["stage"] not in allowed:
+                out.append((p, f"a {ev['stage']} call is shown {list(allowed)} context, not {t['stage']}"))
+            elif t["seq"] >= ev["seq"]:
+                out.append((p, "is logged after the call that shows it"))
+        return out
+    pid, p = req["continuationOf"], ".request.continuationOf"
+    prev = idx.call(pid)
+    if prev is None:
+        return [(p, f"{pid} is not a model call logged once in this run")]
+    if any(prev[k] != ev[k] for k in ("stage", "role", "agentId")) or \
+            any(prev["request"].get(k) != req.get(k) for k in _SAME_CHAIN):
+        out.append((p, "continues a call of another stage, role, agent, subject, prompt or schema"))
+    if prev["request"].get("hop") != req["hop"] - 1:
+        out.append((p, "the continued call is not hop - 1"))
+    if prev["ordinal"] >= ev["ordinal"]:
+        out.append((p, "a continuation needs a later ordinal than the hop it continues"))
+    if prev["seq"] >= ev["seq"]:
+        out.append((p, "continues a call logged later"))
+    if len({(c["agentId"], c["ordinal"]) for c in idx.continuations.get(pid, [])}) > 1:
+        out.append((p, "the previous hop is continued by more than one logical call (fork)"))
+    asked = turn_requests(prev)
+    if asked is None:
+        return out + [(p, "continues a call whose usable envelope requested no context")]
+    if len(results) != len(asked):
+        return out + [(".request.contextResults",
+                       f"shows {len(results)} results for {len(asked)} requests of the previous hop")]
+    earlier = {t["toolCallId"] for (by, _), ts in idx.requested.items() if by == pid for t in ts}
+    hops, _ = _hops(prev, idx)
+    for h in hops:
+        earlier.update(h["request"].get("contextResults", []))
+    for i, (cr, tid) in enumerate(zip(asked, results)):
+        p, t = f".request.contextResults[{i}]", idx.tool(tid)
+        if t is None:
+            out.append((p, f"{tid} is not a tool call logged once in this run"))
+        elif t["seq"] >= ev["seq"]:
+            out.append((p, "is logged after the call that shows it"))
+        elif (t.get("requestedBy"), t.get("requestIndex")) == (pid, i):
             continue
-        items = tc["result"]["evidence"]
-        items = items[c["index"]:c["index"] + 1] if "index" in c else items[:20]
-        if e in items:
-            return True
-    return False
+        elif not (tid in earlier and serves_request(cr, t)):
+            out.append((p, "is neither the tool call made for this request nor an earlier result of "
+                           "this chain that serves it"))
+    return out
+
+
+def _requested_tool_issues(t: dict, idx: _Index) -> list[tuple[str, str]]:
+    """Rules for one tool.call made because a Turn asked for it."""
+    if "requestedBy" not in t:
+        return []
+    pid, i, out = t["requestedBy"], t["requestIndex"], []
+    prev = idx.call(pid)
+    if prev is None:
+        return [(".requestedBy", f"{pid} is not a model call logged once in this run")]
+    if (prev["stage"], prev["agentId"]) != (t["stage"], t["agentId"]):
+        out.append((".requestedBy", "requested by a call of another stage or agent"))
+    if prev["seq"] >= t["seq"]:
+        out.append((".requestedBy", "logged before the call that requested it"))
+    asked = turn_requests(prev)
+    if asked is None or i >= len(asked):
+        return out + [(".requestIndex", "the requesting call made no request at this index")]
+    if len(idx.requested.get((pid, i), [])) > 1:
+        out.append((".requestIndex", "more than one tool call answers this request"))
+    if t["result"]["status"] in TRUSTED_TOOL_STATUSES and not serves_request(asked[i], t):
+        out.append((".args", "a usable result for another tool or other arguments than requested"))
+    if any(s["seq"] > t["seq"] for j in range(i) for s in idx.requested.get((pid, j), [])):
+        out.append((".requestIndex", "requests were executed out of index order"))
+    conts = idx.continuations.get(pid, [])
+    if conts:
+        if t["seq"] >= min(c["seq"] for c in conts):
+            out.append((".seq", "logged after the next hop started"))
+        if any(c["request"]["contextResults"][i:i + 1] != [t["toolCallId"]] for c in conts):
+            out.append((".toolCallId", "the next hop does not show this result at its request index"))
+    return out
+
+
+def _chain_issues(ev: dict, idx: _Index) -> list[str]:
+    """Every rule on ev's chain: each hop's link and shown results, the repair links of every attempt
+    of each hop (FRR1, FRR2), and each requested tool call the chain made. Empty for a legacy call.
+    Repair links are provenance rules, as for legacy calls; check_turn_trace does not apply them."""
+    if "hop" not in ev["request"]:
+        return []
+    hops, bad = _hops(ev, idx)
+    out = list(bad)
+    for h in hops:
+        out += [f"hop {h['request']['hop']} ({h['callId']}){p}: {m}" for p, m in _turn_call_issues(h, idx)]
+        for a in _repair_chain(h["callId"], idx.calls)[:-1]:
+            out += [f"hop {h['request']['hop']} ({a}){p}: {m}"
+                    for p, m in _repair_link_issues(idx.calls[a], idx)]
+        for (by, _), ts in idx.requested.items():
+            if by == h["callId"]:
+                out += [f"{t['toolCallId']}{p}: {m}" for t in ts for p, m in _requested_tool_issues(t, idx)]
+    return out
+
+
+def _citable(ev: dict, idx: _Index) -> dict:
+    cid = ev["callId"]
+    if cid not in idx.cache:
+        if "hop" in ev["request"]:
+            got: dict = {}
+            if not _chain_issues(ev, idx):
+                for h in _hops(ev, idx)[0]:
+                    for tid in h["request"].get("contextResults", []):
+                        got[tid] = idx.tool(tid)
+            idx.cache[cid] = got
+        else:
+            allowed = HOST_CONTEXT_STAGES.get(ev["stage"], ())
+            idx.cache[cid] = {tid: t for tid, t in idx.tools.items()
+                              if idx.logged[tid] == 1 and "requestedBy" not in t
+                              and t["stage"] in allowed and t["seq"] < ev["seq"]}
+    return idx.cache[cid]
+
+
+def _run_of(call_id, events):
+    return next((e.get("runId") for e in events if isinstance(e, dict)
+                 and e.get("type") == "model.call" and e.get("callId") == call_id), None) \
+        if isinstance(events, list) else None
+
+
+def turn_chain(call_id: str, events: list) -> tuple[list[dict], list[Issue]]:
+    """(hop events root-first, issues) for the chain ending at call_id. A legacy call is its own
+    one-element chain with no issues; an unknown or duplicated id gives ([], [issue])."""
+    idx = _Index(events, _run_of(call_id, events))
+    ev = idx.call(call_id)
+    if ev is None:
+        return [], [Issue("$", "turn-chain", f"{call_id} is not a model call logged once in this run")]
+    hops = _hops(ev, idx)[0] if "hop" in ev["request"] else [ev]
+    return hops, [Issue("$", "turn-chain", m) for m in _chain_issues(ev, idx)]
+
+
+def citable_tool_calls(call_id: str, events: list) -> dict:
+    """toolCallId -> tool.call event that the call `call_id` was shown and may cite. Turn call: the
+    union of contextResults over its own valid chain ({} if the chain is invalid). Legacy call: tool
+    calls logged once before it, not model-requested, from HOST_CONTEXT_STAGES[its stage]. Pass this
+    to severity.materialize_evidence instead of every tool call of the run."""
+    idx = _Index(events, _run_of(call_id, events))
+    ev = idx.call(call_id)
+    return {} if ev is None else dict(_citable(ev, idx))
+
+
+def check_turn_trace(events: list) -> list[Issue]:
+    """Causal rules of retrieval chains over one run's trace (part of validate_trace). Legacy events
+    are unaffected. See ModelRequest/TraceEvent descriptions and S1-01-interface.md section 2."""
+    idx = _Index(events)
+    out: list[Issue] = []
+    for n, ev in enumerate(events if isinstance(events, list) else []):
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("type") == "model.call" and idx.call(ev.get("callId")) is ev:
+            out += [Issue(f"[{n}]{p}", "turn-trace", m) for p, m in _turn_call_issues(ev, idx)]
+        elif ev.get("type") == "tool.call" and idx.tool(ev.get("toolCallId")) is ev:
+            out += [Issue(f"[{n}]{p}", "turn-trace", m) for p, m in _requested_tool_issues(ev, idx)]
+    return out
+
+
+def _cited(e: dict, cited: list, idx: _Index) -> str | None:
+    """None when e is what severity.materialize_evidence makes of a citation of one of the `cited`
+    (citations, citing call) pairs: the same code citation (excerpt included), or an item copied from
+    a tool call the citing call could cite. Otherwise the reason it is not."""
+    tid = e.get("toolCallId")
+    if tid is None:
+        hit = any(c["kind"] == "code" and all(c[k] == e[k] for k in _CITATION_KEYS)
+                  for citations, _ in cited for c in citations)
+        return None if hit else "was not cited by"
+    named = False
+    for citations, ev in cited:
+        tc = _citable(ev, idx).get(tid)
+        for c in citations:
+            if c["kind"] != "tool-ref" or c["toolCallId"] != tid:
+                continue
+            named = True
+            if tc is None or tc["seq"] >= ev["seq"]:
+                continue
+            items = tc["result"]["evidence"]
+            items = items[c["index"]:c["index"] + 1] if "index" in c else items[:20]
+            if e in items:
+                return None
+    return ("names a tool call that was not shown to (citable by)" if named
+            else "was not cited by")
 
 
 def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
-    """Cross-trace check for one Finding against its run's trace events (s0a-contracts@5).
+    """Cross-trace check for one Finding against its run's trace events (s0a-contracts@6).
 
     - Every referenced call id is logged exactly once in this run (a duplicate id is never used).
-    - sourceCallId is a valid, successful INVESTIGATE/investigator model.call whose output is a
-      valid InvestigatorOutput with an entry `index` such that hypothesis_id(specialist, index,
-      claim, path, line) == Finding.id, and the Finding's PROPOSAL_FIELDS equal that entry.
-    - Every verification callId is a valid, successful VERIFY/verifier model.call logged after
-      the source call, whose request.hypothesisId is Finding.id, which is not a repair of the
-      source call, and whose output is a valid VerifierOutput with verdict 'confirmed' and the
-      Finding's severityBasis (impact, reachable). A call and its retries/repairs (same agent
-      and ordinal, or the same repair chain) count once.
+    - sourceCallId is a successful INVESTIGATE/investigator model.call whose terminal_payload (the
+      plain output, or the final Turn envelope's output) is a valid InvestigatorOutput with an entry
+      `index` such that hypothesis_id(specialist, index, claim, path, line) == Finding.id, and the
+      Finding's PROPOSAL_FIELDS equal that entry.
+    - Every verification callId is a successful VERIFY/verifier model.call logged after the source
+      call, whose request.hypothesisId is Finding.id, which is not a repair of the source call, and
+      whose terminal_payload is a valid VerifierOutput with verdict 'confirmed' and the Finding's
+      severityBasis. A call and its retries/repairs (same agent and ordinal, the same repair chain
+      or the same Turn chain) count once.
+    - Repairs: each repairOf link joins consecutive attempts of one logical call (stage, role,
+      agentId, ordinal; attempt + 1), and every repaired predecessor is logged once and unusable
+      (FRR1, FRR2). A Turn call must sit on a valid chain (_chain_issues), which applies the repair
+      rule to every attempt of every hop, not only the listed call; the hypothesisId binds every hop
+      of a verifier chain.
     - Finding.evidence is materialized from the proposal's citations and verification.evidence
-      from the confirming calls' citations. Non-code Evidence names a tool.call logged once in
-      this run with a usable status, and is an item of that call's result.
+      from the confirming calls' citations. Evidence carrying a toolCallId (any non-code kind, and
+      code read through a tool-ref, D2) names a tool.call logged once with a usable status, is an
+      item of that call's result within the citation's index/first-20 slice, and the call is
+      citable by the citing model call (citable_tool_calls) and logged before it (FRR3). Code
+      evidence without toolCallId equals a code citation.
 
     Event ids are payload-bound (validate TraceEvent), so a relabelled stage, role or request
     cannot reuse another call's id. This detects inconsistency, not a consistently rewritten
@@ -316,21 +665,8 @@ def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
     out = [Issue(f"$finding{x.path[1:]}", x.code, x.message) for x in validate("Finding", finding)]
     if out:
         return out
-    run = finding["runId"]
-    logged: dict[str, int] = {}
-    calls: dict[str, dict] = {}
-    tools: dict[str, dict] = {}
-    for ev in events if isinstance(events, list) else []:
-        if not isinstance(ev, dict) or ev.get("runId") != run:
-            continue
-        kind = ev.get("type")
-        key = ev.get("callId") if kind == "model.call" else ev.get("toolCallId") \
-            if kind == "tool.call" else None
-        if not isinstance(key, str):
-            continue
-        logged[key] = logged.get(key, 0) + 1   # counted even if invalid: a twin poisons the id
-        if not validate("TraceEvent", ev):
-            (calls if kind == "model.call" else tools)[key] = ev
+    idx = _Index(events, finding["runId"])
+    calls, tools, logged = idx.calls, idx.tools, idx.logged
 
     def issue(path: str, message: str) -> None:
         out.append(Issue(path, "provenance", message))
@@ -349,15 +685,24 @@ def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
         if ev["response"] is None or ev["response"]["status"] != "ok":
             issue(path, f"{cid} did not return a usable response")
             return None
+        # A Turn call's repair links (every hop, every attempt) are part of _chain_issues.
+        for a in _repair_chain(cid, calls)[:-1] if "hop" not in ev["request"] else ():
+            for _, m in _repair_link_issues(calls[a], idx):
+                issue(path, m)
+            if idx.call(calls[a]["repairOf"]) is None:
+                break
+        for m in _chain_issues(ev, idx):
+            issue(path, f"retrieval chain: {m}")
         return ev
 
     src = finding["sourceCallId"]
     src_ev = ok_call(src, "INVESTIGATE", "investigator", "$finding.sourceCallId")
     proposal = None
     if src_ev is not None:
-        output = src_ev["response"]["output"]
-        if validate("InvestigatorOutput", output):
-            issue("$finding.sourceCallId", "source call output is not a valid InvestigatorOutput")
+        output = terminal_payload(src_ev)
+        if output is None:
+            issue("$finding.sourceCallId", "source call output is not a valid InvestigatorOutput"
+                  + (" final Turn" if "hop" in src_ev["request"] else ""))
         else:
             proposal = next((h for n, h in enumerate(output["hypotheses"]) if hypothesis_id(
                 finding["specialist"], n, h["claim"], h["location"]["path"],
@@ -382,26 +727,28 @@ def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
         chain = _repair_chain(cid, calls)
         if src in chain:
             issue(path, "verifier call is a repair of the source call")
-        logical = {("call", ev["agentId"], ev["ordinal"]), ("chain", chain[-1])}
+        logical = {("call", ev["agentId"], ev["ordinal"]), ("chain", chain[-1]),
+                   ("turn", _hops(ev, idx)[0][0]["callId"])}
         if logical & counted:
             issue(path, "repeats a listed verification (same logical call or its repair)")
         counted |= logical
-        output = ev["response"]["output"]
-        if validate("VerifierOutput", output) or output.get("verdict") != "confirmed":
+        output = terminal_payload(ev)
+        if output is None or output.get("verdict") != "confirmed":
             issue(path, "verifier call did not confirm")
             continue
         if {"impact": output["impact"], "reachable": output["reachable"]} != finding["severityBasis"]:
             issue(path, "severityBasis differs from this verifier call's impact/reachable")
-        confirmed = (confirmed or []) + output["evidence"]
+        confirmed = (confirmed or []) + [(output["evidence"], ev)]
 
     for side, evs, cited, who in (
-            ("evidence", finding["evidence"], proposal and proposal["evidence"], "the proposal"),
+            ("evidence", finding["evidence"],
+             proposal and [(proposal["evidence"], src_ev)], "the proposal"),
             ("verification.evidence", finding["verification"]["evidence"], confirmed,
              "a confirming verifier call")):
         for i, e in enumerate(evs):
             path = f"$finding.{side}[{i}]"
-            if e["kind"] != "code":
-                tid = e["toolCallId"]
+            tid = e.get("toolCallId")
+            if tid is not None:
                 tc = tools.get(tid)
                 if logged.get(tid, 0) > 1:
                     issue(path, "names a tool call logged more than once in this run")
@@ -415,8 +762,9 @@ def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
                 if e not in tc["result"]["evidence"]:
                     issue(path, "is not an item of the named tool call's result")
                     continue
-            if cited is not None and not _cited(e, cited, tools):
-                issue(path, f"was not cited by {who}")
+            why = _cited(e, cited, idx) if cited is not None else None
+            if why is not None:
+                issue(path, f"{why} {who}")
     return out
 
 
@@ -541,7 +889,7 @@ RoleSpec = Obj(
     required={"provider": Enum(*PROVIDERS), "model": Str(min_len=1, max_len=128),
               "family": Str(min_len=1, max_len=64), "resolved": Bool(),
               "promptVersion": PromptVersion,
-              "outputSchema": Enum("InvestigatorOutput", "VerifierOutput", "JudgeOutput"),
+              "outputSchema": Enum(*OUTPUT_SCHEMAS),
               "params": Json(),
               "caps": Obj(required={"maxOutputTokens": Int(1, 1_000_000),
                                     "timeoutSec": Int(1, 3600),
@@ -558,7 +906,13 @@ ModelProfile = define("ModelProfile", Obj(
               "triage": Str(min_len=1, max_len=64),
               "roles": Obj(required={"investigator": RoleSpec, "verifier": RoleSpec,
                                      "judge": RoleSpec})},
-    description="Immutable; a change is a new version. Referenced as '<id>@<version>'.",
+    invariants=[Invariant("role-schema", "each role returns its own plain or Turn schema",
+                          lambda d: [(f".roles.{r}.outputSchema", f"a {r} role returns one of "
+                                      f"{list(ROLE_SCHEMAS[r])}")
+                                     for r, s in d["roles"].items()
+                                     if s["outputSchema"] not in ROLE_SCHEMAS[r]])],
+    description="Immutable; a change is a new version. Referenced as '<id>@<version>'. A "
+                "retrieval profile sets investigator/verifier outputSchema to the Turn schema.",
 ))
 
 
@@ -678,26 +1032,45 @@ ToolResult = define("ToolResult", Obj(
 Message = Obj(required={"role": Enum("system", "user", "assistant", "tool"),
                         "content": Str(max_len=2_000_000)})
 
-ROLE_OUTPUT = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput",
-               "judge": "JudgeOutput"}
+def _request_turn_ok(d):
+    turn = d["outputSchema"] in TURN_PAYLOAD
+    if turn != ("hop" in d):
+        yield ".hop", "present exactly on Turn (retrieval) requests"
+    if "contextResults" in d and not turn:
+        yield ".contextResults", "only Turn requests list the tool results they show"
+    hop = d.get("hop", 0)
+    if (hop > 0) != ("continuationOf" in d):
+        yield ".continuationOf", "present exactly when hop > 0"
+    if hop > 0 and "contextResults" not in d:
+        yield ".contextResults", "a continuation shows the previous hop's requested results"
+
 
 ModelRequest = define("ModelRequest", Obj(
     required={"provider": Enum(*PROVIDERS), "model": Str(min_len=1, max_len=128),
               "profile": ProfileRef, "role": Enum(*ROLE_OUTPUT),
               "promptVersion": PromptVersion,
-              "outputSchema": Enum(*ROLE_OUTPUT.values()),
+              "outputSchema": Enum(*OUTPUT_SCHEMAS),
               "params": Json(), "messages": Arr(Message, min_items=1, max_items=1000),
               "tools": Arr(Json(), max_items=100)},
-    optional={"hypothesisId": Id("hyp")},
+    optional={"hypothesisId": Id("hyp"), "hop": Int(0, MAX_HOP), "continuationOf": Id("call"),
+              "contextResults": Arr(Id("tool"), max_items=200)},
     invariants=[Invariant("request-subject", "hypothesisId only on verifier requests",
                           lambda d: [(".hypothesisId", "only a verifier request names a hypothesis")]
                           if "hypothesisId" in d and d["role"] != "verifier" else []),
+                Invariant("request-turn", "hop iff Turn schema; continuationOf iff hop > 0; "
+                          "contextResults only on Turn requests, required when hop > 0",
+                          _request_turn_ok),
                 no_secrets("ModelRequest")],
-    description="Redacted before hashing. Must not contain run ids or timestamps. "
-                "requestHash = canonical.request_hash(request), which enforces both. "
-                "hypothesisId names the hypothesis a verifier request checks and is covered by "
-                "requestHash; a verifier call without it cannot confirm a Finding "
-                "(check_finding_provenance). Other calls omit it.",
+    description="Redacted before hashing; requestHash = canonical.request_hash(request). Closed and "
+                "typed: no field carries a run/eval id or timestamp, and prompt text is built from "
+                "content-addressed inputs only (D6: host metadata is kept out by construction, a "
+                "leak makes strict replay miss; repository text is never filtered). "
+                "hypothesisId names the hypothesis a verifier request checks; a verifier call "
+                "without it cannot confirm a Finding. Turn requests carry hop (0..15), "
+                "continuationOf (callId of the previous hop's accepted attempt, hop > 0) and "
+                "contextResults (toolCallIds shown, in order: host-prepared context at hop 0, one "
+                "per previous-hop contextRequest after). All are covered by requestHash; "
+                "check_turn_trace states the chain rules. Legacy requests omit them.",
 ))
 
 
@@ -785,11 +1158,14 @@ def _model_call_ok(d):
         yield ".costRecordId", "must equal cost_id(callId)"
     if d["request"]["role"] != d["role"]:
         yield ".request.role", "must equal the event role"
-    if d["request"]["outputSchema"] != ROLE_OUTPUT[d["role"]]:
-        yield ".request.outputSchema", f"a {d['role']} call requests {ROLE_OUTPUT[d['role']]}"
+    if d["request"]["outputSchema"] not in ROLE_SCHEMAS[d["role"]]:
+        yield ".request.outputSchema", (f"a {d['role']} call requests one of "
+                                        f"{list(ROLE_SCHEMAS[d['role']])}")
 
 
 def _tool_call_ok(d):
+    if ("requestedBy" in d) != ("requestIndex" in d):
+        yield ".requestedBy", "requestedBy and requestIndex come together"
     if d["toolCallId"] != tool_call_id(d["stage"], d["agentId"], d["ordinal"], d["tool"], d["args"]):
         yield ".toolCallId", "must equal tool_call_id(stage, agentId, ordinal, tool, args)"
     if d["resultHash"] != digest(d["result"]):
@@ -816,9 +1192,10 @@ TraceEvent = define("TraceEvent", Union("type", {
         "toolCallId": Id("tool"), "stage": Stage, "agentId": Slug, "ordinal": Int(0, 10**6),
         "tool": Slug, "args": Json(), "resultHash": Digest, "result": ToolResult,
         "redactions": Redactions},
-        {"costRecordId": Id("cost"), "latencyMs": Int(0, 10**9)},
+        {"costRecordId": Id("cost"), "latencyMs": Int(0, 10**9), "requestedBy": Id("call"),
+         "requestIndex": Int(0, MAX_TURN_REQUESTS - 1)},
         [Invariant("tool-identity", "toolCallId, resultHash and costRecordId recompute from the "
-                   "payload", _tool_call_ok)]),
+                   "payload; requestedBy and requestIndex come together", _tool_call_ok)]),
     "cost": _event("cost", {"record": CostRecord}),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
@@ -831,7 +1208,8 @@ TraceEvent = define("TraceEvent", Union("type", {
 def validate_trace(events: list) -> list[Issue]:
     """Per-event validation (including payload hash/id recomputation) plus file rules: seq
     0,1,2..., one runId, run.start first (naming the same run), run.end only last, each call id
-    logged once, and cost records in the file naming the call that references them."""
+    logged once, cost records in the file naming the call that references them, and the causal
+    rules of retrieval chains (check_turn_trace)."""
     if not isinstance(events, list) or not events:
         return [Issue("$", "trace-empty", "a trace has at least a run.start event")]
     out: list[Issue] = []
@@ -861,7 +1239,7 @@ def validate_trace(events: list) -> list[Issue]:
         rec = costs.get(ev.get("costRecordId"))
         if rec is not None and rec.get("callId", rec.get("toolCallId")) != cid:
             out.append(Issue(f"[{i}].costRecordId", "trace-cost", "cost record names another call"))
-    return out
+    return out + check_turn_trace(events)
 
 # ---------------------------------------------------------------- stage artifacts
 

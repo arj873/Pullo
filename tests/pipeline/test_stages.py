@@ -61,19 +61,37 @@ class Investigate(Rig):
         self.assertEqual(res.hypotheses[0]["evidence"][0]["commit"], m.base_id)
         self.assertTrue(res.hypotheses[0]["evidence"][0]["resolved"])
 
-    def test_schema_invalid_output_with_ok_status_is_a_typed_failure_not_invented_hypotheses(self):
+    def test_schema_invalid_output_with_ok_status_is_repaired_once_then_a_typed_failure_not_invented_hypotheses(self):
+        # D3: the gateway validates a status-ok answer against the profile's schema and grants the ONE bounded repair
+        # (a second admitted attempt). A second invalid answer ends as repair-exhausted; nothing is invented.
         m = self.mini()
-        broken = entry("INVESTIGATE", "investigator", "generalist", 0, 0,
-                       response=resp({"hypotheses": [{"claim": "no other fields"}]}))
-        res, spy = self.record(m, script(broken))
+        bad = lambda a: entry("INVESTIGATE", "investigator", "generalist", 0, a,
+                              response=resp({"hypotheses": [{"claim": "no other fields"}]}))
+        res, spy = self.record(m, script(bad(0), bad(1)))
         self.assertEqual(res.status, "failed")
-        self.assertEqual(res.error["code"], "schema-invalid")
+        self.assertEqual(res.error["code"], "repair-exhausted")
+        self.assertEqual(res.error["detail"]["repairsUsed"], 1)
         self.assertEqual(res.hypotheses, [])
-        self.assertEqual(spy.calls, 1)
+        self.assertEqual(spy.calls, 2)                                          # first attempt + the one repair
+        calls = model_calls(res, "INVESTIGATE")
+        self.assertEqual([c["attempt"] for c in calls], [0, 1])
+        self.assertEqual(calls[1]["repairOf"], calls[0]["callId"])
+        self.assertEqual(calls[0]["response"]["status"], "ok")                   # the receipt is kept as received
         self.assertEqual(res.stages["INVESTIGATE"]["status"], "failed")
         self.assertIn("error", [e["type"] for e in events_of(res)])
         self.assertEqual(res.comments, [])
         self.assertIn("did not finish", Path(res.review_path).read_text())
+
+    def test_schema_invalid_ok_answer_followed_by_a_valid_repair_yields_the_hypothesis(self):
+        m = self.mini()
+        h = hyp(m, "src/a.py", 2)
+        broken = entry("INVESTIGATE", "investigator", "generalist", 0, 0, response=resp({"hypotheses": [{"claim": "x"}]}))
+        res, spy = self.record(m, script(broken, inv(h, attempt=1), ver(0, m, path="src/a.py", line=2),
+                                         judge(wording([hid(0, h)]))))
+        self.assertEqual((res.status, len(res.comments), spy.calls), ("completed", 1, 4))
+        src = res.hypotheses[0]["sourceCallId"]
+        self.assertEqual(src, model_calls(res, "INVESTIGATE")[1]["callId"])       # the usable attempt, not the invalid one
+        self.assertEqual(check_finding_provenance(res.findings[0], events_of(res)), [])
 
     def test_source_call_is_the_actual_successful_attempt_after_a_repair(self):
         m = self.mini()
@@ -162,14 +180,16 @@ class Verify(Rig):
         self.assertEqual(res.status, "completed")
 
     def test_verifier_output_failing_its_schema_is_a_verifier_failure(self):
-        bad = entry("VERIFY", "verifier", "verifier", 0, 0, response=resp({"verdict": "confirmed"}))
-        res, _ = self.run2([bad], [ver(1, self.m, path="src/a.py", line=5)], [wording([hid(1, self.h1)])])
+        # D3: one bounded repair is granted to a schema-invalid status-ok answer; a second one is repair-exhausted
+        bad = lambda a: entry("VERIFY", "verifier", "verifier", 0, a, response=resp({"verdict": "confirmed"}))
+        res, spy = self.run2([bad(0), bad(1)], [ver(1, self.m, path="src/a.py", line=5)], [wording([hid(1, self.h1)])])
         self.assertEqual(res.status, "partial")
         self.assertEqual([i["reason"] for i in res.incomplete], ["verifier-failure"])
         self.assertEqual([f["id"] for f in res.findings], [hid(1, self.h1)])       # the other candidate survives
         self.assertEqual(len(res.comments), 1)
         self.assertEqual([v["verdict"] for v in res.verifications], ["failed", "confirmed"])
-        self.assertEqual(res.verifications[0]["error"]["code"], "schema-invalid")
+        self.assertEqual(res.verifications[0]["error"]["code"], "repair-exhausted")
+        self.assertEqual(len(res.verifications[0]["callIds"]), 2)                  # both attempts are named, both were charged
         self.assertEqual(res.stages["VERIFY"]["status"], "partial")
 
     def test_failed_verification_of_one_candidate_makes_the_run_partial_while_others_survive(self):
@@ -206,19 +226,19 @@ class Verify(Rig):
         self.assertEqual(validate("Comment", res.comments[0]), [])
         self.assertIn(tcid, [e.get("toolCallId") for e in res.comments[0]["evidence"]])
 
-    def test_code_evidence_obtained_through_a_tool_ref_fails_closed_today(self):
-        # DEPENDENCY LIMIT (reported to the contracts owner in S0-07.md): materialize_evidence turns a tool-ref to a
-        # read_file result into resolved CODE evidence, but check_finding_provenance only accepts code evidence that
-        # matches a code citation. The engine therefore refuses to mint the Finding (it never bypasses the check).
-        loc = self.h0["location"]
+    def test_unchanged_file_read_file_result_cited_by_tool_ref_is_accepted_end_to_end(self):
+        # D2 (contracts@6): a tool-ref to a read_file result of the verifier's own host-prepared window materializes as
+        # resolved CODE evidence that carries its toolCallId, and provenance accepts it as a tool item.
         args = normalize("read_file", {"side": "head", "path": "src/a.py", "start_line": 1, "end_line": 22}, Limits())
         tcid = tool_call_id("VERIFY", "verifier", 0, "read_file", args)
         res, _ = self.run2([ver(0, self.m, evidence=[{"kind": "tool-ref", "toolCallId": tcid, "index": 0}])],
-                           [ver(1, self.m, verdict="uncertain")])
-        self.assertEqual(res.findings, [])
-        self.assertEqual(res.verifications[0]["verdict"], "failed")
-        self.assertIn("was not cited by a confirming verifier call", res.verifications[0]["error"]["message"])
-        self.assertEqual((res.status, [i["reason"] for i in res.incomplete]), ("partial", ["verifier-failure"]))
+                           [ver(1, self.m, verdict="uncertain")], [wording([hid(0, self.h0)], "F", "b")])
+        self.assertEqual([f["id"] for f in res.findings], [hid(0, self.h0)])
+        ev = res.findings[0]["verification"]["evidence"][0]
+        self.assertEqual((ev["kind"], ev["toolCallId"], ev["path"], ev["resolved"]), ("code", tcid, "src/a.py", True))
+        self.assertEqual(check_finding_provenance(res.findings[0], events_of(res)), [])
+        self.assertEqual(res.verifications[0]["verdict"], "confirmed")
+        self.assertEqual((res.status, len(res.comments)), ("completed", 1))
 
     def test_a_verifier_cannot_cite_a_tool_call_that_does_not_exist(self):
         ghost = {"kind": "tool-ref", "toolCallId": "tool_" + "0" * 16}
@@ -285,29 +305,64 @@ class Judge(Rig):
             vs = [verify_over.get(i, v) for i, v in enumerate(vs)]
         return script(inv(*hs), *vs, *([judge_entry] if judge_entry else []))
 
-    def test_duplicates_merge_into_candidate_zero_but_nearby_distinct_issues_stay_separate(self):
+    def dup_case(self):
         m = self.mini()
-        a = hyp(m, "src/a.py", 2, claim="one description")
-        a2 = hyp(m, "src/a.py", 2, claim="another description of the same defect")
+        a = hyp(m, "src/a.py", 2, claim="operator flipped")
+        a2 = hyp(m, "src/a.py", 2, claim="returns int where callers rely on float")
         near = hyp(m, "src/a.py", 5, claim="distinct bug three lines away")
         diff_cite = hyp(m, "src/a.py", 2, claim="same line, different evidence", evidence=[m.cite("src/a.py", 1, 2)])
         diff_impact = hyp(m, "src/a.py", 2, claim="same line, other impact", impact="crash")
         hs = [a, near, a2, diff_cite, diff_impact]
         vs = [ver(0, m, path="src/a.py", line=2), ver(1, m, path="src/a.py", line=5), ver(2, m, path="src/a.py", line=2),
               ver(3, m, path="src/a.py", line=2), ver(4, m, path="src/a.py", line=2, impact="crash")]
-        res, _ = self.record(m, script(inv(*hs), *vs, judge(wording([hid(0, a)], "A", "b"), wording([hid(1, near)], "N", "b"),
-                                                            wording([hid(3, diff_cite)], "C", "b"),
-                                                            wording([hid(4, diff_impact)], "I", "b"))))
+        return m, hs, vs
+
+    def test_same_issue_key_alone_never_drops_a_verified_claim(self):
+        m, (a, near, a2, diff_cite, diff_impact), vs = self.dup_case()
+        hs = [a, near, a2, diff_cite, diff_impact]
+        res, _ = self.record(m, script(inv(*hs), *vs, judge(*[wording([hid(i, h)], f"t{i}", "b") for i, h in enumerate(hs)])))
+        self.assertEqual([d for d in res.drops if d["reason"] == "merged"], [])
+        self.assertEqual(sorted(c["findingIds"][0] for c in res.comments), sorted(hid(i, h) for i, h in enumerate(hs)))
+        jreq = json.loads(model_calls(res, "JUDGE")[0]["request"]["messages"][1]["content"])
+        self.assertEqual(jreq["duplicateCandidateGroups"], [[hid(0, a), hid(2, a2)]])       # a candidate, not a verdict
+        # without any judge grouping (judge unavailable) both same-key claims are still reported
+        fail = [entry("JUDGE", "judge", "judge", 0, k, error=terr("provider-error", "JUDGE")) for k in range(3)]
+        res2, _ = self.record(m, script(inv(*hs), *vs, *fail), eval_id="evr_" + "5" * 16)
+        self.assertEqual(len(res2.comments), 5)
+        self.assertIn("float", json.dumps(res2.comments))
+
+    def test_judge_proposed_duplicate_is_merged_only_inside_a_key_group_and_keeps_every_claim(self):
+        m, (a, near, a2, diff_cite, diff_impact), vs = self.dup_case()
+        hs = [a, near, a2, diff_cite, diff_impact]
+        res, _ = self.record(m, script(inv(*hs), *vs, judge(
+            wording([hid(0, a), hid(2, a2)], "Same defect", "judged"), wording([hid(1, near)], "N", "b"),
+            wording([hid(3, diff_cite)], "C", "b"), wording([hid(4, diff_impact)], "I", "b"))))
+        self.assertEqual(res.status, "completed")
         merged = [d for d in res.drops if d["reason"] == "merged"]
         self.assertEqual([d["subjectIds"] for d in merged], [[hid(2, a2)]])
-        self.assertIn(hid(0, a), merged[0]["detail"])
-        self.assertEqual(sorted(c["findingIds"][0] for c in res.comments),
-                         sorted([hid(0, a), hid(1, near), hid(3, diff_cite), hid(4, diff_impact)]))
         self.assertEqual(len(res.comments), 4)
-        # the judge request only ever showed verified survivors, never the merged duplicate
-        jreq = json.loads(model_calls(res, "JUDGE")[0]["request"]["messages"][1]["content"])
-        self.assertNotIn(hid(2, a2), json.dumps(jreq))
-        self.assertEqual(len(jreq["verifiedFindings"]), 4)
+        c = next(c for c in res.comments if hid(2, a2) in c["findingIds"])
+        self.assertEqual(c["findingIds"], [hid(0, a), hid(2, a2)])
+        self.assertIn("returns int where callers rely on float", c["body"])            # the second claim survives
+        self.assertEqual(c["severity"], "P1")                                           # nothing promoted
+        self.assertEqual(c["title"], "Same defect")
+
+    def test_judge_cannot_merge_across_keys_or_unverified_findings(self):
+        m, (a, near, a2, diff_cite, diff_impact), vs = self.dup_case()
+        hs = [a, near, a2, diff_cite, diff_impact]
+        res, _ = self.record(m, script(inv(*hs), *vs, judge(wording([hid(0, a), hid(1, near)], "x", "y"))))
+        self.assertEqual(res.status, "partial")
+        self.assertIn("duplicate-candidate group", res.incomplete[0]["detail"])
+        self.assertEqual(len(res.comments), 5)
+
+    def test_identical_claim_at_the_same_anchor_is_one_comment_with_both_ids(self):
+        m = self.mini()
+        a, a2 = hyp(m, "src/a.py", 2, claim="same words"), hyp(m, "src/a.py", 2, claim="same words")
+        res, _ = self.record(m, script(inv(a, a2), ver(0, m, path="src/a.py", line=2), ver(1, m, path="src/a.py", line=2),
+                                       judge(wording([hid(0, a)], "T", "b"))))
+        self.assertEqual(len(res.comments), 1)
+        self.assertEqual(res.comments[0]["findingIds"], [hid(0, a), hid(1, a2)])
+        self.assertEqual([d["subjectIds"] for d in res.drops if d["reason"] == "merged"], [[hid(1, a2)]])
 
     def test_cap_keeps_the_most_severe_then_deterministic_order_and_records_over_cap_drops(self):
         m, hs = self.multi(7)
@@ -365,7 +420,7 @@ class Judge(Rig):
     def test_judge_regrouping_or_double_commenting_is_rejected(self):
         m, hs = self.multi(2)
         ids = [hid(0, hs[0]), hid(1, hs[1])]
-        self.check_rejected(judge(wording(ids, "merged", "x")), "regrouping", n=2)
+        self.check_rejected(judge(wording(ids, "merged", "x")), "duplicate-candidate group", n=2)
         self.check_rejected(judge(wording([ids[0]], "a", "x"), wording([ids[0]], "b", "x")), "two comments", n=2)
 
     def test_judge_unsafe_suggestions_are_rejected(self):
@@ -374,11 +429,11 @@ class Judge(Rig):
         self.check_rejected(judge(wording([i], "t", "b", suggestion="```suggestion\nreturn x + 0\n```")), "suggestion")
         self.check_rejected(judge(wording([i], "t", "b", suggestion="x" * 2500)), "suggestion")
 
-    def test_judge_referencing_a_merged_duplicate_is_rejected(self):
+    def test_judge_referencing_a_refuted_candidate_is_rejected(self):
         m = self.mini()
-        a, a2 = hyp(m, "src/a.py", 2, claim="one"), hyp(m, "src/a.py", 2, claim="two")
-        scr = script(inv(a, a2), ver(0, m, path="src/a.py", line=2), ver(1, m, path="src/a.py", line=2),
-                     judge(wording([hid(1, a2)], "dup", "x")))
+        a, a2 = hyp(m, "src/a.py", 2, claim="one"), hyp(m, "src/a.py", 5, claim="two")
+        scr = script(inv(a, a2), ver(0, m, path="src/a.py", line=2), ver(1, m, verdict="refuted", evidence=[m.cite("src/a.py", 5)]),
+                     judge(wording([hid(1, a2)], "refuted", "x")))
         res, _ = self.record(m, scr)
         self.assertEqual(res.status, "partial")
         self.assertEqual([c["findingIds"] for c in res.comments], [[hid(0, a)]])

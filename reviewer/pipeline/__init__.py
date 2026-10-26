@@ -8,8 +8,11 @@ from .backends import RecordBackend, ReplayBackend, read_recording_receipt
 from .errors import PipelineError
 from .identity import PIPELINE_VERSION, engine_identity
 from .runner import load_result, run_review, validate_spec
-from .spec import EvalIdentity, HostConfig, Hooks, ReviewSpec, RunResult, SnapshotInput
+from .retrieval import RetrievalPolicy
+from .spec import (EvalIdentity, ForkFrom, HostConfig, Hooks, RepositoryImports, ReviewSpec, RunResult, SnapshotInput,
+                   StageReplay)
 
-__all__ = ["EvalIdentity", "HostConfig", "Hooks", "PIPELINE_VERSION", "PipelineError", "RecordBackend",
-           "ReplayBackend", "ReviewSpec", "RunResult", "SnapshotInput", "engine_identity", "load_result",
+__all__ = ["EvalIdentity", "ForkFrom", "HostConfig", "Hooks", "PIPELINE_VERSION", "PipelineError", "RecordBackend",
+           "ReplayBackend", "RepositoryImports", "RetrievalPolicy", "ReviewSpec", "RunResult", "SnapshotInput",
+           "StageReplay", "engine_identity", "load_result",
            "read_recording_receipt", "run_review", "validate_spec"]

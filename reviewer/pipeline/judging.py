@@ -1,24 +1,30 @@
 """Deterministic JUDGE logic: duplicate merge, severity ceiling, ranking, cap and Comment construction.
 
-The judge MODEL only supplies wording for findings that survive this logic. It cannot mint findings, anchors,
-severity or evidence, and it never decides what is dropped.
+The judge MODEL only supplies wording for findings that survive this logic, plus optional host-validated
+groupings of key-candidate duplicates. It cannot mint findings, anchors, severity or evidence, and it never drops
+a finding on its own say-so.
 
-Issue key (issue-key@1). Two verified findings are the same issue only when ALL hold: same location path,
-category, impact, start line and end line, AND the same set of code citations (path + lines) in the
-proposals. Nearby claims that merely share path/category/line window, or that cite different code, stay
-separate. The key never reads claim wording, so it merges the same defect described twice but also two
-distinct defects that share every one of those fields: that is a stated limit of this conservative rule.
-The earliest original candidate index is kept.
+Issue key (issue-key@2). The key is only a NECESSARY condition for "same issue": same location path,
+category, impact, start line and end line, AND the same set of code citations (path + lines) in the proposals.
+Two verified findings that share it are candidate duplicates, never proven duplicates: the key never reads claim
+wording, so it also fits two distinct defects on one line. The host therefore drops nothing on the key alone.
+A verified finding disappears into another comment only when (a) its comment fingerprint (category, path,
+anchor text AND claim) is identical, or (b) the judge model proposes the grouping, the group lies inside one
+key-candidate group, every member is a verified survivor, and the merged comment keeps all member ids, all
+member evidence and every member claim (see merge_group). The judge cannot add findings, promote severity or
+merge across keys.
 """
 
 from __future__ import annotations
+
+import json
 
 from reviewer.contracts import validate
 from reviewer.contracts.canonical import comment_fingerprint, comment_id
 from reviewer.contracts.severity import (DEFAULT_COMMENT_CAP, DISABLED_BY_DEFAULT, comment_sort_key,
                                          evidence_strength, finding_ceiling, judge_severity)
 
-ISSUE_KEY_VERSION = "issue-key@1"
+ISSUE_KEY_VERSION = "issue-key@2"
 
 
 def issue_key(f: dict) -> tuple:
@@ -27,18 +33,39 @@ def issue_key(f: dict) -> tuple:
     return (loc["path"], f["category"], f["impact"], loc["line"], loc.get("endLine", loc["line"]), tuple(cites))
 
 
-def merge_duplicates(items: list[tuple[int, dict]]):
-    """items: [(original candidate index, Finding)] in index order. -> (kept, merged_drops).
-    merged_drops: [(finding, kept finding)]"""
-    kept: dict[tuple, tuple[int, dict]] = {}
-    merged = []
-    for idx, f in sorted(items, key=lambda t: t[0]):
-        k = issue_key(f)
-        if k in kept:
-            merged.append((f, kept[k][1]))
-        else:
-            kept[k] = (idx, f)
-    return sorted(kept.values(), key=lambda t: t[0]), merged
+def candidate_groups(findings: list[dict]) -> list[list[str]]:
+    """Finding ids that share an issue key, groups of two or more only, each in input order. Candidates only:
+    nothing is merged on this evidence."""
+    by_key: dict[tuple, list[str]] = {}
+    for f in findings:
+        by_key.setdefault(issue_key(f), []).append(f["id"])
+    return [ids for ids in by_key.values() if len(ids) > 1]
+
+
+def merge_group(members: list[tuple[dict, dict]], title: str, body: str, suggestion: str | None) -> dict:
+    """members: [(finding, its own Comment)] of one validated judge group, primary first (the most severe, then
+    the earliest candidate). The merged Comment is the primary's with: every member id, the union of all member
+    evidence (bounded), the judge wording, and a host-written trailer carrying every member claim, so no verified
+    claim is lost. Severity, ceiling and proposed severity stay the primary's (nothing is promoted). The id and
+    fingerprint stay the primary's."""
+    primary_f, primary_c = members[0]
+    c = dict(primary_c)
+    c["findingIds"] = [f["id"] for f, _ in members][:50]
+    seen, evidence = set(), []
+    for _, mc in members:
+        for e in mc["evidence"]:
+            k = json.dumps(e, sort_keys=True)
+            if k not in seen:
+                seen.add(k)
+                evidence.append(e)
+    c["evidence"] = evidence[:50]
+    trailer = "\n\nAlso verified at this location (merged by the judge as the same issue):" + "".join(
+        f"\n- {f['claim']}" for f, _ in members[1:])
+    c["title"] = title[:200]
+    c["body"] = (body[:max(0, 4000 - len(trailer))] + trailer)[:4000]
+    if suggestion is not None:
+        c["suggestion"] = suggestion
+    return c
 
 
 def severity_for(f: dict, tool_calls: dict) -> tuple[str, str]:

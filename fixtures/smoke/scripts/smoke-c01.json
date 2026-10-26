@@ -56,6 +56,16 @@
           "evidence": [
             {
               "commit": "snap:sha256:a21a9b1ece771267b0364a8c5b342986a47cf32d995eecf23076024ff1229fac",
+              "excerpt": "    if value == None:\n        return True",
+              "kind": "code",
+              "lines": [
+                18,
+                19
+              ],
+              "path": "src/auth.py"
+            },
+            {
+              "commit": "snap:sha256:a21a9b1ece771267b0364a8c5b342986a47cf32d995eecf23076024ff1229fac",
               "excerpt": "    if not require_auth(request.key):\n        return deny()",
               "kind": "code",
               "lines": [

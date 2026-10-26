@@ -40,6 +40,13 @@ def cid(ordinal=0, attempt=0, stage="INVESTIGATE", role="investigator", agent="g
     return call_id(stage, role, agent, ordinal, attempt)
 
 
+def inv_out(n):
+    """A schema-valid InvestigatorOutput whose single hypothesis claim is `claim <n>` (GW-02-review: D3 validates ok output)."""
+    return {"hypotheses": [{"claim": f"claim {n}", "category": "bug", "suspectedSeverity": "P1", "impact": "crash",
+                            "location": {"path": f"src/f{n}.py", "line": n + 1},
+                            "evidence": [{"kind": "tool-ref", "toolCallId": "tool_" + "1" * 16}]}]}
+
+
 # ------------------------------------------------------------------ audit hook (installed once)
 _AUDIT = {"on": False, "allow": (), "hits": []}
 _NET = ("socket.", "subprocess.", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
@@ -283,14 +290,17 @@ class Controls(Base):
         self.assertEqual(r.error["code"], "replay-miss")        # original request no longer matches
 
     def test_CONTROL_identical_requests_by_two_agents_never_swap_and_extra_occurrence_misses(self):
-        sc = H.script(H.entry(agent="a1", response=H.response(output={"hypotheses": [], "n": 1})),
-                      H.entry(agent="a2", response=H.response(output={"hypotheses": [], "n": 2})))
+        # GW-02-review: the per-agent marker was an unknown field {"n": k} (schema-invalid under D3); it is now the
+        # claim of a schema-valid hypothesis. Same request for both agents, same swap/miss/unconsumed assertions.
+        sc = H.script(H.entry(agent="a1", response=H.response(output=inv_out(1))),
+                      H.entry(agent="a2", response=H.response(output=inv_out(2))))
         gw = self.live(sc)
         for a in ("a1", "a2"):
             self.assertTrue(gw.call("INVESTIGATE", "investigator", a, 0, H.request()).ok)
         rp = self.replayer(self.finish(gw))
-        self.assertEqual(rp.call("INVESTIGATE", "investigator", "a2", 0, H.request()).output["n"], 2)
-        self.assertEqual(rp.call("INVESTIGATE", "investigator", "a1", 0, H.request()).output["n"], 1)
+        claim = lambda r: r.output["hypotheses"][0]["claim"]          # noqa: E731
+        self.assertEqual(claim(rp.call("INVESTIGATE", "investigator", "a2", 0, H.request())), "claim 2")
+        self.assertEqual(claim(rp.call("INVESTIGATE", "investigator", "a1", 0, H.request())), "claim 1")
         self.assertEqual(rp.call("INVESTIGATE", "investigator", "a1", 0, H.request()).error["code"], "replay-miss")
         self.assertEqual(rp.call("INVESTIGATE", "investigator", "a3", 0, H.request()).error["code"], "replay-miss")
         self.assertEqual(rp.report()["liveCalls"], 0)

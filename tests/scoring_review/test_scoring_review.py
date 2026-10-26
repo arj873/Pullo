@@ -500,21 +500,28 @@ class D_RootDecisions(unittest.TestCase):
             judge = self.entries(cid, "JUDGE")[0]["response"]["output"]["comments"]
             self.assertTrue(all(f in ids for c in judge for f in c["findingIds"]))
 
-    def test_CONTROL_duplicate_case_merges_to_candidate_zero(self):
+    def test_CONTROL_duplicate_case_yields_one_comment_bound_to_every_merged_finding(self):
+        """Current pipeline dedup contract (judging.merge_group): a validated judge group becomes ONE comment that keeps
+        every member finding id. Candidate order picks the primary, it never deletes provenance. Replaces the obsolete
+        'merges to candidate zero only' expectation."""
         inv = self.entries("smoke-c03", "INVESTIGATE")[0]["response"]["output"]["hypotheses"]
         self.assertEqual(len(inv), 2)
         a, b = inv
         self.assertEqual(a["location"]["path"], b["location"]["path"])
         self.assertTrue(set(range(b["location"]["line"], b["location"].get("endLine", b["location"]["line"]) + 1))
                         & set(range(a["location"]["line"], a["location"].get("endLine", a["location"]["line"]) + 1)))
+        ids = [hypothesis_id("generalist", n, h["claim"], h["location"]["path"], h["location"]["line"])
+               for n, h in enumerate(inv)]
+        self.assertEqual(len(set(ids)), 2)
         judge = self.entries("smoke-c03", "JUDGE")
         self.assertEqual(len(judge), 1)
         comments = judge[0]["response"]["output"]["comments"]
-        self.assertEqual(len(comments), 1)
-        self.assertEqual(comments[0]["findingIds"], [hypothesis_id("generalist", 0, a["claim"], a["location"]["path"], a["location"]["line"])])
-        # the judge must not be offered wording for the merged duplicate
-        self.assertNotIn(hypothesis_id("generalist", 1, b["claim"], b["location"]["path"], b["location"]["line"]),
-                         json.dumps(judge))
+        self.assertEqual(len(comments), 1, "duplicate reports must still produce exactly one comment")
+        self.assertEqual(sorted(comments[0]["findingIds"]), sorted(ids))        # all merged findings retained
+        self.assertEqual(len(comments[0]["findingIds"]), len(set(comments[0]["findingIds"])))
+        self.assertTrue(set(comments[0]["findingIds"]) <= set(ids))             # every reference is a real finding
+        # both candidates were verified, so both are legitimate members of the group
+        self.assertEqual(sorted(e["ordinal"] for e in self.entries("smoke-c03", "VERIFY")), [0, 1])
 
     def test_CONTROL_outcome_labels_follow_root_decisions(self):
         l5, l6 = self.suite.cases["smoke-c05"].labels, self.suite.cases["smoke-c06"].labels

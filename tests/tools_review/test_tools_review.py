@@ -49,6 +49,7 @@ from reviewer.tools import (Limits, ToolSession, View, ViewError, capture_histor
 
 RUN = "run_" + "0" * 16
 FIXTURES = ROOT / "fixtures" / "historical"
+needs_corpus = unittest.skipUnless(FIXTURES.is_dir(), "optional private input absent: fixtures/historical (unpublished historical corpus)")
 TOKEN = "ghp_" + "A1b2C3d4" * 5          # fake, token-shaped
 KEY = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\nabcdef\n-----END RSA PRIVATE KEY-----"
 BASE_SHA, HEAD_SHA = "a" * 40, "b" * 40
@@ -337,6 +338,7 @@ class TR2Pins(Hist):
         return dst
 
     # ---- real fixtures, real temp pinned snapshots
+    @needs_corpus
     def test_CONTROL_all_real_fixtures_build_from_pins_captured_on_the_checked_in_copy(self):
         names = sorted(p.name for p in FIXTURES.iterdir() if p.is_dir())
         self.assertEqual(len(names), 9)
@@ -360,6 +362,7 @@ class TR2Pins(Hist):
                 self.assertTrue(all(e["resolved"] is True for e in q.result["evidence"]))
                 self.assertFalse(s.tampered)
 
+    @needs_corpus
     def test_CONTROL_pins_are_a_documented_pure_function_of_the_trusted_tree(self):
         a, b = capture_historical_pins(FIXTURES / "Vencord--Vesktop--1347"), capture_historical_pins(FIXTURES / "Vencord--Vesktop--1347")
         self.assertEqual(a, b)
@@ -1074,6 +1077,7 @@ class TR9CoverageGaps(Hist):
         self.assertIn("1 selected context file(s) were not recorded (text-not-found)", r.result["notice"])
         self.assertEqual(r.provenance["coverage"]["recorded"]["changedFilesRecorded"], 2)
 
+    @needs_corpus
     def test_TR9_real_fixture_with_a_context_gap_reports_it(self):
         pins = self.capture(FIXTURES / "Vencord--Vesktop--1347")
         dst = self.work / "fx" / "Vencord--Vesktop--1347"
@@ -1133,7 +1137,8 @@ class NEW2BlankLineRanges(Hist):
     """read_file builds code Evidence whose excerpt is "\n".join(lines[a-1:b]). When line b is blank
     that excerpt ends with "\n", and snapshot.excerpt_matches strips ONE trailing newline from the
     excerpt before comparing, so a perfectly valid, untampered range fails to resolve: the call
-    becomes `error` and ToolSession.tampered is set on a clean pinned snapshot."""
+    becomes `error` and ToolSession.tampered is set on a clean pinned snapshot.
+    CLOSED by the contracts fix (S0-03-blankline-fix.md): these are now positive tests/controls."""
 
     def blank_view(self):
         t = tempfile.TemporaryDirectory()
@@ -1144,7 +1149,6 @@ class NEW2BlankLineRanges(Hist):
             write_tree(d, {"a.py": "one\n\nthree\n\n\nsix\n"})
         return full_view(b, build_manifest(b), h, build_manifest(h))
 
-    @unittest.expectedFailure
     def test_NEW2_range_ending_on_a_blank_line_is_readable_and_not_tampered(self):
         for start, end in ((1, 2), (1, 5), (3, 5), (2, 5)):
             with self.subTest(range=(start, end)):
@@ -1153,7 +1157,7 @@ class NEW2BlankLineRanges(Hist):
                 self.assertEqual(r.result["status"], "ok", r.result["notice"])
                 self.assertFalse(s.tampered, "clean pinned snapshot flagged as tampered")
 
-    @unittest.expectedFailure
+    @needs_corpus
     def test_NEW2_every_head_file_of_every_real_fixture_reads_without_error_or_tamper_flag(self):
         bad = []
         for fx in sorted(p for p in FIXTURES.iterdir() if p.is_dir()):
@@ -1168,24 +1172,40 @@ class NEW2BlankLineRanges(Hist):
                         bad.append((fx.name, f["path"], r.result["status"]))
         self.assertEqual(bad, [])
 
-    def test_NEW2_current_behaviour_pins_the_symptom_and_the_clean_cases(self):
-        s = ToolSession(self.blank_view())
-        r = s.call("read_file", {"side": "head", "path": "a.py", "start_line": 1, "end_line": 2})
-        self.assertEqual((r.result["status"], r.result["evidence"]), ("error", []))
-        self.assertTrue(s.tampered)
+    def test_CONTROL_clean_ranges_and_matcher_strength_after_the_blank_line_fix(self):
         for start, end in ((1, 3), (2, 2), (4, 4), (1, 6), (3, 6)):          # ranges that end on text, or a lone blank line
             s = ToolSession(self.blank_view())
             r = s.call("read_file", {"side": "head", "path": "a.py", "start_line": start, "end_line": end})
             self.assertEqual(r.result["status"], "ok", (start, end))
             self.assertFalse(s.tampered)
-        # the contract's stripping rule is the cause: the same excerpt resolves once its newline is not stripped
+        # the matcher is exact: it accepts the real lines joined, with or without ONE terminating newline, nothing else
         t = tempfile.TemporaryDirectory()
         self.addCleanup(t.cleanup)
         write_tree(Path(t.name), {"a.py": "one\n\nthree\n"})
         data = (Path(t.name) / "a.py").read_bytes()
         self.assertTrue(snapmod.excerpt_matches(data, [1, 3], "one\n\nthree"))
-        self.assertFalse(snapmod.excerpt_matches(data, [1, 2], "one\n"))      # "one" + blank line: stripped to "one"
+        self.assertTrue(snapmod.excerpt_matches(data, [1, 2], "one\n"))        # blank line 2 is the range end: now resolves
+        self.assertTrue(snapmod.excerpt_matches(data, [1, 2], "one\n\n"))
         self.assertTrue(snapmod.excerpt_matches(data, [1, 1], "one"))
+        self.assertFalse(snapmod.excerpt_matches(data, [1, 2], "one"))          # missing the blank line
+        self.assertFalse(snapmod.excerpt_matches(data, [1, 2], "one\n\n\n"))   # an extra newline is not content
+        self.assertFalse(snapmod.excerpt_matches(data, [1, 4], "one\n\nthree\n"))   # no phantom line past EOF
+        self.assertFalse(snapmod.excerpt_matches(data, [1, 2], "onf\n"))
+
+    def test_CONTROL_tamper_is_still_detected_on_a_blank_ending_range(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        b, h = Path(t.name) / "b", Path(t.name) / "h"
+        for d in (b, h):
+            d.mkdir()
+            write_tree(d, {"a.py": "one\n\nthree\n"})
+        v = full_view(b, build_manifest(b), h, build_manifest(h))
+        (h / "a.py").write_text("ONE\n\nthree\n")                              # same size, different bytes
+        s = ToolSession(v)
+        r = s.call("read_file", {"side": "head", "path": "a.py", "start_line": 1, "end_line": 2})
+        self.assertEqual(r.result["status"], "error")
+        self.assertEqual(r.result["evidence"], [])
+        self.assertTrue(s.tampered)
 
 
 # ===================================================================== static guard (independent)

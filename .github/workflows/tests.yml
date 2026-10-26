@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Full history: the legacy differential tests pin the initial commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # actions/setup-python v7.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: "3.14"
+
+      - name: Unit tests (default discovery)
+        shell: bash
+        run: nice -n 19 python3 -m unittest discover -s tests -t .
+
+      - name: Contract export is up to date
+        shell: bash
+        run: python3 -m reviewer.contracts export --check
+
+      - name: Smoke record and strict replay (six cases)
+        shell: bash
+        run: |
+          work="$(mktemp -d "${RUNNER_TEMP}/smoke.XXXXXX")"
+          # record's last line is: manifest <path> sha256:<hex>
+          nice -n 19 python3 -m reviewer smoke record --out "$work/rec" | tee "$work/record.log"
+          digest="$(tail -n 1 "$work/record.log" | awk '{print $NF}')"
+          case "$digest" in
+            sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "no manifest digest on record's last line" >&2; exit 1 ;;
+          esac
+          nice -n 19 python3 -m reviewer smoke replay \
+            --recording "$work/rec" --out "$work/rep" --manifest-digest "$digest"

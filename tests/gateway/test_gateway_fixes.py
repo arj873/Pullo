@@ -10,7 +10,7 @@ from reviewer.contracts.canonical import scoped_key
 from reviewer.gateway import (Gateway, GatewayConfigError, ProviderResult, Recorder, SettlementError, SpendBook,
                               TraceError, bytes_digest, default_providers, events_to_bytes, load_trace)
 from tests.gateway.helpers import (BUDGET, PROFILE, Env, entry, profile, request, response, run_doc,
-                                   script, terr)
+                                   script, terr, verifier_out)
 
 INV = ("INVESTIGATE", "investigator", "generalist")
 RESERVE = 60_668        # reservation of request() under the smoke profile
@@ -407,7 +407,7 @@ class HypothesisIdPassThrough(Fx):
         req = request("verifier", text="candidate", hypothesisId=sub)
         require("ModelRequest", req)
         gw = self.live(script(entry(stage="VERIFY", role="verifier", agent="verifier",
-                                    response=response(output={"verdict": "confirmed"}))))
+                                    response=response(output=verifier_out("confirmed")))))
         self.assertTrue(gw.call(*self.VER, 0, req).ok)
         ev = self.finish(gw)
         rec = next(e for e in ev if e["type"] == "model.call")

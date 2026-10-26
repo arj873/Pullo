@@ -33,9 +33,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import test_scoring_review as T  # noqa: E402  (comment()/bug() builders and RUN/SNAP constants)
+from tests.scoring_review import test_scoring_review as T  # noqa: E402  (comment()/bug() builders and RUN/SNAP constants)
 from reviewer.contracts import redaction as R  # noqa: E402
 from reviewer.contracts.snapshot import build_manifest  # noqa: E402
 from reviewer.scoring import (ScoringError, UnscoredSuiteError, build_report, match_comments,  # noqa: E402

@@ -12,6 +12,7 @@ Order of decisions (all before any provider could be contacted):
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from pathlib import Path
@@ -22,10 +23,12 @@ from reviewer.contracts.stages import STAGES, artifact_name
 from reviewer.gateway import Recorder, TraceError, bytes_digest, load_trace
 from reviewer.tools import Limits
 
-from . import identity
+from . import coverage as cov_mod
+from . import identity, repocov, retrieval, stagereplay
 from .compare import first_difference, split_recording
-from .engine import Engine
+from .engine import Engine, render_outputs
 from .errors import PipelineError
+from .runguard import RunGuard
 from .spec import ReviewSpec, RunResult
 from .store import RunDir, resolve_out_root
 
@@ -81,15 +84,26 @@ def validate_spec(spec: ReviewSpec) -> None:
         raise PipelineError("invalid-input", f"config_identity is not canonical JSON: {e}") from e
     if getattr(spec.backend, "mode", None) not in ("live", "strict-replay"):
         raise PipelineError("config", "backend must be a RecordBackend or ReplayBackend")
+    if spec.coverage is not None:
+        cov_mod.validate(spec.coverage, spec.base.manifest, spec.head.manifest)
+    identity.check_retrieval_inputs(spec)
+    if spec.imports is not None:
+        repocov.build(spec.imports, spec.base.manifest, spec.head.manifest, spec.case)   # raises invalid-input
 
 
 # ---------------------------------------------------------------- entry point
 
 def run_review(spec: ReviewSpec) -> RunResult:
     validate_spec(spec)
+    if spec.fork is not None:
+        raise PipelineError("config", stagereplay.FORK_NOT_IMPLEMENTED)
+    if spec.stage_replay is not None:
+        stagereplay.check_request(spec)
     backend = spec.backend
     cfg = identity.config_snapshot_id(spec)
     run = identity.build_run(spec, backend, cfg)
+    # run.mode stays "strict-replay": the gateway binds its mode to run.start and has no stage-replay seam yet
+    # (routed to the gateway owner). The stage-replay facts live in receipt.stageReplay, checked on idempotent reuse.
     try:
         require("ReviewRun", run)
     except ContractViolation as e:
@@ -109,7 +123,20 @@ def run_review(spec: ReviewSpec) -> RunResult:
     if rd is None:
         rd = RunDir.open(real_out, run["id"], create=True)
         if rd.created:
-            return _execute(spec, run, rd, resume=None, orig=orig)
+            adopted = None
+            if spec.stage_replay is not None:
+                try:
+                    a = stagereplay.adopt(spec, run, backend.recording, orig, "eval" if spec.host.eval else "review")
+                except BaseException:
+                    rd.remove_empty()
+                    rd.close()
+                    raise
+                for st, art in a["artifacts"].items():        # the new run directory holds its own copies
+                    rd.write_artifact(artifact_name(st, spec.plan["version"]),
+                                      (json.dumps(art, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode())
+                adopted = _Resume(a["prefix"], a["artifacts"], a["model_calls"])
+                adopted.consumed = a["consumed"]
+            return _execute(spec, run, rd, resume=adopted, orig=orig)
     try:
         return _existing(spec, run, rd, orig)
     finally:
@@ -125,6 +152,10 @@ def _existing(spec, run, rd, orig) -> RunResult:
             if runjson.get(k) != run.get(k):
                 raise PipelineError("identity-mismatch", f"output directory {run['id']} is bound to a different "
                                     f"{k}; use a new output root or a new attempt")
+        want = None if spec.stage_replay is None else spec.stage_replay.from_stage
+        if (receipt.get("stageReplay") or {}).get("fromStage") != want:
+            raise PipelineError("identity-mismatch", f"output directory {run['id']} was produced by a different "
+                                "replay start stage; use a new eval run id")
         return load_run_result(rd, spec.plan["version"], idempotent=True)
     trace = rd.read("trace.jsonl")
     if spec.backend.mode == "live":
@@ -142,6 +173,7 @@ def _existing(spec, run, rd, orig) -> RunResult:
 class _Resume:
     def __init__(self, prefix, artifacts, model_calls):
         self.prefix, self.artifacts, self.model_calls = prefix, artifacts, model_calls
+        self.consumed: list = []          # stage replay: recorded callIds adopted from the pinned recording
 
 
 def _read_events(data: bytes) -> list:
@@ -233,7 +265,7 @@ def _segment_of(events, stage):
 def _execute(spec, run, rd, *, resume: "_Resume | None", orig) -> RunResult:
     host, backend = spec.host, spec.backend
     path = str(rd.path / "trace.jsonl")
-    if resume is not None:
+    if resume is not None and rd.exists("trace.jsonl"):
         n = 1
         while rd.exists(f"trace.interrupted-{n}.jsonl"):
             n += 1
@@ -243,6 +275,10 @@ def _execute(spec, run, rd, *, resume: "_Resume | None", orig) -> RunResult:
         while rd.exists(f"trace.interrupted-{n}.jsonl"):
             n += 1
         rd.move_aside("trace.jsonl", f"trace.interrupted-{n}.jsonl")
+    guard = RunGuard(host, spec.plan["budget"])
+    if not _accepts_guard(backend.make_gateway):
+        raise PipelineError("config", "the backend's make_gateway cannot take the host attempt guard: a retry or "
+                            "repair could not be stopped after cancellation or a deadline")
     recorder = Recorder(run["id"], path)
     try:
         if resume is None:
@@ -254,18 +290,23 @@ def _execute(spec, run, rd, *, resume: "_Resume | None", orig) -> RunResult:
         gw = backend.make_gateway(run_id=run["id"], profile=spec.profile, budget=spec.plan["budget"],
                                   recorder=recorder, cost_kind="eval" if ev_cfg else "review",
                                   eval_run_id=ev_cfg.eval_run_id if ev_cfg else None,
-                                  eval_case_id=ev_cfg.case_id if ev_cfg else None)
+                                  eval_case_id=ev_cfg.case_id if ev_cfg else None, guard=guard)
     except PipelineError:
         recorder.close()
-        if resume is None and rd.created:
+        if resume is None and rd.created and not any(e["type"] == "model.call" for e in recorder.events):
             rd.remove_empty()
         rd.close()
         raise
-    eng = Engine(spec, run, rd, recorder, gw, orig=orig, prior_artifacts=resume.artifacts if resume else None,
-                 prior_model_calls=resume.model_calls if resume else 0)
+    try:
+        eng = Engine(spec, run, rd, recorder, gw, orig=orig, prior_artifacts=resume.artifacts if resume else None,
+                     prior_model_calls=resume.model_calls if resume else 0, guard=guard)
+        eng.check_adopted_outputs()
+    except BaseException:
+        recorder.close()
+        raise
     try:
         eng.run_all()
-        return _finalize(spec, run, rd, eng, recorder, gw)
+        return _finalize(spec, run, rd, eng, recorder, gw, resume.consumed if resume is not None else ())
     except BaseException:
         recorder.close()
         raise
@@ -273,7 +314,7 @@ def _execute(spec, run, rd, *, resume: "_Resume | None", orig) -> RunResult:
         rd.close()
 
 
-def _finalize(spec, run, rd, eng, recorder, gw) -> RunResult:
+def _finalize(spec, run, rd, eng, recorder, gw, consumed=()) -> RunResult:
     host = spec.host
     status, incomplete, error = eng.terminal()
     recorder.end(status, incomplete)
@@ -286,6 +327,8 @@ def _finalize(spec, run, rd, eng, recorder, gw) -> RunResult:
     outputs = {"run.json": rd.write("run.json", run_bytes)}
     for name in ("comments.json", "review.md"):
         outputs[name] = _sha(rd.read(name))
+    if eng.coverage_record is not None:
+        outputs["coverage.json"] = rd.write("coverage.json", _json_bytes(eng.coverage_record))
     events = list(recorder.events)
     cost = cost_summary(events)
     latency = {"totalMs": int(max(0.0, eng.clock() - eng.t0) * 1000),
@@ -295,13 +338,33 @@ def _finalize(spec, run, rd, eng, recorder, gw) -> RunResult:
     report["priorStageModelCalls"] = eng.expected_unconsumed
     report["unconsumedRecordedCalls"] -= eng.expected_unconsumed
     receipt = build_receipt(spec, final, eng.digests, tdigest, outputs, cost, latency, report,
-                            eng.resumed_from, eng.needs_reconciliation)
+                            eng.resumed_from, eng.needs_reconciliation, events=events,
+                            coverage=eng.coverage_record, guard=eng.guard)
+    if spec.stage_replay is not None:
+        receipt["stageReplay"] = {
+            "fromStage": spec.stage_replay.from_stage, "replayOf": final["replayOf"],
+            "recordingTraceDigest": spec.backend.expected_trace_digest, "pinSource": spec.backend.pin_source,
+            "adoptedStages": list(STAGES[:STAGES.index(spec.stage_replay.from_stage)]),
+            "consumedPrefixCallIds": list(consumed),
+            "consumptionComplete": bool(eng.fatal is None and report["unconsumedRecordedCalls"] == 0)}
     problems = identity.validate_receipt(receipt)
     if problems:
         raise PipelineError("checkpoint-invalid", "receipt invalid: " + "; ".join(problems))
     rd.write("receipt.json", (json.dumps(receipt, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode())
     return assemble(rd, final, eng.artifacts, events, receipt, cost, latency, idempotent=False,
                     resumed_from=eng.resumed_from, gateway_report=report, pv=spec.plan["version"])
+
+
+def _accepts_guard(fn) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "guard" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
+def _json_bytes(doc) -> bytes:
+    return (json.dumps(doc, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode()
 
 
 def _sha(data: bytes) -> str:
@@ -329,9 +392,26 @@ def cost_summary(events: list) -> dict:
             "note": "Synthetic and replayed amounts are not provider spend. No per-review cost target is claimed."}
 
 
-def build_receipt(spec, final, digests, tdigest, outputs, cost, latency, gw_report, resumed_from, recon) -> dict:
+def retrieval_section(spec, events: list, guard=None) -> dict | None:
+    """Receipt/result section for retrieval profiles: the policy in force, what actually bound, and per-chain
+    facts re-derived from the trace. None for legacy profiles (their receipts are unchanged)."""
+    pol = identity.retrieval_policy(spec)
+    if pol is None:
+        return None
+    lim = identity.tool_limits(spec)
+    sec = {"policy": pol.to_doc(), "policyDigest": pol.digest, "turnRoles": identity.turn_roles(spec.profile),
+           "effective": retrieval.effective_limits(pol, spec.plan["budget"], lim.max_calls),
+           "summary": retrieval.summarize(events)}
+    if guard is not None:
+        sec["guardRefusals"] = list(guard.refusals)
+    return sec
+
+
+def build_receipt(spec, final, digests, tdigest, outputs, cost, latency, gw_report, resumed_from, recon, *,
+                  events, coverage=None, guard=None) -> dict:
     backend = spec.backend
     ident = identity.engine_identity()
+    rsec = retrieval_section(spec, events, guard)
     return {
         "schema": identity.RECEIPT_SCHEMA, "runId": final["id"], "mode": final["mode"], "status": final["status"],
         "caseId": spec.case["id"], "evalRunId": final.get("evalRunId"), "configSnapshotId": final["configSnapshotId"],
@@ -348,6 +428,8 @@ def build_receipt(spec, final, digests, tdigest, outputs, cost, latency, gw_repo
         "cost": {k: v for k, v in cost.items() if k != "records"}, "latency": latency,
         "gateway": {k: gw_report[k] for k in ("liveCalls", "replayedCalls", "retainedCalls", "unconsumedRecordedCalls",
                                               "priorStageModelCalls")},
+        **({} if coverage is None else {"coverageDigest": digest(coverage)}),
+        **({} if rsec is None else {"retrieval": rsec}),
         "resumedFrom": resumed_from, "needsReconciliation": bool(recon),
         "limits": ["hashes detect inconsistent edits and equality with a trusted pin; they do not authenticate a "
                    "maliciously rewritten whole trace", "synthetic pricing is not provider spend"]}
@@ -371,7 +453,7 @@ def assemble(rd, final, artifacts, events, receipt, cost, latency, *, idempotent
         trace_path=str(rd.path / "trace.jsonl"), trace_digest=receipt["traceDigest"], receipt=receipt,
         receipt_path=str(rd.path / "receipt.json"), comments_path=str(rd.path / "comments.json"),
         review_path=str(rd.path / "review.md"), idempotent=idempotent, resumed_from=resumed_from,
-        gateway_report=gateway_report)
+        gateway_report=gateway_report, retrieval=receipt.get("retrieval"))
 
 
 def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResult:
@@ -420,6 +502,23 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
         data = rd.read(name)
         if data is None or _sha(data) != receipt["outputs"].get(key):
             raise PipelineError("checkpoint-invalid", f"{name} does not match the receipt")
+    cov = None
+    if "coverageDigest" in receipt:
+        cov = rd.read_json("coverage.json")
+        data = rd.read("coverage.json")
+        if cov is None or digest(cov) != receipt["coverageDigest"] or _sha(data) != receipt["outputs"].get("coverage.json"):
+            raise PipelineError("checkpoint-invalid", "coverage.json does not match the receipt coverageDigest")
+        if repocov.is_repository(cov):
+            repocov.check(cov)
+        elif cov.get("fullRepositoryCoverage") is not False:
+            raise PipelineError("checkpoint-invalid", "coverage.json claims full-repository coverage")
+    # the files a human reads must be what the judged artifacts render, not just what a (self-edited) receipt hashes
+    cbytes, mbytes, _ = render_outputs(final, final["status"], final["incomplete"], final.get("error"), artifacts,
+                                       list(trace.events), cov)
+    for name, want in (("comments.json", cbytes), ("review.md", mbytes)):
+        if rd.read(name) != want:
+            raise PipelineError("checkpoint-invalid", f"{name} is not what the JUDGE/VERIFY artifacts and the trace "
+                                "render: it was edited after PUBLISH or does not belong to this run")
     cost = cost_summary(trace.events)
     return assemble(rd, final, artifacts, trace.events, receipt, cost, receipt["latency"], idempotent=idempotent,
                     resumed_from=receipt.get("resumedFrom"), gateway_report=None, pv=pv)

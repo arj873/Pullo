@@ -27,6 +27,14 @@ ZERO = {k: None for k in ("uncachedInputTokens", "cachedInputTokens", "cacheWrit
 OK_OUT = {"hypotheses": []}
 
 
+def verifier_out(verdict="refuted"):
+    """A schema-valid VerifierOutput (the gateway validates status-ok output locally, D3)."""
+    return {"verdict": verdict, "reachable": False, "impact": "none", "evidence": [], "notes": "scripted"} \
+        if verdict != "confirmed" else {"verdict": verdict, "reachable": True, "impact": "data-loss",
+                                       "evidence": [{"kind": "tool-ref", "toolCallId": "tool_" + "1" * 16}],
+                                       "notes": "scripted"}
+
+
 def profile(**role_over):
     p = copy.deepcopy(PROFILE)
     for r, o in role_over.items():
@@ -128,7 +136,7 @@ class Env(unittest.TestCase):
         self.pins[gw.recorder.run_id] = gw.recorder.trace_digest()      # pinned outside the trace, at recording time
         return gw.recorder.events
 
-    def replayer(self, events, *, budget=None, prof=None, pin=None):
+    def replayer(self, events, *, budget=None, prof=None, pin=None, **kw):
         tr = load_trace(events)
         pin = pin or self.pins.get(tr.run_id) or bytes_digest(events_to_bytes(events))
         rd, evr = replay_run_doc(tr.run_id)
@@ -136,4 +144,4 @@ class Env(unittest.TestCase):
         rec.start(rd)
         return Gateway(mode="strict-replay", profile=prof or PROFILE, budget=budget or BUDGET, run_id=rd["id"],
                        replay=tr, recorder=rec, cost_kind="eval", eval_run_id=evr, eval_case_id="case-a",
-                       expected_trace_digest=pin)
+                       expected_trace_digest=pin, **kw)

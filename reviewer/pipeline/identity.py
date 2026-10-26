@@ -12,16 +12,27 @@ from __future__ import annotations
 
 import dataclasses
 
-from reviewer.contracts import CONTRACTS_VERSION, require, validate
+from reviewer.contracts import CONTRACTS_VERSION, is_turn_schema, require, validate
 from reviewer.contracts.canonical import (CANONICAL_VERSION, config_digest, digest, idempotency_key_eval,
                                           idempotency_key_local, profile_digest, run_id)
 from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTION_VERSION
 from reviewer.tools import Limits
 
-from . import prompts
+from . import prompts, repocov, retrieval
+from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
 PIPELINE_VERSION = "pipeline@1"
+# Behaviour of the PARTIAL path that is not in a prompt template digest: coverage wording (statement/review.md),
+# the judge's coverage disclosure, the review-comments@2 wrapper, coverage validation rules. Bumped on any change
+# to it; bound only when coverage is present, so full-view run ids/receipts/outputs stay byte-identical.
+#   partial-disclosure@2: C1 absent-side flag vs manifest, C2 logical-path uniqueness, C3 contextGap in statement,
+#   C4 judge coverage + comments.json coverage; @1 was the S0B-02b/addendum behaviour.
+PARTIAL_BEHAVIOR = "partial-disclosure@2"
+# Behaviour of the retrieval chains (hop/ordinal allocation, dedup, caps, honest ends, history rendering). Bound only
+# when a role returns the Turn envelope, so legacy profiles keep their ids.
+#   @2: citations.citableRefs (S1-15) are built from the chain's delivered results; @1 had none.
+RETRIEVAL_BEHAVIOR = "retrieval-pipeline@2"
 RECEIPT_SCHEMA = "run-receipt@1"
 
 
@@ -32,8 +43,11 @@ def redaction_fingerprint() -> str:
 
 
 def engine_identity() -> dict:
-    """Everything about the engine that changes behavior: pass this as `config=` to synthetic_config_digest."""
-    return {"pipeline": PIPELINE_VERSION, "contracts": CONTRACTS_VERSION, "canonical": CANONICAL_VERSION,
+    """Everything about the engine that changes behavior: pass this as `config=` to synthetic_config_digest.
+    The identity always names the software actually running. A pre-@6 recording is replayed by the frozen old
+    software, never by this engine under an old identity."""
+    return {"pipeline": PIPELINE_VERSION, "contracts": CONTRACTS_VERSION,
+            "canonical": CANONICAL_VERSION,
             "redaction": {"version": REDACTION_VERSION, "fingerprint": redaction_fingerprint()},
             "prompts": prompts.template_digests(), "issueKey": ISSUE_KEY_VERSION,
             "firstSlice": {"views": "full_view", "triage": "fixed-rule@1", "specialists": ["generalist"],
@@ -44,9 +58,55 @@ def profile_ref(profile: dict) -> str:
     return f"{profile['id']}@{profile['version']}"
 
 
+def turn_roles(profile: dict) -> list[str]:
+    return [r for r in ("investigator", "verifier") if is_turn_schema(profile["roles"][r]["outputSchema"])]
+
+
+def retrieval_policy(spec):
+    """The RetrievalPolicy in force, or None when no role returns the Turn envelope."""
+    if not turn_roles(spec.profile):
+        return None
+    return spec.host.retrieval or retrieval.RetrievalPolicy()
+
+
+def tool_limits(spec) -> Limits:
+    """The trusted ToolSession limits: the host's, else the full-repository profile for imports, else legacy."""
+    if spec.host.tool_limits is not None:
+        return spec.host.tool_limits
+    return Limits.full_repository() if spec.imports is not None else Limits()
+
+
+def check_retrieval_inputs(spec) -> None:
+    """Policy/profile/imports consistency (before any provider could be contacted)."""
+    turns = turn_roles(spec.profile)
+    pol = spec.host.retrieval
+    if pol is not None and not isinstance(pol, retrieval.RetrievalPolicy):
+        raise PipelineError("invalid-input", "retrieval must be a RetrievalPolicy")
+    if pol is not None and not turns:
+        raise PipelineError("invalid-input", "a retrieval policy needs a profile role that returns the Turn schema")
+    if turns:
+        p = retrieval_policy(spec)
+        want = {"investigator": p.investigator_prompt, "verifier": p.verifier_prompt}
+        for r in turns:
+            if spec.profile["roles"][r]["promptVersion"] != want[r]:
+                raise PipelineError("invalid-input", f"profile {r}.promptVersion must equal the retrieval policy's "
+                                    f"{want[r]!r}")
+    if spec.imports is not None and spec.coverage is not None:
+        raise PipelineError("invalid-input", "repository imports and a partial historical coverage are exclusive")
+
+
 def config_snapshot_id(spec) -> str:
-    lim = spec.host.tool_limits or Limits()
-    return config_digest({
+    lim = tool_limits(spec)
+    extra = {} if spec.coverage is None else {"coverage": digest(spec.coverage), "partialBehavior": PARTIAL_BEHAVIOR}   # absent => full-view ids unchanged
+    pol = retrieval_policy(spec)
+    if pol is not None:
+        extra["retrieval"] = {"behavior": RETRIEVAL_BEHAVIOR, "policy": pol.to_doc(), "turnRoles": turn_roles(spec.profile),
+                              "prompts": prompts.retrieval_template_digests(),
+                              "effective": retrieval.effective_limits(pol, spec.plan["budget"], lim.max_calls)}
+    if spec.imports is not None:
+        extra["imports"] = {"base": digest(spec.imports.base), "head": digest(spec.imports.head),
+                            "behavior": repocov.BEHAVIOR}
+    return config_digest({**extra,
         "schema": "pipeline-run-config@1", "engine": engine_identity(),
         "profile": profile_digest(spec.profile), "plan": digest(spec.plan), "case": digest(spec.case),
         "snapshots": {"base": spec.base.manifest["snapshotId"], "head": spec.head.manifest["snapshotId"]},

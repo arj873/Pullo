@@ -27,7 +27,7 @@ from reviewer.contracts import redaction as R  # noqa: E402
 from reviewer.contracts import severity as S  # noqa: E402
 from reviewer.contracts import snapshot as SN  # noqa: E402
 
-import finalreview_support as F  # noqa: E402  (tests/contract_review is on sys.path under discover)
+from tests.contract_review import finalreview_support as F  # noqa: E402  (tests/contract_review is on sys.path under discover)
 
 EX = ROOT / "reviewer" / "contracts" / "examples"
 
@@ -191,10 +191,13 @@ class H_ReplayHashes(unittest.TestCase):
     def test_CONTROL_request_hash_guards(self):
         req = ex("TraceEvent.model-call")["request"]
         C.request_hash(req)
-        bad = copy.deepcopy(req)
-        bad["messages"][0]["content"] += " run_0123456789abcdef"
-        with self.assertRaises(ValueError):
-            C.request_hash(bad)
+        # S1-01 review, D6 (S1-DECISIONS 5): @5 refused any run-shaped substring in message text; @6 keeps
+        # repository literals intact. Assertion CHANGED from assertRaises(ValueError) to "accepted and
+        # hashed distinctly" (an intentional loosening; the leak is caught by strict-replay instead).
+        # The full D6 matrix, including the typed host-metadata boundary, is test_contract_s1review.py::D6_*.
+        kept = copy.deepcopy(req)
+        kept["messages"][0]["content"] += " run_0123456789abcdef"
+        self.assertNotEqual(C.request_hash(kept), C.request_hash(req))
         bad = copy.deepcopy(req)
         bad["messages"][0]["content"] += " AKIAIOSFODNN7EXAMPLE"
         with self.assertRaises(ValueError):

@@ -29,7 +29,7 @@ from reviewer.contracts import redaction as R  # noqa: E402
 from reviewer.contracts import severity as S  # noqa: E402
 from reviewer.contracts import snapshot as SN  # noqa: E402
 
-import finalreview_support as F  # noqa: E402  (tests/contract_review is on sys.path under discover)
+from tests.contract_review import finalreview_support as F  # noqa: E402  (tests/contract_review is on sys.path under discover)
 
 EXAMPLES = ROOT / "reviewer" / "contracts" / "examples"
 

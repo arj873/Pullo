@@ -4,12 +4,15 @@ from .auth import AuthorizationHandle, SpendBook, parse_ts, trusted_authorizatio
 from .errors import (AuthorizationError, GatewayConfigError, ScriptError, SettlementError, TraceError,
                      typed_error)
 from .gateway import CallResult, Gateway
+from .guard import (AttemptContext, AttemptGuard, GuardRefusal, cancel_guard, chain_guards,
+                    deadline_guard)
 from .providers import DisabledProvider, ProviderResult, SyntheticProvider, default_providers
 from .script import Script, load_script, parse_script
 from .trace import (LoadedTrace, Recorder, bytes_digest, error_charge_class, events_to_bytes, load_trace,
                     verify_events)
 
-__all__ = ["AuthorizationHandle", "AuthorizationError", "CallResult", "DisabledProvider", "Gateway",
+__all__ = ["AttemptContext", "AttemptGuard", "GuardRefusal", "cancel_guard", "chain_guards",
+           "deadline_guard", "AuthorizationHandle", "AuthorizationError", "CallResult", "DisabledProvider", "Gateway",
            "GatewayConfigError", "LoadedTrace", "ProviderResult", "Recorder", "Script", "ScriptError",
            "SettlementError", "SpendBook", "SyntheticProvider", "TraceError", "bytes_digest",
            "error_charge_class", "events_to_bytes", "default_providers", "load_script",

@@ -20,6 +20,7 @@ from reviewer.contracts.canonical import call_id, cost_id, request_hash, result_
 from reviewer.contracts.redaction import redact_json
 
 from .errors import TraceError
+from .guard import GUARD_CODES, REFUSED_BY
 
 MAX_TRACE_BYTES = 64 << 20
 MAX_EVENTS = 100_000
@@ -89,6 +90,7 @@ class LoadedTrace:
         self.events = events
         self.run_id = events[0]["runId"]
         self.byte_digest = byte_digest
+        self._events_digest = bytes_digest(events_to_bytes(events))   # canonical snapshot taken at load time
         self.complete = events[-1]["type"] == "run.end"
         self.calls: dict[str, list[dict]] = {}       # requestHash -> model.call events in order
         self.costs: dict[str, dict] = {}             # costRecordId -> CostRecord
@@ -102,6 +104,10 @@ class LoadedTrace:
     def model_calls(self) -> int:
         return sum(len(v) for v in self.calls.values())
 
+    def mutated(self) -> bool:
+        """True when the events no longer match what was verified at load time."""
+        return bytes_digest(events_to_bytes(self.events)) != self._events_digest
+
 
 def _fail(i, why):
     raise TraceError(f"event[{i}]: {why}")
@@ -113,9 +119,13 @@ def error_charge_class(err: dict) -> str:
     model, charged from its usage) or `retained` (outcome unknown: the full reservation).
     The gateway stamps detail.providerOutcome on every provider error, so replay can recompute this;
     an error without the stamp is retained (fail closed)."""
+    detail = err.get("detail") if isinstance(err.get("detail"), dict) else {}
     if err["code"] == "budget-exhausted":
         return "refused"
-    detail = err.get("detail") if isinstance(err.get("detail"), dict) else {}
+    # a host-guard refusal never reached the provider; the marker (stripped from adapter errors) keeps
+    # older recordings whose provider errors used these codes loadable and charged
+    if err["code"] in GUARD_CODES and detail.get("refusedBy") == REFUSED_BY:
+        return "refused"
     outcome = detail.get("providerOutcome")
     if release_allowed(outcome):
         return "released"
@@ -133,6 +143,8 @@ def verify_events(events: list, data: bytes | None = None, *, allow_partial: boo
     seen_calls, seen_tools, cost_of = set(), set(), {}
     for i, ev in enumerate(events):
         t = ev["type"]
+        if t == "run.start" and i != 0:
+            _fail(i, "duplicate run.start: a trace names exactly one run document")
         if t == "model.call":
             req = ev["request"]
             try:

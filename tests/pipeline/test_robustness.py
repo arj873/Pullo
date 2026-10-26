@@ -10,7 +10,7 @@ from unittest import mock
 from reviewer.gateway import SpendBook
 from reviewer.pipeline import PipelineError, load_result
 
-from .helpers import (HEAD, Rig, all_bytes, entry, events_of, hid, hyp, inv, judge, model_calls, resp, script, terr, ver)
+from .helpers import (EVR1, EVR2, HEAD, Rig, all_bytes, entry, events_of, hid, hyp, inv, judge, model_calls, resp, script, terr, ver)
 
 
 def w(ids, title="T", body="B"):
@@ -18,27 +18,53 @@ def w(ids, title="T", body="B"):
 
 
 class RunIdShapedText(Rig):
-    def test_run_id_shaped_text_in_a_diff_or_pr_cannot_suppress_the_review(self):
+    """D6 (S1-DECISIONS 5): repository and PR text containing run-shaped literals is data. It reaches the model
+    unchanged and stays citable; host run identity never reaches a request, so two runs of one case send
+    byte-identical requests."""
+
+    TOKENS = ("run_0123456789abcdef", "evr_fedcba9876543210", "run_aaaaaaaaaaaaaaaa")
+
+    def _case(self):
         head = dict(HEAD)
         head["src/a.py"] = HEAD["src/a.py"].replace("return x - 1", "return x - 1  # see run_0123456789abcdef", 1)
-        m = self.mini(head=head, body="ticket evr_fedcba9876543210 and run_aaaaaaaaaaaaaaaa")
-        h = hyp(m, "src/a.py", 2)                        # a line without the token stays citable
-        res, spy = self.record(m, script(inv(h), ver(0, m, path="src/a.py", line=2), judge(w([hid(0, h)]))))
+        return self.mini(head=head, body="ticket evr_fedcba9876543210 and run_aaaaaaaaaaaaaaaa")
+
+    def test_run_id_shaped_text_in_a_diff_or_pr_reaches_the_model_unchanged_and_stays_citable(self):
+        m = self._case()
+        h = hyp(m, "src/a.py", 5, end=5)                 # cites the very line that carries the token
+        self.assertIn("run_0123456789abcdef", m.lines("src/a.py", 5))
+        res, spy = self.record(m, script(inv(h), ver(0, m, path="src/a.py", line=5), judge(w([hid(0, h)]))))
         self.assertEqual((res.status, len(res.comments)), ("completed", 1))
         req = json.dumps(spy.requests[0])
-        for tok in ("run_0123456789abcdef", "evr_fedcba9876543210", "run_aaaaaaaaaaaaaaaa"):
-            self.assertNotIn(tok, req)
-        self.assertIn("run_[id-removed]", req)
-        self.assertIn("rewritten", req)
-        # the rewrite is disclosed to the reader of the review as well as to the model
-        self.assertIn("rewritten to 'run_[id-removed]'", Path(res.review_path).read_text())
+        for tok in self.TOKENS:
+            self.assertIn(tok, req)
+        self.assertNotIn("id-removed", req)
+        self.assertNotIn("rewritten", Path(res.review_path).read_text())
+        self.assertIn("run_0123456789abcdef", res.hypotheses[0]["evidence"][0]["excerpt"])
 
-    def test_model_output_with_run_id_shapes_cannot_break_the_verifier_or_judge_requests(self):
+    def test_model_output_with_run_id_shapes_stays_literal_in_verifier_and_judge_requests(self):
         m = self.mini()
         h = hyp(m, "src/a.py", 2, claim="mentions run_0123456789abcdef in its claim", mechanism="and evr_0123456789abcdef")
         res, spy = self.record(m, script(inv(h), ver(0, m, path="src/a.py", line=2), judge(w([hid(0, h)]))))
         self.assertEqual((res.status, len(res.comments)), ("completed", 1))
-        self.assertTrue(all("run_0123456789abcdef" not in json.dumps(r) for r in spy.requests))
+        for role in ("verifier", "judge"):
+            self.assertIn("run_0123456789abcdef", json.dumps([r for r in spy.requests if r["role"] == role]))
+
+    def test_different_run_identities_produce_identical_request_hashes(self):
+        m = self._case()
+        h = hyp(m, "src/a.py", 2)
+        scr = lambda: script(inv(h), ver(0, m, path="src/a.py", line=2), judge(w([hid(0, h)])))
+        r1, _ = self.record(m, scr(), eval_id=EVR1)
+        r2, _ = self.record(m, scr(), eval_id=EVR2)
+        self.assertNotEqual(r1.run_id, r2.run_id)
+        hashes = lambda r: [(e["stage"], e["role"], e["requestHash"]) for e in model_calls(r)]
+        self.assertEqual(hashes(r1), hashes(r2))
+        self.assertEqual(len(hashes(r1)), 3)
+        # a host run identity in any request would have made these differ (and a strict replay miss)
+        for r in (r1, r2):
+            for e in model_calls(r):
+                self.assertNotIn(r.run_id, json.dumps(e["request"]))
+                self.assertNotIn(r.run["evalRunId"], json.dumps(e["request"]))
 
 
 class VerifierRepair(Rig):

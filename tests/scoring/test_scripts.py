@@ -80,11 +80,16 @@ class Shipped(unittest.TestCase):
         want = hypothesis_id("generalist", 0, h["claim"], h["location"]["path"], h["location"]["line"])
         self.assertEqual(d["entries"][-1]["response"]["output"]["comments"][0]["findingIds"], [want])
 
-    def test_verifier_cites_a_different_target_than_the_proposer(self):
+    def test_verifier_keeps_the_location_and_adds_a_different_target(self):
+        """Fixture diversity: the verifier re-cites the proposer's defect location AND adds at least one extra
+        citation at a different target (the caller). The first cite is no longer required to differ."""
         d = script("smoke-c01")
         prop = d["entries"][0]["response"]["output"]["hypotheses"][0]["evidence"][0]
-        ver = d["entries"][1]["response"]["output"]["evidence"][0]
-        self.assertNotEqual((prop["path"], tuple(prop["lines"])), (ver["path"], tuple(ver["lines"])))
+        ev = d["entries"][1]["response"]["output"]["evidence"]
+        key = lambda e: (e["path"], tuple(e["lines"]))
+        self.assertIn(key(prop), [key(e) for e in ev])
+        self.assertTrue(any(key(e) != key(prop) for e in ev))
+        self.assertEqual(key(ev[0]), key(prop))                       # location first, extra proof after
 
 
 class Interface(unittest.TestCase):

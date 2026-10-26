@@ -224,9 +224,11 @@ def snapshot_resolver(trees: dict[str, tuple[str | os.PathLike, dict]]):
 
 
 def excerpt_matches(file_bytes: bytes, lines: list[int], excerpt: str) -> bool:
-    """Citation check: the redacted file lines [start, end] exist and equal the (already
-    redacted) excerpt, ignoring only a single trailing newline on the excerpt. A file's final
-    newline ends its last line; it does not start another, so lines past EOF never resolve."""
+    """Citation check: the redacted file lines [start, end] exist and the (already redacted)
+    excerpt equals them joined with "\\n", either exactly or plus one terminating "\\n". A range
+    that ends on a blank line joins to text ending in "\\n", which is matched exactly, not stripped.
+    A file's final newline ends its last line; it does not start another, so lines past EOF never
+    resolve."""
     try:
         text = file_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -238,6 +240,5 @@ def excerpt_matches(file_bytes: bytes, lines: list[int], excerpt: str) -> bool:
         all_lines.pop()
     if start < 1 or end < start or end > len(all_lines):
         return False
-    if excerpt.endswith("\n"):
-        excerpt = excerpt[:-1]
-    return "\n".join(all_lines[start - 1:end]) == excerpt
+    joined = "\n".join(all_lines[start - 1:end])
+    return joined == excerpt or (excerpt.endswith("\n") and joined == excerpt[:-1])

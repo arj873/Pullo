@@ -12,12 +12,13 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import hmac
+import json
 import re
 import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from reviewer.contracts import ContractViolation, require
+from reviewer.contracts import REGISTRY, ContractViolation, require, validate
 from reviewer.contracts.budget import (Ledger, check_spend_authorization, effective_retry_limits,
                                        estimate_input_tokens, release_allowed, reservation, settle)
 from reviewer.contracts.canonical import call_id, cost_id, request_hash, scoped_key
@@ -26,22 +27,43 @@ from reviewer.contracts.stages import STAGES
 
 from .auth import AuthorizationHandle, SpendBook, parse_ts
 from .errors import AuthorizationError, GatewayConfigError, SettlementError, TraceError, typed_error
+from .guard import GUARD_CODES, REFUSED_BY, AttemptContext, AttemptGuard, GuardRefusal, normalize_refusal
 from .providers import ProviderResult, default_providers
 from .script import ROLES, SLUG
-from .trace import LoadedTrace, Recorder, error_charge_class
+from .trace import LoadedTrace, Recorder, error_charge_class, verify_events
 
 MODES = ("live", "strict-replay", "disabled")
 RETRYABLE_CODES = frozenset({"provider-error", "provider-timeout"})
 _OUTPUT_PARAM_KEYS = ("maxOutputTokens", "max_tokens", "max_output_tokens")
+# Error codes an adapter may return. Every other code belongs to the gateway (refusals, replay, schema, contract
+# decisions): charge classification keys on codes, so an adapter must not be able to forge one (NEW1).
+ADAPTER_CODES = frozenset({"provider-error", "provider-timeout", "live-calls-disabled"})
+_GATEWAY_DETAIL_KEYS = frozenset({"scope", "refusedBy", "resolvedModel", "callId", "repairsUsed", "requestHash",
+                                  "localValidation", "guardFault", "adapterCode", "providerOutcome", "issues"})
+MAX_ISSUES, MAX_ISSUE_CHARS = 3, 200
+
+
+def adapter_error(err: dict) -> dict:
+    """An adapter error document with only adapter-owned codes and detail keys (original code kept as detail.adapterCode)."""
+    detail = err.get("detail") if isinstance(err.get("detail"), dict) else {}
+    detail = {k: v for k, v in detail.items() if k not in _GATEWAY_DETAIL_KEYS}
+    out = {k: v for k, v in err.items() if k != "detail"}
+    if err["code"] not in ADAPTER_CODES:
+        detail["adapterCode"] = err["code"]
+        out.update(code="provider-error", retryable=False)
+    if detail:
+        out["detail"] = detail
+    return out
 
 
 @dataclass
 class AttemptInfo:
     call_id: str | None
     attempt: int
-    outcome: str                     # ok | invalid-output | error code
+    outcome: str                     # ok | invalid-output | schema-invalid (ok answer failing its schema) | error code
     charge_usd_micros: int = 0
     overrun: bool = False
+    schema_issues: list = field(default_factory=list)
 
 
 @dataclass
@@ -65,7 +87,7 @@ class Gateway:
                  book: SpendBook | None = None, replay: LoadedTrace | None = None,
                  recorder: Recorder | None = None, clock: Callable[[], str] | None = None,
                  cost_kind: str = "review", eval_run_id: str | None = None, eval_case_id: str | None = None,
-                 expected_trace_digest: str | None = None):
+                 expected_trace_digest: str | None = None, guard: AttemptGuard | None = None):
         if mode not in MODES:
             raise GatewayConfigError(f"mode must be one of {MODES}")
         self.mode = mode
@@ -74,6 +96,12 @@ class Gateway:
         if not isinstance(run_id, str) or not re.fullmatch(r"run_[0-9a-f]{16}", run_id):
             raise GatewayConfigError("run_id must be a contract run id")
         self.run_id = run_id
+        for r, spec in self.profile["roles"].items():
+            if spec["outputSchema"] not in REGISTRY:
+                raise GatewayConfigError(f"profile role {r} names an output schema the contracts do not define")
+        if guard is not None and not callable(guard):
+            raise GatewayConfigError("guard must be a callable taking an AttemptContext")
+        self.guard = guard
         self.profile_ref = f"{self.profile['id']}@{self.profile['version']}"
         self.cost_kind, self.eval_run_id, self.eval_case_id = cost_kind, eval_run_id, eval_case_id
         self._own_recorder = recorder is None
@@ -122,8 +150,13 @@ class Gateway:
                     "trusted configuration or a separately pinned run artifact, never from the trace itself")
             if not replay.complete:
                 raise GatewayConfigError("strict replay needs a complete recording (the trace has no run.end)")
+            if replay.mutated():
+                raise TraceError("loaded trace events changed after load_trace(): re-load the (re-pinned) bytes")
             if not hmac.compare_digest(replay.byte_digest, expected_trace_digest):
                 raise TraceError("trace bytes do not match the pinned expected_trace_digest")
+            # serve from a private verified copy: later mutation of the caller's LoadedTrace cannot reach this gateway
+            self.replay = verify_events(copy.deepcopy(replay.events), allow_partial=False)
+            self.replay.byte_digest = replay.byte_digest
         else:
             if replay is not None or authorization is not None:
                 raise GatewayConfigError("disabled gateway takes neither trace nor authorization")
@@ -150,6 +183,10 @@ class Gateway:
         run = started["run"]
         if run["id"] != self.run_id or (self.mode != "disabled" and run["mode"] != self.mode):
             return "config", "recorder run.start does not match this gateway's run id/mode"
+        if run.get("profile") != self.profile_ref:
+            return "config", "recorder run.start names a different profile than this gateway's trusted profile"
+        if self.mode == "strict-replay" and run.get("replayOf") != self.replay.run_id:
+            return "config", "recorder run.start replayOf is not the replayed recording's run id"
         if self.mode == "live" and run.get("spendAuthorization") != self.auth.digest:
             return "auth", "run.spendAuthorization is not the digest of the trusted authorization"
         return None
@@ -174,9 +211,13 @@ class Gateway:
         return self.replay.model_calls - len(self._consumed)
 
     def call(self, stage: str, role: str, agent_id: str, ordinal: int, request: dict, *,
-             repair: Callable[[dict], dict] | None = None) -> CallResult:
+             repair: Callable[[dict], dict] | None = None,
+             repair_with_issues: Callable[[dict, list], dict] | None = None) -> CallResult:
         """One logical call: retries (retryable provider errors) and at most one repair
-        (invalid-output), each admitted separately. Never raises for request content."""
+        (invalid-output, or a status-ok answer that fails its output schema), each admitted separately
+        and each preceded by the host guard. Never raises for request content."""
+        if repair is not None and repair_with_issues is not None:
+            raise ValueError("give repair or repair_with_issues, not both")
         if stage not in STAGES or role not in ROLES or not isinstance(agent_id, str) \
                 or not SLUG.fullmatch(agent_id) or type(ordinal) is not int or not 0 <= ordinal <= 10**6:
             raise ValueError("stage/role/agent_id/ordinal are not valid call coordinates")
@@ -199,12 +240,20 @@ class Gateway:
                 res.error = err
                 return res
             resp = out["response"]
+            issues = []
             if resp["status"] == "ok":
-                res.response = resp
-                return res
-            if repair is not None and repairs_used < repairs:
+                issues = self._output_issues(role, resp)
+                if not issues:
+                    res.response = resp
+                    return res
+                # D3: the receipt and charge of this answer stay as recorded; only the decision changes
+                out["info"].outcome, out["info"].schema_issues = "schema-invalid", list(issues)
+            if (repair is not None or repair_with_issues is not None) and repairs_used < repairs:
                 try:
-                    request = repair(copy.deepcopy(resp))
+                    shown = copy.deepcopy(resp)
+                    if shown["rawText"] is None and shown["output"] is not None:
+                        shown["rawText"] = json.dumps(shown["output"], sort_keys=True, ensure_ascii=False)[:2_000_000]
+                    request = repair_with_issues(shown, list(issues)) if repair_with_issues is not None else repair(shown)
                 except Exception as e:  # noqa: BLE001 - a broken repair builder must not crash the run
                     res.error = typed_error("internal", f"repair builder failed: {type(e).__name__}", stage=stage)
                     return res
@@ -214,10 +263,17 @@ class Gateway:
                 continue
             code = "repair-exhausted" if repairs_used else "schema-invalid"
             res.response = None
-            res.error = typed_error(code, "model output failed its schema", stage=stage,
-                                    detail={"repairsUsed": repairs_used})
+            detail = {"repairsUsed": repairs_used}
+            if issues:
+                detail.update(issues=list(issues), localValidation=True)
+            res.error = typed_error(code, "model output failed its schema", stage=stage, detail=detail)
             self.recorder.append("error", error=res.error)
             return res
+
+    def _output_issues(self, role: str, resp: dict) -> list[str]:
+        """D3: a status-ok answer must satisfy the trusted profile's output schema (never one named by the response)."""
+        found = validate(self.profile["roles"][role]["outputSchema"], resp["output"])
+        return [str(i)[:MAX_ISSUE_CHARS] for i in found[:MAX_ISSUES]]
 
     # ------------------------------------------------------------------ one admitted attempt
     def _now(self) -> str:
@@ -226,7 +282,8 @@ class Gateway:
     def _refuse(self, info: AttemptInfo, err: dict, record: bool = True) -> dict:
         info.outcome = err["code"]
         # a trace cannot begin with an error event: with no run.start yet there is nothing to append to
-        if record and self.recorder.events:
+        # a refusal never writes into a recorder whose run.start is not bound to this gateway (NEW6)
+        if record and self.recorder.events and self._binding_problem() is None:
             self.recorder.append("error", error=err)
         return {"error": err, "response": None, "info": info}
 
@@ -235,7 +292,8 @@ class Gateway:
         bad = self._binding_problem()
         if bad is None:
             return None
-        return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=c["stage"]))
+        # effect-free: the recorder is not this gateway's to write into
+        return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=c["stage"]), record=False)
 
     def _check_request(self, role: str, req: dict) -> dict | None:
         spec = self.profile["roles"][role]
@@ -278,8 +336,32 @@ class Gateway:
         if self.mode == "disabled":
             return self._refuse(info, typed_error("live-calls-disabled", "gateway is disabled", stage=stage))
         if self.mode == "strict-replay":
-            return self._bound(ctx) or self._replay_attempt(ctx)
+            bound = self._bound(ctx)
+            if bound is not None:
+                return bound
+            refusal = self._guard_check(ctx)
+            if refusal is not None:        # nothing recorded was reproduced: the recorded call stays unconsumed
+                return self._refuse(info, refusal)
+            return self._replay_attempt(ctx)
         return self._live_attempt(ctx)
+
+    # -- D4 host guard
+    def _guard_check(self, c) -> dict | None:
+        """The TypedError for a guard refusal, else None. Runs before any reservation or provider contact."""
+        if self.guard is None:
+            return None
+        ctx = AttemptContext(c["stage"], c["role"], c["agent_id"], c["ordinal"], c["attempt"],
+                             "repair" if c["repair_of"] else "retry" if c["retry_of"] else "first", self.mode)
+        detail = {"refusedBy": REFUSED_BY}
+        try:
+            verdict = self.guard(ctx)
+            refusal = None if verdict is None else normalize_refusal(verdict)
+        except Exception as e:  # noqa: BLE001 - a broken host guard must stop the call, not crash the run
+            refusal = GuardRefusal("cancelled", "host guard failed")
+            detail["guardFault"] = type(e).__name__
+        if refusal is None:
+            return None
+        return typed_error(refusal.code, refusal.message[:500], stage=c["stage"], detail=detail)
 
     # -- live / recording
     def _live_attempt(self, c) -> dict:
@@ -310,6 +392,9 @@ class Gateway:
             return self._refuse(info, typed_error(
                 "contract-violation", "this call identity (stage, role, agentId, ordinal, attempt) was already used "
                 "in this run; every logical call needs its own agentId/ordinal", stage=stage))
+        refusal = self._guard_check(c)
+        if refusal is not None:      # D4: nothing reserved, nothing sent; recorded as a zero-cost refused call
+            return self._finish_error(c, refusal, 0, 0, None, refused=True)
         refuse = self._reserve(rkey, stage, amount)
         if refuse is not None:
             return self._finish_error(c, refuse, amount, 0, None, refused=True)
@@ -385,6 +470,7 @@ class Gateway:
         err = redact_json(result.error)[0]
         try:
             require("TypedError", err)
+            err = adapter_error(err)         # NEW1: an adapter cannot speak with a gateway-owned code
         except ContractViolation:
             err = typed_error("provider-error", "provider returned an invalid error document", stage=c["stage"])
             result = ProviderResult(None, err, "unknown")
@@ -538,6 +624,13 @@ class Gateway:
         recorded_cost = self.replay.costs[rec["costRecordId"]]
         if rec.get("repairOf") != c["repair_of"] or recorded_cost.get("retryOf") != c["retry_of"]:
             return self._mismatch(c, "repair/retry provenance differs from the recording")
+        rerr = rec.get("error")
+        if rerr is not None and rerr["code"] in GUARD_CODES and error_charge_class(rerr) == "refused":
+            # a recorded host-guard refusal is a fact of the recording: reproduced at zero cost, nothing reserved
+            if recorded_cost["usdMicros"] != 0 or recorded_cost["reservedUsdMicros"] != 0:
+                return self._mismatch(c, "recorded guard refusal carries a charge")
+            return self._finish_error(c, copy.deepcopy(rerr), 0, 0, None,
+                                      replay_cost=self._replayed_cost(c, recorded_cost, 0))
         spec = self.profile["roles"][c["role"]]
         amount = reservation(spec["price"], estimate_input_tokens(c["req"]), spec["caps"]["maxOutputTokens"])
         rkey = scoped_key(self.run_id, c["cid"])

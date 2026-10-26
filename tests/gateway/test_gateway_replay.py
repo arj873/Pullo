@@ -16,7 +16,7 @@ from reviewer.contracts.canonical import (call_id, comparable_digest, cost_id, d
                                           result_hash, tool_call_id)
 from reviewer.gateway import (Gateway, GatewayConfigError, Recorder, SpendBook, TraceError, load_trace,
                               verify_events)
-from tests.gateway.helpers import BUDGET, PROFILE, ZERO, Env, entry, profile, request, response, script, terr
+from tests.gateway.helpers import BUDGET, PROFILE, ZERO, Env, entry, profile, request, response, script, terr, verifier_out
 
 TOOL_RESULT = {"status": "ok", "evidence": [], "completeness": "exact", "truncated": None, "notice": "ok"}
 H = hash("x")
@@ -28,10 +28,10 @@ class Rec(Env):
     def record(self, *, extra_entries=(), budget=None, with_tool=True, **kw):
         entries = [entry(response=response()),
                    entry(stage="VERIFY", role="verifier", agent="verifier", ordinal=0,
-                         response=response(output={"verdict": "confirmed"})),
+                         response=response(output=verifier_out("confirmed"))),
                    entry(stage="VERIFY", role="verifier", agent="verifier", ordinal=1, error=terr("provider-timeout")),
                    entry(stage="VERIFY", role="verifier", agent="verifier", ordinal=1, attempt=1,
-                         response=response(output={"verdict": "refuted"})), *extra_entries]
+                         response=response(output=verifier_out("refuted"))), *extra_entries]
         gw = self.live(script(*entries), budget=budget, **kw)
         gw.call("INVESTIGATE", "investigator", "generalist", 0, request())
         gw.call("VERIFY", "verifier", "verifier", 0, request("verifier", text="candidate 0"))
@@ -266,7 +266,7 @@ class ReplayTests(Rec):
 
     def test_concurrent_replay_is_deterministic_per_agent(self):
         n = 12
-        entries = [entry(agent=f"agent-{i}", response=response(output={"hypotheses": [], "who": i})) for i in range(n)]
+        entries = [entry(agent=f"agent-{i}", response=response(rawText=f"who-{i}")) for i in range(n)]
         gw = self.live(script(*entries), handle=self.handle(maxUsdMicrosPerRun=5_000_000, maxUsdMicrosTotal=50_000_000),
                        budget={**BUDGET, "maxUsdMicros": 5_000_000, "verifyReserveBp": 0})
         same = request()                                              # identical request from every agent
@@ -281,7 +281,7 @@ class ReplayTests(Rec):
         ts = [threading.Thread(target=go, args=(i,)) for i in order]
         [t.start() for t in ts]
         [t.join() for t in ts]
-        self.assertTrue(all(out[i].ok and out[i].output["who"] == i for i in range(n)))
+        self.assertTrue(all(out[i].ok and out[i].response["rawText"] == f"who-{i}" for i in range(n)))
         self.assertEqual(rp.report()["unconsumedRecordedCalls"], 0)
 
 

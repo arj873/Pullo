@@ -132,8 +132,10 @@ def materialize_evidence(model_evidence: list, tool_calls: dict, source: str,
     `resolver` (e.g. snapshot.snapshot_resolver): resolved ones get `resolved: true`; failures
     are dropped and reported. Without a resolver, code citations are copied unresolved and stay
     untrusted (they cannot raise severity or strength). Tool refs copy the tool layer's own
-    evidence from the trusted trace. Returns (evidence, problems); a problem means the citation
-    is invalid (`invalid-citation`)."""
+    evidence from a usable (TRUSTED_TOOL_STATUSES) result; code items (read_file) are re-checked
+    with `resolver` when one is given. Pass `tool_calls` = entities.citable_tool_calls(citing
+    call) so a model can only materialize what it was shown. Returns (evidence, problems); a
+    problem means the citation is invalid (`invalid-citation`)."""
     out: list[dict] = []
     problems: list[str] = []
     for i, m in enumerate(model_evidence):
@@ -155,13 +157,25 @@ def materialize_evidence(model_evidence: list, tool_calls: dict, source: str,
         if not isinstance(tc, dict) or tc.get("type") != "tool.call":
             problems.append(f"[{i}] unknown tool call {m['toolCallId']}")
             continue
+        if tc["result"]["status"] not in TRUSTED_TOOL_STATUSES:
+            problems.append(f"[{i}] tool call result is {tc['result']['status']}")
+            continue
         items = tc["result"]["evidence"]
         if "index" in m:
             if m["index"] >= len(items):
                 problems.append(f"[{i}] index {m['index']} out of range")
                 continue
             items = [items[m["index"]]]
-        out.extend(dict(x) for x in items[:20])
+        for x in items[:20]:
+            if x.get("kind") == "code" and resolver is not None:   # D2: read_file items re-checked
+                try:
+                    ok = x.get("resolved") is True and resolver(x) is True
+                except Exception:  # noqa: BLE001
+                    ok = False
+                if not ok:
+                    problems.append(f"[{i}] tool code item does not match the pinned snapshot")
+                    continue
+            out.append(dict(x))
     return out, problems
 
 
