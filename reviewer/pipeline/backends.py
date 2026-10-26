@@ -48,11 +48,11 @@ class RecordBackend:
         if problems:
             raise PipelineError("config", "authorization does not cover this profile/Plan: " + "; ".join(problems))
 
-    def make_gateway(self, *, run_id, profile, budget, recorder, cost_kind, eval_run_id, eval_case_id):
+    def make_gateway(self, *, run_id, profile, budget, recorder, cost_kind, eval_run_id, eval_case_id, guard=None):
         try:
             return Gateway(mode="live", profile=profile, budget=budget, run_id=run_id, providers=self.providers,
                            authorization=self.authorization, book=self.book, recorder=recorder, clock=self.clock,
-                           cost_kind=cost_kind, eval_run_id=eval_run_id, eval_case_id=eval_case_id)
+                           cost_kind=cost_kind, eval_run_id=eval_run_id, eval_case_id=eval_case_id, guard=guard)
         except GatewayConfigError as e:
             raise PipelineError("config", str(e)) from e
 
@@ -78,11 +78,11 @@ class ReplayBackend:
     def preflight(self, profile: dict, budget: dict) -> None:
         return None
 
-    def make_gateway(self, *, run_id, profile, budget, recorder, cost_kind, eval_run_id, eval_case_id):
+    def make_gateway(self, *, run_id, profile, budget, recorder, cost_kind, eval_run_id, eval_case_id, guard=None):
         try:
             return Gateway(mode="strict-replay", profile=profile, budget=budget, run_id=run_id,
                            replay=self.recording, recorder=recorder, cost_kind=cost_kind, eval_run_id=eval_run_id,
-                           eval_case_id=eval_case_id, expected_trace_digest=self.expected_trace_digest)
+                           eval_case_id=eval_case_id, expected_trace_digest=self.expected_trace_digest, guard=guard)
         except (GatewayConfigError, TraceError) as e:
             raise PipelineError("replay-pin", str(e)) from e
 

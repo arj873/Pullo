@@ -9,6 +9,7 @@ found by search. `resolved: true` is set only after the contracts' snapshot reso
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import stat
 from dataclasses import dataclass, field
@@ -37,6 +38,25 @@ class Limits:
     max_query_chars: int = 200
     max_diff_lines: int = 800
     max_diff_input_lines: int = 5_000
+    search_wall_s: float | None = None   # per-search wall budget; None = only the session wall applies (legacy)
+
+    @classmethod
+    def full_repository(cls, **tighter) -> "Limits":
+        """Trusted host profile for a complete pinned tree (up to 60k searched files, 256 MiB scanned).
+        Overrides may only tighten; a larger or unknown value is a host error (ValueError)."""
+        prof = cls(max_calls=60, wall_s=300.0, search_wall_s=90.0, max_search_files=FULL_REPO_SEARCH_FILES,
+                   max_search_scan_bytes=FULL_REPO_SCAN_BYTES)
+        for k, v in tighter.items():
+            cur = getattr(prof, k, None)
+            if not hasattr(prof, k) or isinstance(cur, bool) or not isinstance(v, (int, float)) \
+                    or isinstance(v, bool) or not 0 < v <= cur:
+                raise ValueError(f"limit {k!r}: overrides may only tighten the full-repository profile")
+            setattr(prof, k, v)
+        return prof
+
+
+FULL_REPO_SEARCH_FILES = 60_000
+FULL_REPO_SCAN_BYTES = 256 << 20
 
 
 @dataclass
@@ -84,7 +104,7 @@ def load_text(ctx: Ctx, side: str, path: str):
     found = ctx.view.find(side, path)
     if found is None:
         return None, None, {}, Outcome(
-            "unavailable", completeness="approximate" if ctx.view.partial else "exact",
+            "unavailable", completeness="approximate" if ctx.view.approximate else "exact",
             notice=(f"{path!r} is not in the {side} snapshot view. {ctx.note()}").strip())
     layer, entry = found
     if entry["type"] == "symlink":
@@ -150,22 +170,38 @@ def _in_prefix(path: str, prefix: str) -> bool:
 
 def list_files(ctx: Ctx, a: dict) -> Outcome:
     side, prefix, limit = a["side"], a["prefix"], min(a["limit"], ctx.limits.max_list)
+    after = a.get("after")                      # paging cursor: last path of the previous page
     rows = []
     for layer in ctx.view.layers(side):
         for p, e in layer._index.items():
-            if policy.permitted(p) and _in_prefix(p, prefix):
+            if policy.permitted(p) and _in_prefix(p, prefix) and (after is None or p > after):
                 rows.append((p, f"{p}  [symlink, not readable]" if e["type"] == "symlink" else f"{p}  ({e['size']} bytes)"))
     rows.sort()
     total = len(rows)
-    rows = [r for _, r in rows[:limit]]
-    cov = "partial view (changed files and selected context)" if ctx.view.partial else "full snapshot"
-    header = f"# {side} files under {prefix or '/'}: {len(rows)} of {total}; {cov}"
-    ev, shown = _text_chunks(ctx, header, rows, "list_files")
+    page = rows[:limit]
+    cov = ("partial view (changed files and selected context)" if ctx.view.partial else
+           "full snapshot with import omissions" if ctx.view.omitted else "full snapshot")
+    where = prefix or "/"
+    if after is None:
+        header = f"# {side} files under {where}: {len(page)} of {total}; {cov}"
+    else:
+        header = f"# {side} files under {where} after {json.dumps(after, ensure_ascii=False)}: {total} remaining; {cov}"
+    ev, shown = _text_chunks(ctx, header, [r for _, r in page], "list_files")
     truncated = {"shown": shown, "total": total} if shown < total else None
     status = "empty" if total == 0 else ("partial" if truncated else "ok")
-    return Outcome(status, ev, "exact" if not ctx.view.partial and not truncated else "approximate",
-                   truncated, " ".join(x for x in [
-                       f"{shown} of {total} entries shown." if truncated else "", ctx.note()] if x),
+    notes = []
+    if truncated and shown:
+        nxt = {"side": side, "prefix": prefix, "after": page[shown - 1][0], "limit": a["limit"]}
+        notes.append("Next page: list_files " + json.dumps(nxt, ensure_ascii=False))
+    elif truncated:
+        notes.append("Output cap is too small to show even one entry; no continuation can be offered.")
+    if truncated:
+        notes.append(f"{shown} of {total} entries shown.")
+    elif after is not None:
+        notes.append("Last page." if total else "No entries after the cursor.")
+    notes.append(ctx.note())
+    return Outcome(status, ev, "exact" if not ctx.view.approximate and not truncated else "approximate",
+                   truncated, " ".join(x for x in notes if x),
                    layers=[l.name for l in ctx.view.layers(side)])
 
 
@@ -218,7 +254,7 @@ def read_file(ctx: Ctx, a: dict) -> Outcome:
     requested = max(0, min(asked_end, n) - start + 1)
     shown_lines = sum(e["lines"][1] - e["lines"][0] + 1 for e in ev)
     trunc = shown_lines < requested or bool(omitted) or end < min(asked_end, n)
-    parts = [f"{path} lines {start}-{shown_to} of {n} from {layer.name} ({layer.snapshot_id[:24]}...)."]
+    parts = [f"{path} lines {start}-{shown_to} of {n} from {layer.label(path)} ({layer.snapshot_id[:24]}...)."]
     if omitted:
         parts.append(f"{len(omitted)} line(s) longer than {lim.max_line_chars} chars omitted (first at line {omitted[0]}).")
     if shown_lines < requested and not omitted:
@@ -239,9 +275,10 @@ def search_literal(ctx: Ctx, a: dict) -> Outcome:
     files = []
     for layer in ctx.view.layers(side):
         for p in layer._index:
-            if policy.permitted(p) and _in_prefix(p, prefix):
+            if policy.permitted(p) and _in_prefix(p, prefix):    # policy-hidden paths leave no trace (no existence hint)
                 files.append((p, layer))
     files.sort(key=lambda t: t[0])
+    t_search = ctx.clock()
     ev, counts_total = [], {}
     scanned = skipped_big = skipped_text = failed = long_hits = visited = symlinks = 0
     matches = over_file_cap = 0          # matching lines seen in searched files / files above the per-file cap
@@ -254,15 +291,18 @@ def search_literal(ctx: Ctx, a: dict) -> Outcome:
         if ctx.expired():
             stop = "deadline"
             break
+        if lim.search_wall_s is not None and ctx.clock() - t_search >= lim.search_wall_s:
+            stop = "search time cap"
+            break
+        if e["size"] > lim.max_file_bytes:     # never read, so it must not spend the file or byte budget
+            skipped_big += 1
+            continue
         if visited >= lim.max_search_files:
             stop = "search file cap"
             break
         if scanned + e["size"] > lim.max_search_scan_bytes:
             stop = "search byte cap"
             break
-        if e["size"] > lim.max_file_bytes:
-            skipped_big += 1
-            continue
         visited += 1
         scanned += e["size"]
         lyr, lines, counts, fail = load_text(ctx, side, p)
@@ -309,7 +349,8 @@ def search_literal(ctx: Ctx, a: dict) -> Outcome:
     exact_total = stop is None and not failed
     notes = []
     if stop:
-        notes.append(f"Search stopped early ({stop}); results are incomplete.")
+        notes.append(f"Search stopped early ({stop}); results are incomplete: {visited} of {len(files)} candidate "
+                     f"file(s) visited, {scanned} bytes scanned, later files in path order were not searched.")
     if unshown > 0:
         why = ", ".join(x for x in (f"result cap {cap}" if matches > cap else "",
                                     f"per-file cap {lim.max_matches_per_file} ({over_file_cap} file(s))" if over_file_cap else "",
@@ -333,7 +374,7 @@ def search_literal(ctx: Ctx, a: dict) -> Outcome:
     complete = not (stop or skipped_big or skipped_text or failed or long_hits or symlinks or unshown > 0)
     status = "error" if failed and not ev else ("partial" if not complete else ("ok" if ev else "empty"))
     trunc = {"shown": shown, "total": matches} if unshown > 0 and exact_total else None
-    return Outcome(status, ev, "exact" if complete and not ctx.view.partial else "approximate", trunc,
+    return Outcome(status, ev, "exact" if complete and not ctx.view.approximate else "approximate", trunc,
                    " ".join(notes), counts_total, [l.name for l in ctx.view.layers(side)],
                    "deadline" if stop == "deadline" else None)
 
@@ -343,8 +384,8 @@ def search_literal(ctx: Ctx, a: dict) -> Outcome:
 def _changed_index(view: View, side: str) -> dict:
     idx = {}
     for layer in view.layers(side):
-        if layer.kind in ("full", "changed"):
-            idx.update({p: e for p, e in layer._index.items() if policy.permitted(p)})
+        idx.update({p: e for p, e in layer._index.items()
+                    if layer.path_kind(p) in ("full", "changed") and policy.permitted(p)})
     return idx
 
 
@@ -368,17 +409,17 @@ def diff(ctx: Ctx, a: dict) -> Outcome:
         notes = [ctx.note() and "Context files are excluded from this list.", ctx.note(),
                  f"{shown} of {total} paths shown." if trunc else ""]
         return Outcome("empty" if total == 0 else ("partial" if trunc else "ok"), ev,
-                       "exact" if not ctx.view.partial and not trunc else "approximate", trunc,
+                       "exact" if not ctx.view.approximate and not trunc else "approximate", trunc,
                        " ".join(x for x in notes if x), layers=[l.name for s in ("base", "head") for l in ctx.view.layers(s)])
     if not policy.permitted(path):
         return DENIED
     fb, fh = ctx.view.find("base", path), ctx.view.find("head", path)
     if fb is None and fh is None:
-        return Outcome("unavailable", completeness="approximate" if ctx.view.partial else "exact",
+        return Outcome("unavailable", completeness="approximate" if ctx.view.approximate else "exact",
                        notice=f"{path!r} is in neither snapshot view. {ctx.note()}".strip())
     # A one-sided file is only "added"/"removed" if the missing side is known to be complete for it.
     for found, other, side in ((fb, fh, "head"), (fh, fb, "base")):
-        if found is not None and other is None and found[0].kind == "context":
+        if found is not None and other is None and found[0].path_kind(path) == "context":
             return Outcome("unavailable", completeness="approximate",
                            notice=f"Cannot diff {path!r}: it is context loaded on one side only, so its "
                                   f"absence on the {side} side is unknown. {ctx.note()}".strip())
@@ -410,5 +451,5 @@ def diff(ctx: Ctx, a: dict) -> Outcome:
     ev, shown = _text_chunks(ctx, header, rows, "diff")
     trunc = {"shown": shown, "total": len(body)} if shown < len(body) else None
     notes = [f"{skipped} diff line(s) not shown (cap or over-long)." if trunc else "", ctx.note()]
-    return Outcome("partial" if trunc else "ok", ev, "exact", trunc, " ".join(x for x in notes if x),
+    return Outcome("partial" if trunc else "ok", ev, "approximate" if ctx.view.omitted else "exact", trunc, " ".join(x for x in notes if x),
                    counts_total, [l.name for l in layers])

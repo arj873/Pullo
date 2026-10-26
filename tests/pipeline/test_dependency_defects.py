@@ -1,6 +1,7 @@
 """Defects in OTHER modules that the pipeline met. They are reported to their owners in S0-07.md, never patched or
 bypassed here. Each test states the behavior the pipeline needs; `expectedFailure` flips to an unexpected success
-(a failure) when the owner fixes the module, which is the signal to remove the marker."""
+(a failure) when the owner fixes the module, which is the signal to remove the marker. (The gateway D3 test below
+lost its marker when S1-02 fixed it; the tools test above had none.)"""
 
 from __future__ import annotations
 
@@ -11,11 +12,10 @@ from pathlib import Path
 from reviewer.contracts.snapshot import build_manifest
 from reviewer.tools import ToolSession, full_view
 
-from .helpers import Rig, entry, hyp, inv, resp, script
+from .helpers import Rig, entry, hyp, inv, model_calls, resp, script
 
 
 class ToolsContractsDefects(unittest.TestCase):
-    @unittest.expectedFailure
     def test_read_file_range_ending_on_a_blank_line_is_not_tamper(self):
         # contracts.snapshot.excerpt_matches strips one trailing newline from the excerpt, so the tool's own
         # evidence for lines 1-2 of "a = 1\n\nb = 2\n" ("a = 1\n") never resolves and read_file reports the pinned
@@ -33,12 +33,16 @@ class ToolsContractsDefects(unittest.TestCase):
 
 
 class GatewayDefects(Rig):
-    @unittest.expectedFailure
+    """D3 closed in the gateway (S1-02): kept as a regression so the pipeline never relies on its own re-check."""
+
     def test_status_ok_answer_that_fails_its_role_schema_gets_the_one_bounded_repair(self):
-        # The gateway only repairs status=invalid-output answers; it never validates response.output against
-        # request.outputSchema, so a schema-invalid status=ok answer is final (the pipeline reports schema-invalid).
         m = self.mini()
         broken = entry("INVESTIGATE", "investigator", "generalist", 0, 0, response=resp({"hypotheses": [{"claim": "x"}]}))
         fixed = inv(hyp(m, "src/a.py", 2), attempt=1)
         res, spy = self.record(m, script(broken, fixed))
-        self.assertEqual(spy.calls, 2)
+        invest = model_calls(res, "INVESTIGATE")
+        self.assertEqual([(c["attempt"], c.get("repairOf") == invest[0]["callId"]) for c in invest],
+                         [(0, False), (1, True)])                      # exactly one repair, admitted as its own attempt
+        self.assertEqual(len(res.hypotheses), 1)
+        self.assertEqual(res.hypotheses[0]["sourceCallId"], invest[1]["callId"])
+        self.assertEqual(res.stages["INVESTIGATE"]["status"], "completed")

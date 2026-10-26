@@ -62,6 +62,8 @@ def normalize(tool: str, args, lim: Limits) -> dict:
                            "limit": lim.max_search_results},
         "diff": {"path": None},
     }[tool]
+    if tool == "list_files":
+        spec["after"] = ""            # paging cursor; omitted from the normalized args when empty (stable ids)
     if set(args) - set(spec):
         raise ArgError("unknown argument(s)")      # names are model text: not echoed
     a = {k: args.get(k, d) for k, d in spec.items()}
@@ -71,6 +73,10 @@ def normalize(tool: str, args, lim: Limits) -> dict:
         if not policy.valid_prefix(a["prefix"]):
             raise ArgError("prefix")
         a["limit"] = _int(a["limit"], "limit", 1, 10_000)
+        if a["after"] == "":
+            del a["after"]
+        elif not policy.permitted(a["after"]):
+            raise ArgError("after")
     elif tool == "read_file":
         if not policy.valid_path(a["path"]):
             raise ArgError("path")

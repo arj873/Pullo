@@ -14,12 +14,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from reviewer.contracts.canonical import hypothesis_id
+from reviewer.contracts.canonical import hypothesis_id, tool_call_id
 from reviewer.contracts.snapshot import build_manifest
 from reviewer.gateway import (DisabledProvider, SpendBook, SyntheticProvider, bytes_digest, events_to_bytes, load_trace,
                               parse_script, trusted_authorization)
 from reviewer.pipeline import (EvalIdentity, HostConfig, Hooks, RecordBackend, ReplayBackend, ReviewSpec,
                                SnapshotInput, engine_identity, run_review)
+from reviewer.tools import Limits, normalize
 
 ROOT = Path(__file__).resolve().parents[2]
 EX = ROOT / "reviewer/contracts/examples"
@@ -31,6 +32,15 @@ NOW = "2026-10-25T12:00:00Z"
 ZERO = {k: None for k in ("uncachedInputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens",
                           "reasoningTokens")}
 EVR1, EVR2 = "evr_" + "1" * 16, "evr_" + "2" * 16
+
+# ---- a retrieval profile/plan: the same synthetic roles, but investigator and verifier return the Turn envelope
+TURN_PROFILE = copy.deepcopy(PROFILE)
+TURN_PROFILE["id"] = "smoke-synthetic-retrieval"
+TURN_PROFILE["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion="investigator.retrieve@v1")
+TURN_PROFILE["roles"]["verifier"].update(outputSchema="VerifierTurn", promptVersion="verifier.refute@v2")
+TURN_PLAN = copy.deepcopy(PLAN)
+TURN_PLAN["modelProfile"] = f"{TURN_PROFILE['id']}@{TURN_PROFILE['version']}"
+TURN_PLAN["budget"].update(maxToolCalls=160, maxToolCallsPerAgent=60)
 
 
 class Crash(BaseException):
@@ -125,6 +135,38 @@ def ver(n, mini=None, *, verdict="confirmed", reachable=True, impact="incorrect-
         {"verdict": verdict, "reachable": reachable, "impact": impact, "evidence": evidence or [], "notes": notes}))
 
 
+def treq(tool, purpose="needed to decide the claim", **args):
+    return {"tool": tool, "args": args, "purpose": purpose}
+
+
+def iturn(ordinal, requests=None, output=None, attempt=0):
+    """An investigator Turn envelope: requests context, or (output) the final role payload."""
+    return entry("INVESTIGATE", "investigator", "generalist", ordinal, attempt,
+                 response=resp({"contextRequests": requests or [], "output": output}))
+
+
+def ifinal(ordinal, *hyps, attempt=0):
+    return iturn(ordinal, output={"hypotheses": list(hyps)}, attempt=attempt)
+
+
+def vturn(ordinal, requests=None, output=None, attempt=0):
+    return entry("VERIFY", "verifier", "verifier", ordinal, attempt,
+                 response=resp({"contextRequests": requests or [], "output": output}))
+
+
+def vfinal(ordinal, mini=None, *, verdict="confirmed", reachable=True, impact="incorrect-result", evidence=None,
+           notes="checked", path=None, line=1, attempt=0):
+    if evidence is None and verdict == "confirmed":
+        evidence = [mini.cite(path, line)]
+    return vturn(ordinal, output={"verdict": verdict, "reachable": reachable, "impact": impact,
+                                  "evidence": evidence or [], "notes": notes}, attempt=attempt)
+
+
+def tcid(stage, agent, ordinal, tool, **args):
+    """The content id the host gives a tool call (so a scripted model can cite a result it will be shown)."""
+    return tool_call_id(stage, agent, ordinal, tool, normalize(tool, args, Limits()))
+
+
 def judge(*comments, attempt=0):
     return entry("JUDGE", "judge", "judge", 0, attempt, response=resp({"comments": list(comments)}))
 
@@ -184,24 +226,31 @@ class Rig(unittest.TestCase):
         providers = {"anthropic": DisabledProvider("anthropic"), "openai": DisabledProvider("openai"), "synthetic": spy}
         return RecordBackend(self.handle, self.book, providers, lambda: NOW), spy
 
-    def spec(self, mini, backend, *, profile=None, plan=None, **hostkw):
+    def spec(self, mini, backend, *, profile=None, plan=None, imports=None, **hostkw):
         return ReviewSpec(case=mini.case, base=mini.base, head=mini.head, profile=profile or PROFILE,
-                          plan=plan or PLAN, host=self.host(mini.id, **hostkw), backend=backend)
+                          plan=plan or PLAN, host=self.host(mini.id, **hostkw), backend=backend, imports=imports)
 
-    def record(self, mini, scr, *, profile=None, plan=None, **hostkw):
+    def record(self, mini, scr, *, profile=None, plan=None, imports=None, **hostkw):
         backend, spy = self.record_backend(scr)
-        res = run_review(self.spec(mini, backend, profile=profile, plan=plan, **hostkw))
+        res = run_review(self.spec(mini, backend, profile=profile, plan=plan, imports=imports, **hostkw))
         return res, spy
+
+    def record_turn(self, mini, scr, **kw):
+        """A retrieval-profile record (Turn schemas, plan with the retrieval tool budget)."""
+        kw.setdefault("profile", TURN_PROFILE)
+        kw.setdefault("plan", TURN_PLAN)
+        return self.record(mini, scr, **kw)
 
     def replay_backend(self, res, *, digest=None, trace_path=None):
         return ReplayBackend(trace_path or res.trace_path, digest or res.receipt["traceDigest"], "test-pin")
 
     def replay(self, mini, res, *, eval_id=EVR2, out=None, profile=None, plan=None, digest=None, trace_path=None,
-               **hostkw):
+               imports=None, **hostkw):
         if out is not None:
             hostkw["out_root"] = out
         backend = self.replay_backend(res, digest=digest, trace_path=trace_path)
-        return run_review(self.spec(mini, backend, profile=profile, plan=plan, eval_id=eval_id, **hostkw))
+        return run_review(self.spec(mini, backend, profile=profile, plan=plan, eval_id=eval_id, imports=imports,
+                                    **hostkw))
 
     # ---- trace surgery
     def edited_copy(self, res, name, fn):

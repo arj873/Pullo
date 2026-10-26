@@ -1,0 +1,68 @@
+{
+  "agentId": "verifier",
+  "attempt": 0,
+  "callId": "call_92e346a70775dd1d",
+  "costRecordId": "cost_cbebb1af5f343fa9",
+  "ordinal": 1,
+  "redactions": {},
+  "request": {
+    "contextResults": [
+      "tool_5ea8cee56d9b57fe",
+      "tool_16c2186a09e7ce8d"
+    ],
+    "continuationOf": "call_041e2d05d7cd8c26",
+    "hop": 1,
+    "hypothesisId": "hyp_9c3143aeef6c1758",
+    "messages": [
+      {
+        "content": "VERIFY verifier 1",
+        "role": "user"
+      }
+    ],
+    "model": "synthetic-fixture",
+    "outputSchema": "VerifierTurn",
+    "params": {
+      "temperature": 0
+    },
+    "profile": "smoke-synthetic@1",
+    "promptVersion": "investigator.generalist@v1",
+    "provider": "synthetic",
+    "role": "verifier",
+    "tools": []
+  },
+  "requestHash": "sha256:4caef833d719751b64aa7d3a7f911187e8852e13cf6d1ec371f45da17d867611",
+  "response": {
+    "output": {
+      "contextRequests": [],
+      "output": {
+        "evidence": [
+          {
+            "index": 0,
+            "kind": "tool-ref",
+            "toolCallId": "tool_5ea8cee56d9b57fe"
+          }
+        ],
+        "impact": "auth-bypass",
+        "notes": "header only marks closed",
+        "reachable": true,
+        "verdict": "confirmed"
+      }
+    },
+    "rawText": null,
+    "resolvedModel": "synthetic-fixture",
+    "status": "ok",
+    "usage": {
+      "cacheWriteInputTokens": null,
+      "cachedInputTokens": null,
+      "outputTokens": null,
+      "reasoningTokens": null,
+      "uncachedInputTokens": null
+    }
+  },
+  "role": "verifier",
+  "runId": "run_2aff2913f20c9190",
+  "schema": "trace-event@1",
+  "seq": 6,
+  "stage": "VERIFY",
+  "type": "model.call"
+}

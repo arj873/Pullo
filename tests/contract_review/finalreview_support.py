@@ -92,13 +92,13 @@ def model_call(run_id, stage, role, agent, ordinal, output, *, status="ok", repa
 
 
 def tool_call(run_id, status, evidence, *, agent="v-tool", ordinal=0, tool="pytest", args=None,
-              seq=0):
+              seq=0, stage="VERIFY"):
     args = args if args is not None else {"k": 1}
     res = {"status": status, "evidence": evidence, "completeness": "exact", "truncated": None,
            "notice": ""}
-    tid = C.tool_call_id("VERIFY", agent, ordinal, tool, args)
+    tid = C.tool_call_id(stage, agent, ordinal, tool, args)
     return {"schema": "trace-event@1", "runId": run_id, "seq": seq, "type": "tool.call",
-            "toolCallId": tid, "stage": "VERIFY", "agentId": agent, "ordinal": ordinal,
+            "toolCallId": tid, "stage": stage, "agentId": agent, "ordinal": ordinal,
             "tool": tool, "args": args, "resultHash": C.digest(res), "result": res,
             "redactions": {}}
 

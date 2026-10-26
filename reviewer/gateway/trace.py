@@ -20,6 +20,7 @@ from reviewer.contracts.canonical import call_id, cost_id, request_hash, result_
 from reviewer.contracts.redaction import redact_json
 
 from .errors import TraceError
+from .guard import GUARD_CODES, REFUSED_BY
 
 MAX_TRACE_BYTES = 64 << 20
 MAX_EVENTS = 100_000
@@ -113,9 +114,13 @@ def error_charge_class(err: dict) -> str:
     model, charged from its usage) or `retained` (outcome unknown: the full reservation).
     The gateway stamps detail.providerOutcome on every provider error, so replay can recompute this;
     an error without the stamp is retained (fail closed)."""
+    detail = err.get("detail") if isinstance(err.get("detail"), dict) else {}
     if err["code"] == "budget-exhausted":
         return "refused"
-    detail = err.get("detail") if isinstance(err.get("detail"), dict) else {}
+    # a host-guard refusal never reached the provider; the marker (stripped from adapter errors) keeps
+    # older recordings whose provider errors used these codes loadable and charged
+    if err["code"] in GUARD_CODES and detail.get("refusedBy") == REFUSED_BY:
+        return "refused"
     outcome = detail.get("providerOutcome")
     if release_allowed(outcome):
         return "released"

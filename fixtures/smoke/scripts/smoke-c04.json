@@ -76,6 +76,16 @@
           "evidence": [
             {
               "commit": "snap:sha256:4894faf56c3b798b6d27a7c9fc1e675da2ea21554770d6df013499f148b00f14",
+              "excerpt": "    offset = page * size",
+              "kind": "code",
+              "lines": [
+                5,
+                5
+              ],
+              "path": "src/pager.py"
+            },
+            {
+              "commit": "snap:sha256:4894faf56c3b798b6d27a7c9fc1e675da2ea21554770d6df013499f148b00f14",
               "excerpt": "    return page_slice(rows, 1, 25)",
               "kind": "code",
               "lines": [

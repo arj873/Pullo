@@ -1,0 +1,16 @@
+{
+  "contextRequests": [],
+  "output": {
+    "evidence": [
+      {
+        "index": 0,
+        "kind": "tool-ref",
+        "toolCallId": "tool_5ea8cee56d9b57fe"
+      }
+    ],
+    "impact": "auth-bypass",
+    "notes": "header only marks closed",
+    "reachable": true,
+    "verdict": "confirmed"
+  }
+}

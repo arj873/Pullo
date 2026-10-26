@@ -624,9 +624,14 @@ class C_PinnedLimits(ScenarioCase):
         self.assertTrue(repo.resolver(repo.cite("w.py", [1, 2], "x = 1\r\ny = 2\r")))
 
     def test_C4_a_finding_may_carry_code_evidence_with_a_toolcallid_that_is_never_checked(self):
+        """S1-01 review: this @5 pinned LIMIT is closed by D2 (S1-01 @6). Assertion CHANGED from
+        `== []` to rejected: code evidence carrying a toolCallId is now checked like a tool item. The
+        accepting counterpart (an exact read_file item reached through a cited tool-ref) is
+        test_contract_s1review.py::D2_*."""
         f = self.sc.fresh()
         f["verification"]["evidence"][0]["toolCallId"] = "tool_" + "9" * 16
-        self.assertEqual(provenance(self.sc, f, self.sc.events), [])
+        self.assertTrue(any("names a tool call not logged" in m
+                            for m in provenance(self.sc, f, self.sc.events)))
 
 
 if __name__ == "__main__":

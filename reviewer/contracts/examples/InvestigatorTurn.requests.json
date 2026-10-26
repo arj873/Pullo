@@ -1,0 +1,14 @@
+{
+  "contextRequests": [
+    {
+      "args": {
+        "end_line": 3,
+        "path": "src/store.h",
+        "side": "head"
+      },
+      "purpose": "how Close() behaves",
+      "tool": "read_file"
+    }
+  ],
+  "output": null
+}

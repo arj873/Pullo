@@ -21,7 +21,9 @@ _DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def resolve_out_root(out_root, forbidden) -> Path:
-    """Real path of the output root; refused when it is (inside) any forbidden root or is no directory."""
+    """Real path of the output root; refused when it is (inside, or an ancestor of) any forbidden root or is no
+    directory. A sibling directory of an input (e.g. a labels dir) is only protected when the host lists it in
+    forbidden_roots: the pipeline cannot know what a host keeps next to its snapshots."""
     p = Path(out_root)
     try:
         real = Path(os.path.realpath(p, strict=True))
@@ -33,6 +35,9 @@ def resolve_out_root(out_root, forbidden) -> Path:
         r = Path(os.path.realpath(f))
         if real == r or r in real.parents:
             raise PipelineError("path-escape", f"output root lies inside the input/fixture root {r}")
+        if real in r.parents:
+            raise PipelineError("path-escape", f"output root {real} contains the input/fixture root {r}: run "
+                                "directories would be created beside protected inputs")
     return real
 
 

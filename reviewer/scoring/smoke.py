@@ -255,7 +255,7 @@ def build_script(case: dict, head_id: str) -> dict:
 
     def verdict():
         return {"verdict": "confirmed", "reachable": True, "impact": bug["impact"],
-                "evidence": [dict(caller_cite)], "notes": "The caller exercises the changed lines."}
+                "evidence": [dict(cite), dict(caller_cite)], "notes": "The caller exercises the changed lines."}
 
     if mode == "timeout":
         for a in range(3):
@@ -282,10 +282,10 @@ def build_script(case: dict, head_id: str) -> dict:
         return {"schemaVersion": 1, "entries": entries}
     for n in range(len(hyps)):
         entries.append(_entry("VERIFY", "verifier", "verifier", n, 0, response=_resp(verdict())))
-    first = hyps[0]
-    fid = hypothesis_id(SPECIALIST, 0, first["claim"], first["location"]["path"], first["location"]["line"])
+    fids = [hypothesis_id(SPECIALIST, i, h["claim"], h["location"]["path"], h["location"]["line"])
+            for i, h in enumerate(hyps)]
     entries.append(_entry("JUDGE", "judge", "judge", 0, 0, response=_resp(
-        {"comments": [{"findingIds": [fid], "title": bug["title"], "body": bug["body"]}]})))
+        {"comments": [{"findingIds": fids, "title": bug["title"], "body": bug["body"]}]})))
     return {"schemaVersion": 1, "entries": entries}
 
 

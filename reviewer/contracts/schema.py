@@ -314,6 +314,60 @@ class Json(Schema):
         return self._doc({})
 
 
+class Scalar(Schema):
+    """A string (<= max_len), an integer within +/-(2**53-1), a boolean or null. No floats."""
+
+    def __init__(self, max_len: int = 4096):
+        self.max_len = max_len
+
+    def check(self, v, path, out):
+        if v is None or isinstance(v, bool):
+            return
+        if isinstance(v, int):
+            if abs(v) > MAX_SAFE_INT:
+                out.append(Issue(path, "int-range", "integer outside +/-(2**53-1)"))
+        elif isinstance(v, str):
+            if not _encodable(v):
+                out.append(Issue(path, "encoding", "string is not valid UTF-8 (lone surrogate)"))
+            elif len(v) > self.max_len:
+                out.append(Issue(path, "max-length", f"longer than {self.max_len}"))
+        else:
+            out.append(Issue(path, "type", "expected string, integer, boolean or null"))
+
+    def to_json(self):
+        return self._doc({"anyOf": [{"type": "null"}, {"type": "boolean"},
+                                    {"type": "integer", "minimum": -MAX_SAFE_INT,
+                                     "maximum": MAX_SAFE_INT},
+                                    {"type": "string", "maxLength": self.max_len}]})
+
+
+class Map(Schema):
+    """Open object: at most max_props keys, each matching key_pattern, every value matching `value`.
+    Used where the key set is data interpreted by a host component (e.g. ToolArgs)."""
+
+    def __init__(self, value: Schema, key_pattern: str, max_props: int):
+        self.value, self.key_pattern, self.max_props = value, key_pattern, max_props
+        self._re = re.compile(key_pattern)
+
+    def check(self, v, path, out):
+        if not isinstance(v, dict):
+            out.append(Issue(path, "type", "expected object"))
+            return
+        if len(v) > self.max_props:
+            out.append(Issue(path, "max-properties", f"more than {self.max_props} keys"))
+            return
+        for k, x in v.items():
+            if not isinstance(k, str) or not self._re.fullmatch(k):
+                out.append(Issue(path, "key-pattern", f"key does not match {self.key_pattern}"))
+                continue
+            self.value.check(x, f"{path}.{k}", out)
+
+    def to_json(self):
+        return self._doc({"type": "object", "maxProperties": self.max_props,
+                          "propertyNames": {"pattern": f"^(?:{self.key_pattern})$"},
+                          "additionalProperties": self.value.to_json()})
+
+
 class Nullable(Schema):
     def __init__(self, inner: Schema):
         self.inner = inner

@@ -14,6 +14,8 @@ from typing import Any, Callable, Protocol
 
 from reviewer.tools import Limits
 
+from .retrieval import RetrievalPolicy
+
 
 @dataclass(frozen=True)
 class SnapshotInput:
@@ -49,6 +51,7 @@ class HostConfig:
     tool_limits: Limits | None = None
     comment_cap: int = 5
     hooks: Hooks = field(default_factory=Hooks)
+    retrieval: RetrievalPolicy | None = None     # retrieval@1 limits; None = defaults when a profile role is a Turn role
 
 
 class GatewayBackend(Protocol):
@@ -63,7 +66,32 @@ class GatewayBackend(Protocol):
     def preflight(self, profile: dict, budget: dict) -> None: ...
 
     def make_gateway(self, *, run_id: str, profile: dict, budget: dict, recorder, cost_kind: str,
-                     eval_run_id: str | None, eval_case_id: str | None): ...
+                     eval_run_id: str | None, eval_case_id: str | None, guard: Any = None): ...
+
+
+@dataclass(frozen=True)
+class RepositoryImports:
+    """The two host-verified `repo-import@1` records (base, head) behind complete-repository snapshots. The
+    pipeline re-checks each against its manifest; coverage and omissions come from these records only."""
+    base: dict
+    head: dict
+
+
+@dataclass(frozen=True)
+class StageReplay:
+    """Offline replay from a stage: stages before `from_stage` come from the pinned recording's checkpointed
+    artifacts in `recording_dir`; the rest is re-executed against the gateway in strict replay."""
+    from_stage: str
+    recording_dir: str | Path
+
+
+@dataclass(frozen=True)
+class ForkFrom:
+    """Zero-cost recorded prefix, live suffix: a different operation from StageReplay. `source` is the pinned
+    ReplayBackend of the recording; the run backend is a RecordBackend sharing the evaluation's SpendBook."""
+    source: Any
+    from_stage: str
+    recording_dir: str | Path
 
 
 @dataclass(frozen=True)
@@ -75,6 +103,10 @@ class ReviewSpec:
     plan: dict
     host: HostConfig
     backend: Any
+    coverage: dict | None = None     # host-built historical-coverage@1 (partial view); None = two full snapshots
+    imports: RepositoryImports | None = None     # complete pinned repositories (repo-import@1 records)
+    stage_replay: StageReplay | None = None
+    fork: ForkFrom | None = None
 
 
 @dataclass
@@ -102,3 +134,4 @@ class RunResult:
     idempotent: bool = False
     resumed_from: str | None = None
     gateway_report: dict | None = None
+    retrieval: dict | None = None        # retrieval summary re-derived from the trace (None for legacy profiles)

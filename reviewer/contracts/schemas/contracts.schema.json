@@ -426,6 +426,53 @@
         "no-secrets: persisted Comment contains no protected text (redact first)"
       ]
     },
+    "ContextRequest": {
+      "additionalProperties": false,
+      "description": "Data, never authority: any grammatical tool name or argument key is schema-valid and the host ToolSession alone decides what runs (unknown tools/args/values become a logged denied ToolResult shown to the model). purpose never reaches a tool and never changes policy, caps or tools.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "maximum": 9007199254740991,
+                "minimum": -9007199254740991,
+                "type": "integer"
+              },
+              {
+                "maxLength": 4096,
+                "type": "string"
+              }
+            ]
+          },
+          "maxProperties": 16,
+          "propertyNames": {
+            "pattern": "^(?:[a-z][a-z0-9_]{0,31})$"
+          },
+          "type": "object"
+        },
+        "purpose": {
+          "maxLength": 300,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool": {
+          "pattern": "^(?:[a-z][a-z0-9_-]{0,63})$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "args",
+        "purpose"
+      ],
+      "type": "object"
+    },
     "CostRecord": {
       "additionalProperties": false,
       "description": "Eval executions are ReviewRuns booked as kind=eval (amends 14). Replayed records repeat recorded values and are never summed as new spend. Ids are unique per run only; aggregate by (runId, id). overrun=true when actual > reservation.",
@@ -1740,6 +1787,37 @@
       ],
       "type": "object"
     },
+    "InvestigatorTurn": {
+      "additionalProperties": false,
+      "description": "Retrieval envelope used for EVERY hop of a retrieval chain. A final envelope carries the unchanged legacy role output as `output`; the trace keeps the envelope as returned and terminal_payload() unwraps it.",
+      "properties": {
+        "contextRequests": {
+          "items": {
+            "$ref": "#/$defs/ContextRequest"
+          },
+          "maxItems": 6,
+          "type": "array"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/InvestigatorOutput"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contextRequests",
+        "output"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "turn-exclusive: requests context xor returns the role output"
+      ]
+    },
     "JudgeOutput": {
       "additionalProperties": false,
       "description": "Wording only. Severity, dedup, citations, ranking and cap are deterministic.",
@@ -1893,7 +1971,7 @@
     },
     "ModelProfile": {
       "additionalProperties": false,
-      "description": "Immutable; a change is a new version. Referenced as '<id>@<version>'.",
+      "description": "Immutable; a change is a new version. Referenced as '<id>@<version>'. A retrieval profile sets investigator/verifier outputSchema to the Turn schema.",
       "properties": {
         "id": {
           "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
@@ -1960,7 +2038,9 @@
                   "enum": [
                     "InvestigatorOutput",
                     "VerifierOutput",
-                    "JudgeOutput"
+                    "JudgeOutput",
+                    "InvestigatorTurn",
+                    "VerifierTurn"
                   ]
                 },
                 "params": {},
@@ -2099,7 +2179,9 @@
                   "enum": [
                     "InvestigatorOutput",
                     "VerifierOutput",
-                    "JudgeOutput"
+                    "JudgeOutput",
+                    "InvestigatorTurn",
+                    "VerifierTurn"
                   ]
                 },
                 "params": {},
@@ -2238,7 +2320,9 @@
                   "enum": [
                     "InvestigatorOutput",
                     "VerifierOutput",
-                    "JudgeOutput"
+                    "JudgeOutput",
+                    "InvestigatorTurn",
+                    "VerifierTurn"
                   ]
                 },
                 "params": {},
@@ -2348,12 +2432,32 @@
         "triage",
         "roles"
       ],
-      "type": "object"
+      "type": "object",
+      "x-invariants": [
+        "role-schema: each role returns its own plain or Turn schema"
+      ]
     },
     "ModelRequest": {
       "additionalProperties": false,
-      "description": "Redacted before hashing. Must not contain run ids or timestamps. requestHash = canonical.request_hash(request), which enforces both. hypothesisId names the hypothesis a verifier request checks and is covered by requestHash; a verifier call without it cannot confirm a Finding (check_finding_provenance). Other calls omit it.",
+      "description": "Redacted before hashing; requestHash = canonical.request_hash(request). Closed and typed: no field carries a run/eval id or timestamp, and prompt text is built from content-addressed inputs only (D6: host metadata is kept out by construction, a leak makes strict replay miss; repository text is never filtered). hypothesisId names the hypothesis a verifier request checks; a verifier call without it cannot confirm a Finding. Turn requests carry hop (0..15), continuationOf (callId of the previous hop's accepted attempt, hop > 0) and contextResults (toolCallIds shown, in order: host-prepared context at hop 0, one per previous-hop contextRequest after). All are covered by requestHash; check_turn_trace states the chain rules. Legacy requests omit them.",
       "properties": {
+        "contextResults": {
+          "items": {
+            "pattern": "^(?:tool_[0-9a-f]{16})$",
+            "type": "string"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "continuationOf": {
+          "pattern": "^(?:call_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "hop": {
+          "maximum": 15,
+          "minimum": 0,
+          "type": "integer"
+        },
         "hypothesisId": {
           "pattern": "^(?:hyp_[0-9a-f]{16})$",
           "type": "string"
@@ -2394,7 +2498,9 @@
           "enum": [
             "InvestigatorOutput",
             "VerifierOutput",
-            "JudgeOutput"
+            "JudgeOutput",
+            "InvestigatorTurn",
+            "VerifierTurn"
           ]
         },
         "params": {},
@@ -2440,6 +2546,7 @@
       "type": "object",
       "x-invariants": [
         "request-subject: hypothesisId only on verifier requests",
+        "request-turn: hop iff Turn schema; continuationOf iff hop > 0; contextResults only on Turn requests, required when hop > 0",
         "no-secrets: persisted ModelRequest contains no protected text (redact first)"
       ]
     },
@@ -3840,6 +3947,15 @@
             "redactions": {
               "description": "map patternId -> count applied before persistence"
             },
+            "requestIndex": {
+              "maximum": 5,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "requestedBy": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
             "result": {
               "$ref": "#/$defs/ToolResult"
             },
@@ -3900,7 +4016,7 @@
           ],
           "type": "object",
           "x-invariants": [
-            "tool-identity: toolCallId, resultHash and costRecordId recompute from the payload",
+            "tool-identity: toolCallId, resultHash and costRecordId recompute from the payload; requestedBy and requestIndex come together",
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },
@@ -4347,9 +4463,40 @@
       "x-invariants": [
         "confirm-cited: confirmed requires evidence"
       ]
+    },
+    "VerifierTurn": {
+      "additionalProperties": false,
+      "description": "Retrieval envelope used for EVERY hop of a retrieval chain. A final envelope carries the unchanged legacy role output as `output`; the trace keeps the envelope as returned and terminal_payload() unwraps it.",
+      "properties": {
+        "contextRequests": {
+          "items": {
+            "$ref": "#/$defs/ContextRequest"
+          },
+          "maxItems": 6,
+          "type": "array"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/VerifierOutput"
+            }
+          ]
+        }
+      },
+      "required": [
+        "contextRequests",
+        "output"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "turn-exclusive: requests context xor returns the role output"
+      ]
     }
   },
-  "$id": "reviewer-contracts-s0a-contracts@5",
+  "$id": "reviewer-contracts-s0a-contracts@6",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Generated from reviewer/contracts/entities.py; do not edit by hand. The Python validator is authoritative and stricter than this bundle: (1) x-invariants (cross-field rules) are enforced only in Python; (2) Python rejects integer-valued floats such as 1.0 where JSON Schema 'integer' accepts them; (3) nesting depth (64), node/size limits, duplicate keys and lone surrogates cannot be expressed here; use reviewer.contracts.loads_strict; (4) every pattern uses the Python/ECMA-262 common subset ([0-9], no \\d) and is anchored with ^(?:...)$, while Python uses fullmatch. Canonical hashes are recomputed only by Python (see canonical.py).",
   "title": "Reviewer Stage 0A contracts"

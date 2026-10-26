@@ -528,11 +528,12 @@ class RootDecisions(Base):
 
     def test_c10_request_hash_guards(self):
         req = ex("TraceEvent.model-call")["request"]
-        for bad in ("AKIAIOSFODNN7EXAMPLE", "see run_0123456789abcdef"):
-            alt = copy.deepcopy(req)
-            alt["messages"][1]["content"] = bad
-            with self.subTest(bad), self.assertRaises(ValueError):
-                C.request_hash(alt)
+        alt = copy.deepcopy(req)
+        alt["messages"][1]["content"] = "AKIAIOSFODNN7EXAMPLE"
+        with self.assertRaises(ValueError):
+            C.request_hash(alt)
+        with self.assertRaises(ValueError):                          # not a closed ModelRequest
+            C.request_hash({"runId": "run_0123456789abcdef", "messages": []})
 
     def test_trace_file_rules(self):
         run = ex("ReviewRun")
@@ -973,8 +974,11 @@ class ProvenanceBinding(VerificationPolicy):
             with self.subTest(name):
                 self.rejected(f, [self.inv, self.ver, extra], "repeats a listed verification")
         f = copy.deepcopy(self.f)
-        f["verification"]["callIds"] = [rep["callId"]]              # the repair alone is fine
-        self.assertEqual(check_finding_provenance(f, [self.inv, self.ver, rep]), [])
+        f["verification"]["callIds"] = [rep["callId"]]              # the repair alone is fine ...
+        bad = _call(self.run, "VERIFY", "verifier", "v-" + self.f["id"], 0, None, status="invalid-output",
+                    seq=2, hypothesis=self.f["id"])                  # ... of an unusable answer (@6 FRR1)
+        self.assertEqual(check_finding_provenance(f, [self.inv, bad, rep]), [])
+        self.rejected(f, [self.inv, self.ver, rep], "repair of a usable response")
 
 
 class BoundedRead(Base):
@@ -1060,6 +1064,116 @@ class BoundedRead(Base):
         os.mkfifo(self.file)                               # special file: refused, no block
         with self.assertRaises(SnapshotError):
             read_verified(self.root, self.m, "a.py", max_bytes=4096)
+
+
+class BlankLineRangeEnd(Base):
+    """S0-03-blankline-fix (NEW2 / D1): a range that ends on a blank line joins to text ending in
+    "\\n". That exact text resolves; one extra terminating "\\n" is still allowed; nothing else is."""
+
+    def test_range_ending_on_a_blank_line_resolves_exactly(self):
+        from reviewer.contracts.snapshot import excerpt_matches as M
+        data = b"one\n\nthree\n\n\nsix\n"
+        self.assertTrue(M(data, [1, 2], "one\n"))                  # the read_file excerpt shape
+        self.assertTrue(M(data, [1, 2], "one\n\n"))                # plus one terminating LF
+        self.assertTrue(M(data, [1, 5], "one\n\nthree\n\n"))
+        self.assertTrue(M(data, [3, 5], "three\n\n"))
+        self.assertTrue(M(data, [4, 5], "\n"))                     # only blank lines
+        self.assertTrue(M(data, [4, 5], "\n\n"))
+        self.assertFalse(M(data, [1, 2], "one"))                   # missing the blank line's separator
+        self.assertFalse(M(data, [1, 2], "one\n\n\n"))             # two extra LFs
+        self.assertFalse(M(data, [1, 2], "one\nx"))                # one-character mismatch
+        self.assertFalse(M(data, [1, 2], "onf\n"))
+        self.assertFalse(M(data, [4, 5], ""))
+        self.assertFalse(M(data, [1, 1], "one\n\n"))               # no phantom line past the range
+
+    def test_files_and_ranges_at_the_edges(self):
+        from reviewer.contracts.snapshot import excerpt_matches as M
+        for excerpt in ("", "\n"):
+            self.assertFalse(M(b"", [1, 1], excerpt))              # an empty file has no lines
+        self.assertTrue(M(b"\n", [1, 1], ""))                      # one blank line
+        self.assertTrue(M(b"\n", [1, 1], "\n"))
+        self.assertFalse(M(b"\n", [1, 2], "\n"))                   # final newline is not a line
+        self.assertTrue(M(b"\n\n", [1, 2], "\n"))                  # all-blank file
+        self.assertTrue(M(b"\n\n", [1, 2], "\n\n"))
+        self.assertFalse(M(b"\n\n", [1, 2], ""))
+        self.assertFalse(M(b"\n\n", [1, 3], "\n\n"))
+        self.assertTrue(M(b"a\n\n", [1, 2], "a\n"))                # final blank line
+        self.assertFalse(M(b"a\n\n", [1, 3], "a\n\n"))             # phantom EOF line
+        self.assertTrue(M(b"a\n\nb", [1, 2], "a\n"))               # no final newline
+        self.assertFalse(M(b"a\nb", [1, 2], "a\nb\n\n"))
+        for lines in ([2, 1], [0, 1], [0, 0], [-1, 1]):            # empty / invalid ranges
+            self.assertFalse(M(b"a\n\nb\n", lines, ""))
+            self.assertFalse(M(b"a\n\nb\n", lines, "\n"))
+
+    def test_crlf_redaction_and_tamper_unchanged(self):
+        from reviewer.contracts.snapshot import excerpt_matches as M, snapshot_resolver
+        self.assertTrue(M(b"a\r\n\r\nb\r\n", [1, 2], "a\r\n\r"))   # C3: CR stays in the line
+        self.assertTrue(M(b"a\r\n\r\nb\r\n", [1, 2], "a\r\n\r\n"))
+        self.assertFalse(M(b"a\r\n\r\nb\r\n", [1, 2], "a\n"))
+        secret = b"k = 'AKIAIOSFODNN7EXAMPLE'\n\nx\n"
+        self.assertTrue(M(secret, [1, 2], "k = '[REDACTED:aws-access-key]'\n"))
+        self.assertFalse(M(secret, [1, 2], "k = 'AKIAIOSFODNN7EXAMPLE'\n"))
+        self.assertFalse(M(b"\xff\n\n", [1, 2], "\xff\n"))
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a.py").write_text("one\n\nthree\n")
+            m = build_manifest(root)
+            res = snapshot_resolver({m["snapshotId"]: (root, m)})
+            cite = {"kind": "code", "path": "a.py", "lines": [1, 2], "commit": m["snapshotId"],
+                    "excerpt": "one\n"}
+            self.assertTrue(res(cite))
+            (root / "a.py").write_text("one\n\nthreE\n")           # same size, other bytes
+            self.assertFalse(res(cite))
+
+    def test_accepts_exactly_the_joined_lines_with_at_most_one_terminating_lf(self):
+        """Exhaustive over small files: the accepted excerpts are {joined, joined + LF}. Compared with
+        the s0a-contracts@5 rule, the only addition is joined itself when it ends in LF."""
+        import itertools
+        from reviewer.contracts.snapshot import excerpt_matches as M
+
+        def old(data, lines, excerpt):                             # the rule this ticket corrects
+            text = data.decode()
+            all_lines = text.split("\n")
+            if text.endswith("\n") or text == "":
+                all_lines.pop()
+            start, end = lines
+            if start < 1 or end < start or end > len(all_lines):
+                return False
+            if excerpt.endswith("\n"):
+                excerpt = excerpt[:-1]
+            return "\n".join(all_lines[start - 1:end]) == excerpt
+
+        checked = added = 0
+        for n in range(5):
+            for parts in itertools.product(("a", "", "\r"), repeat=n):
+                for tail in ("", "\n"):
+                    text = "\n".join(parts) + tail
+                    if n == 0 and tail:
+                        continue
+                    data = text.encode()
+                    real = text.split("\n")
+                    if text.endswith("\n") or text == "":
+                        real.pop()
+                    for s in range(0, n + 2):
+                        for e in range(s - 1, n + 2):
+                            ok = 1 <= s <= e <= len(real)
+                            joined = "\n".join(real[s - 1:e]) if ok else None
+                            for x in ("", "\n", "\n\n", "a", "a\n", "\r", "\r\n", "a\n\n", "\na",
+                                      joined, (joined or "") + "\n", (joined or "") + "\n\n",
+                                      (joined or "x")[:-1]):
+                                if x is None:
+                                    continue
+                                want = ok and x in (joined, joined + "\n")
+                                got = M(data, [s, e], x)
+                                self.assertEqual(got, want, (text, [s, e], x))
+                                if old(data, [s, e], x):
+                                    self.assertTrue(got, (text, [s, e], x))
+                                elif got:
+                                    self.assertTrue(joined.endswith("\n") and x == joined)
+                                    added += 1
+                                checked += 1
+        self.assertGreater(added, 0)
+        self.assertGreater(checked, 10_000)
 
 
 if __name__ == "__main__":

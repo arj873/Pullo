@@ -9,13 +9,13 @@ import threading
 import unittest
 from pathlib import Path
 
-from reviewer.contracts import require
+from reviewer.contracts import require, validate
 from reviewer.contracts.canonical import call_id, cost_id, request_hash, scoped_key
 from reviewer.gateway import (AuthorizationError, AuthorizationHandle, DisabledProvider, Gateway,
                               GatewayConfigError, ProviderResult, Recorder, ScriptError, SpendBook,
                               SyntheticProvider, TraceError, default_providers, load_script, load_trace,
                               parse_script, parse_ts, trusted_authorization, typed_error)
-from tests.gateway.helpers import (AUTH_DOC, BUDGET, NOW, OK_OUT, PROFILE, ZERO, Env, entry, profile, request,
+from tests.gateway.helpers import (AUTH_DOC, BUDGET, EVR, NOW, OK_OUT, PROFILE, ZERO, Env, entry, profile, request,
                                    response, run_doc, script, terr)
 
 GH = "ghp_" + "A1b2C3d4" * 5
@@ -560,10 +560,37 @@ class RedactionAndIdTests(Env):
         self.assertEqual(next(e for e in ev if e["type"] == "model.call")["redactions"], {"github-token": 1})
         load_trace(ev)
 
-    def test_run_ids_in_requests_are_rejected_without_a_provider_call(self):
+    def test_run_shaped_literals_in_message_text_survive_hashing_and_reach_the_provider_unchanged(self):
+        # D6 (S1-DECISIONS 5): repository text is data and is never filtered by substring.
+        seen = []
+        class Capture:
+            name = "synthetic"
+            def call(self, req, key):
+                seen.append(copy.deepcopy(req))
+                return ProviderResult(response(), None, "processed")
+        for text in ("see run_" + "0" * 16, "eval " + EVR, "both " + run_doc()["id"] + " " + EVR):
+            req = request(text=text)
+            gw = self.live(script())
+            gw.providers["synthetic"] = Capture()
+            r = gw.call("INVESTIGATE", "investigator", "generalist", 0, req)
+            self.assertIsNone(r.error)
+            self.assertEqual(seen[-1]["messages"][1]["content"], text)
+            self.assertEqual(request_hash(seen[-1]), request_hash(req))
+            self.assertEqual(validate("ModelRequest", seen[-1]), [])
+            mc = next(e for e in self.finish(gw) if e["type"] == "model.call")
+            self.assertEqual(mc["requestHash"], request_hash(req))
+        self.assertEqual(len(seen), 3)
+
+    def test_typed_host_metadata_fields_in_requests_are_rejected_without_a_provider_call(self):
+        # The closed ModelRequest type keeps host run metadata out; this is separate from message text.
         gw = self.live(script(entry(response=response())))
-        for text in ("see run_" + "0" * 16, "eval evr_" + "1" * 16):
-            r = gw.call("INVESTIGATE", "investigator", "generalist", 0, request(text=text))
+        for where in ("top", "message"):
+            req = request()
+            if where == "top":
+                req["runId"] = "run_" + "0" * 16
+            else:
+                req["messages"][1]["evalRunId"] = EVR
+            r = gw.call("INVESTIGATE", "investigator", "generalist", 0, req)
             self.assertEqual(r.error["code"], "contract-violation")
         self.assertEqual(gw.provider.calls, 0)
 

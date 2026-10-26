@@ -197,20 +197,21 @@ def suite_digest(manifest: dict, file_sha256: dict[str, str]) -> str:
     return digest({"manifest": manifest, "files": [[p, file_sha256[p]] for p in needed]})
 
 
-_RUN_SCOPED_TEXT = re.compile(r"(?<![0-9a-z])(?:run|evr)_[0-9a-f]{16}(?![0-9a-f])")
-
-
 def request_hash(request: dict) -> str:
-    """Strict-replay key for a ModelRequest. Rejects (ValueError) requests that are invalid,
-    still contain protected text, or embed run-scoped ids (those would make every replay miss)."""
+    """Strict-replay key for a ModelRequest. Rejects (ValueError) requests that are invalid or
+    still contain protected text.
+
+    D6 (s0a-contracts@6): message text is never searched for run-shaped ids. Repository text may
+    contain any literal, including this run's own predictable id, and stays intact and citable.
+    Host run metadata is kept out by origin instead: the closed ModelRequest types every
+    non-message field (no field accepts a run_/evr_ id), prompt text is built only from
+    content-addressed inputs (pipeline), and a leak is caught fail-closed because every strict
+    replay runs under another runId and must reproduce this hash (replay-miss)."""
     from .redaction import contains_protected
     from .schema import require
     require("ModelRequest", request)
-    text = canonical_json(request).decode("utf-8")
-    if contains_protected(text):
+    if contains_protected(canonical_json(request).decode("utf-8")):
         raise ValueError("request contains protected text; redact before hashing")
-    if _RUN_SCOPED_TEXT.search(text):
-        raise ValueError("request embeds a run-scoped id")
     return digest(request)
 
 
