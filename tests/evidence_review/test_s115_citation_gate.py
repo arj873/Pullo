@@ -216,8 +216,12 @@ class Gate(Rig):
                 self.assertEqual([d["reason"] for d in res.drops], [reason])
                 vdocs = [d for c, d in turn_pairs(res, spy) if c["stage"] == "VERIFY"]
                 if name.startswith("investigator") or name.startswith("verbatim"):
-                    shown_orig = [e.get("toolCallId") for e in vdocs[0]["originalEvidence"]]
-                    self.assertIn(inv_read, shown_orig)                       # the id IS visible to the verifier
+                    # S1-19: displayed code items are exactly the five code-citation fields; the investigator's id is
+                    # no longer displayed there (it never was citable), so the verbatim pre-S1-19 item above is a forgery.
+                    shown_orig = vdocs[0]["originalEvidence"]
+                    self.assertEqual([sorted(e) for e in shown_orig if e["kind"] == "code"],
+                                     [["commit", "excerpt", "kind", "lines", "path"]] * 2)
+                    self.assertNotIn(inv_read, json.dumps(shown_orig))
                     for d in vdocs:
                         self.assertNotIn(inv_read, [r["toolCallId"] for r in d["citations"]["citableRefs"]])
         # another hypothesis's ref: logged, rendered and templated to h1's chain only

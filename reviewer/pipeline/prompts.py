@@ -221,7 +221,10 @@ VERIFIER_REFUTE_TASK = (
     "citation (path, lines, commit, excerpt) or a tool-ref copied from citations.citableRefs. A search result that "
     "shows only a signature or a call site does not show what the code does: when the claim depends on behavior, "
     "request the implementation before deciding. A refutation also needs a citation you were shown; without one it "
-    "counts as uncertain. If you still cannot "
+    "counts as uncertain. originalEvidence is the earlier investigator's claim context. Each of its `code` entries "
+    "has exactly the five fields of a code citation (kind, path, lines, commit, excerpt) and may be copied as it "
+    "stands; add no other field. Its other entries are context only and are not a template for a code citation. "
+    "If you still cannot "
     "decide after retrieval, answer uncertain and say which context you could not obtain and why. Give your final "
     "answer in `output` and leave contextRequests empty; while you still need context, request it and leave "
     "`output` null."
@@ -235,6 +238,8 @@ VERIFIER_TURN_FORMAT = {
     "contextRequests": "list of context requests (empty when you give your final answer); each request names a tool "
                        "from retrieval.tools, its arguments as named values, and a short purpose",
     "output": ["null while you request context", {"final answer": VERIFIER_FORMAT}]}
+
+_CODE_CITATION_FIELDS = ("kind", "path", "lines", "commit", "excerpt")
 
 CITATION_RULES = [
     "Every id you write (snap:..., tool_..., hyp_...) must be copied character for character from this message. Never "
@@ -281,6 +286,9 @@ def turn_request(profile, profile_ref, role: str, doc: dict, state: dict, reques
     """One hop of a retrieval chain. `doc` is the role's base document (hop-0 content); the hop adds the
     retrieval block, the chain history and the Turn answer format."""
     d = dict(doc)
+    if role == "verifier" and "originalEvidence" in d:      # code entries show only the fields a code citation allows
+        d["originalEvidence"] = [{k: e[k] for k in _CODE_CITATION_FIELDS if k in e} if e.get("kind") == "code" else e
+                                 for e in d["originalEvidence"]]
     d["retrieval"] = retrieval_block(version, state, requests_per_turn)
     d["history"] = state["history"]
     d["citations"] = {"rules": CITATION_RULES, "citableRefs": state.get("citableRefs", []),

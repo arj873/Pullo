@@ -265,10 +265,10 @@ class SeqAndMembership(Gate):
         self.assertEqual(citable_tool_calls(calls[1]["callId"], events), {})       # the chain through hop 0 is invalid
         self.assertTrue(check_turn_trace(events))
 
-    def test_LIMIT_rendering_a_later_result_in_an_earlier_hop_doc_is_only_stopped_by_the_request_hash(self):
-        """_rendered itself has no seq / per-hop-membership test: it unions visibility over the whole chain. A hop-0
-        document edited to show hop-1's result (hop 1 truly omitted it) makes it citable until validate_trace's
-        requestHash check catches the edit. Recorded so a change is noticed; not reachable from a hash-valid trace."""
+    def test_rendering_a_later_result_in_an_earlier_hop_doc_is_rejected_even_when_rehashed(self):
+        """S1-18 (was LIMIT F1): a hop-0 document edited to show hop-1's result (hop 1 truly omitted it) is caught by
+        validate_trace's requestHash check, and once re-hashed it is still not citable: _rendered counts only ids in
+        that hop's own contextResults whose tool call was logged before the hop."""
         m = self.case()
         h = hyp(m, "src/a.py", 2)
         budget, read_id, diff_id = self.host_budget(m, h)
@@ -292,7 +292,8 @@ class SeqAndMembership(Gate):
         self.assertNotIn(rid, citable_tool_calls(calls[1]["callId"], raw))            # ...and ignored by the index
         set_doc(calls[0], d0)                                                          # re-hashed forgery
         self.assertEqual((validate_trace(events), check_turn_trace(events)), ([], []))   # structurally valid forgery
-        self.assertIn(rid, citable_tool_calls(calls[1]["callId"], events))             # LIMIT F1: promoted
+        self.assertNotIn(rid, citable_tool_calls(calls[1]["callId"], events))          # S1-18: not promoted
+        self.assertNotIn(rid, citable_tool_calls(calls[0]["callId"], events))
 
     def test_forged_history_fields_cannot_promote_a_foreign_id(self):
         events = self.two_hop()
