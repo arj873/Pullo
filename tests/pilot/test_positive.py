@@ -312,7 +312,7 @@ class OptionTests(Rig):
         flags = {s for a in P._parser()._actions for s in a.option_strings}
         self.assertEqual(flags, {"-h", "--help", "--mode", "--source-baseline", "--out", "--auth", "--state-dir", "--env",
                                  "--baseline-micros", "--book-baseline-micros", "--confirm-live", "--replay-trace",
-                                 "--trace-digest", "--json"})
+                                 "--trace-digest", "--json", "--config"})
 
 
 # ======================================================================== plan

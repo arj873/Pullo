@@ -1,0 +1,31 @@
+# Pullo review-model configuration (schema pullo-config@1).
+#
+# Which model answers each review role. Read from this file (Pullo's application root) by default, or from a file
+# named with --config. Never discovered from the reviewed repository or the working directory.
+#
+# This file selects models ONLY. It holds no keys, hooks, budgets, retries, fallbacks or account settings, and it
+# cannot authorize spending: the operator's spend authorization and the exact OpenRouter allowlist still decide
+# what may run ($4 per run, $50 aggregate, no retries/repairs/fallbacks). Unknown fields are refused.
+#
+# provider "anthropic" = Anthropic models through OpenRouter. Allowed models (exact ids):
+#   anthropic/claude-sonnet-5.5   (default, primary)
+#   anthropic/claude-haiku-5.5
+#   anthropic/claude-opus-5.5
+# provider "openai" (GPT Terra via the installed CLI) is HELD: it is refused until Terra's isolation and parser/
+# process gates are accepted. There is no fallback to another provider. Omitted roles use Sonnet 5.5.
+#
+# Development-worker models are configured elsewhere and are unrelated to this file.
+
+schema = "pullo-config@1"
+
+[review.investigator]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
+
+[review.verifier]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
+
+[review.judge]
+provider = "anthropic"
+model = "anthropic/claude-sonnet-5.5"
