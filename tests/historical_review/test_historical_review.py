@@ -1544,18 +1544,91 @@ class IntegrationStatus(Tmp):
         self.assertEqual(added, ["src/main/settings.ts", "src/renderer/utils.ts"])
         self.assertNotIn("Partial view", res.result["notice"])
 
-    def test_STATE_no_product_module_imports_the_bridge(self):
-        importers = []
-        for p in (ROOT / "reviewer").rglob("*.py"):
-            if "historical" in p.relative_to(ROOT / "reviewer").parts[:1]:
-                continue
-            t = ast.parse(p.read_text())
-            for n in ast.walk(t):
-                if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[:2] == ["reviewer", "historical"]:
-                    importers.append(str(p))
-                if isinstance(n, ast.Import) and any(a.name.startswith("reviewer.historical") for a in n.names):
-                    importers.append(str(p))
-        self.assertEqual(importers, [])
+
+# The permitted host boundary (S1-DECISIONS item 12): only these trusted pilot host entrypoints may import the
+# historical bridge, and only these symbols, to construct pinned read-only CaseInput. Everything else under
+# reviewer/ (contracts, gateway, pipeline, tools, runtime, scoring, ...) must import nothing from it.
+HOST_BRIDGE_IMPORTS = {
+    "reviewer/pilot/launcher.py": {("reviewer", "historical")},
+    "reviewer/pilot/repository.py": {("reviewer", "historical"),
+                                     ("reviewer.historical.bridge", "_check_out"),
+                                     ("reviewer.historical.bridge", "_validated")},
+    "reviewer/pilot/positive.py": {("reviewer.historical", "BridgeError"),
+                                   ("reviewer.historical.bridge", "_check_out")},
+}
+
+
+def bridge_imports(rel, source):
+    """(module, name) pairs by which `source`, at repo-relative path `rel`, reaches reviewer.historical, in every
+    import spelling: import X[.Y], from X import Y, from reviewer import historical, relative forms, __import__ and
+    importlib. A bare `import reviewer.historical` is reported as (that module, None)."""
+    pkg = rel[:-3].split("/")[:-1]                      # containing package parts
+    found = []
+    for n in ast.walk(ast.parse(source)):
+        if isinstance(n, ast.Import):
+            found += [(a.name, None) for a in n.names if a.name.split(".")[:2] == ["reviewer", "historical"]]
+        elif isinstance(n, ast.ImportFrom):
+            base = n.module or ""
+            if n.level:
+                keep = pkg[:len(pkg) - (n.level - 1)]
+                base = ".".join(keep + ([n.module] if n.module else []))
+            for a in n.names:
+                full = f"{base}.{a.name}"
+                if full.split(".")[:2] == ["reviewer", "historical"] or base.split(".")[:2] == ["reviewer", "historical"]:
+                    found.append((base, a.name))
+        elif isinstance(n, ast.Call):
+            f = n.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if name in ("__import__", "import_module") and n.args and isinstance(n.args[0], ast.Constant) \
+                    and str(n.args[0].value).split(".")[:2] == ["reviewer", "historical"]:
+                found.append((str(n.args[0].value), None))
+    return found
+
+
+def bridge_violations(files):
+    """files: {repo-relative path: source}. Returns sorted (path, module, name) not permitted by the host boundary."""
+    bad = []
+    for rel, src in files.items():
+        if rel.startswith("reviewer/historical/"):
+            continue
+        allowed = HOST_BRIDGE_IMPORTS.get(rel, set())
+        bad += [(rel, m, n) for m, n in bridge_imports(rel, src) if (m, n) not in allowed]
+    return sorted(set(bad), key=str)
+
+
+class BridgeBoundaryGauge(unittest.TestCase):
+    """Static gauges: no corpus, no setUpClass, never skipped."""
+
+    def test_STATE_only_the_pilot_host_entrypoints_import_the_bridge_and_only_the_permitted_symbols(self):
+        files = {p.relative_to(ROOT).as_posix(): p.read_text() for p in (ROOT / "reviewer").rglob("*.py")}
+        self.assertEqual(bridge_violations(files), [])
+        actual = {rel: set(bridge_imports(rel, files[rel])) for rel in files
+                  if not rel.startswith("reviewer/historical/") and bridge_imports(rel, files[rel])}
+        self.assertEqual(actual, HOST_BRIDGE_IMPORTS)       # exactly the allowed sites: none stale, none missing
+
+    def test_CONTROL_boundary_scan_flags_core_modules_extra_symbols_and_every_import_spelling(self):
+        spellings = ("import reviewer.historical", "import reviewer.historical.bridge as b",
+                     "from reviewer import historical", "from reviewer import historical as h",
+                     "from reviewer.historical import materialize", "from reviewer.historical.pins import load_pins",
+                     "from ..historical import materialize", "from .. import historical",
+                     "__import__('reviewer.historical')", "importlib.import_module('reviewer.historical.bridge')")
+        for core in ("reviewer/pipeline/x.py", "reviewer/gateway/x.py", "reviewer/tools/x.py", "reviewer/scoring/x.py",
+                     "reviewer/runtime/x.py", "reviewer/contracts/x.py", "reviewer/other/x.py"):
+            for src in spellings:
+                with self.subTest(core=core, src=src):
+                    self.assertTrue(bridge_violations({core: src}), "core module import must be flagged")
+        # an unrelated historical name and the bridge package's own files are not flagged
+        self.assertEqual(bridge_violations({"reviewer/pipeline/x.py": "from reviewer import pipeline\nimport historical_x"}), [])
+        self.assertEqual(bridge_violations({"reviewer/historical/bridge.py": "from . import pins"}), [])
+        # allowed host site: exact symbols pass, anything extra or any other host file fails
+        ok = "from reviewer import historical\nfrom reviewer.historical.bridge import _check_out, _validated"
+        self.assertEqual(bridge_violations({"reviewer/pilot/repository.py": ok}), [])
+        extra = bridge_violations({"reviewer/pilot/repository.py": ok + "\nfrom reviewer.historical import materialize"})
+        self.assertEqual(extra, [("reviewer/pilot/repository.py", "reviewer.historical", "materialize")])
+        self.assertTrue(bridge_violations({"reviewer/pilot/cli.py": "from reviewer import historical"}))
+        self.assertTrue(bridge_violations({"reviewer/pilot/launcher.py": "from reviewer.historical.bridge import _check_out"}))
+        # the gauge compares exact sites: a permitted site that no longer imports would show up as a mismatch
+        self.assertNotEqual({r: set(bridge_imports(r, "x = 1")) for r in HOST_BRIDGE_IMPORTS}, HOST_BRIDGE_IMPORTS)
 
     def test_STATE_pipeline_coverage_seam_status(self):
         """Gauge, not a review of D1. At first writing ReviewSpec had no `coverage` field, the investigator prompt

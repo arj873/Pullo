@@ -49,25 +49,60 @@ class Coverage(Base):
         self.assertEqual(open_import(h.dir, pins=pins).coverage, h.coverage)
         self.assertEqual(h.coverage, cov)
 
-    def test_LIMIT_full_view_still_claims_full_repository_coverage_for_an_import_with_omissions(self):
-        """The trap the author documents, reproduced end to end. S1-05 MUST take coverage from coverage_of(record); the
-        View, the ToolSession provenance and the 'absent' notices say nothing about omissions."""
+    def test_full_view_of_an_import_with_omissions_is_omission_aware_end_to_end(self):
+        """Positive regression (replaces the obsolete LIMIT that asserted full-repository/True). full_view_of already
+        returns an omission-aware import_view: the View, the ToolSession provenance and every missing-path notice
+        agree with coverage_of(record) and say that an omitted path may exist."""
         b, h = self.pair()
+        rec = coverage_of(h.record)
         v = full_view_of(b, h)
         vc = v.coverage()
-        self.assertEqual((vc["scope"], vc["fullRepositoryCoverage"]), ("full-repository", True))     # contradicts coverage_of
-        self.assertFalse(coverage_of(h.record)["fullRepositoryCoverage"])
+        self.assertEqual((vc["scope"], vc["fullRepositoryCoverage"]), ("repository-with-omissions", False))
+        self.assertEqual((vc["scope"], vc["fullRepositoryCoverage"]), (rec["scope"], rec["fullRepositoryCoverage"]))
+        self.assertTrue(v.omitted)
+        self.assertEqual(vc["omissions"], {"base": {"binary": 1, "oversize": 1, "submodule": 1},
+                                           "head": {"binary": 1, "oversize": 1, "submodule": 1}})
+        self.assertEqual(vc["omissions"]["head"], rec["omissionCounts"])
+        self.assertIn("WITH OMISSIONS", v.note())
+        self.assertIn("may exist", v.note())
         s = ToolSession(v)
         listing = s.call("list_files", {"side": "head"})
-        self.assertEqual(listing.result["completeness"], "exact")                                    # omitted paths are not listed
-        self.assertNotIn("bin.dat", listing.result["evidence"][0]["excerpt"])
-        self.assertTrue(listing.provenance["coverage"]["fullRepositoryCoverage"])                    # recorded in every tool call
-        for omitted in ("bin.dat", "big.txt", "vendor/m"):
+        self.assertEqual(listing.result["completeness"], "approximate")                              # not claimed exact
+        self.assertIn("import omissions", listing.result["evidence"][0]["excerpt"])
+        self.assertNotIn("bin.dat", listing.result["evidence"][0]["excerpt"])                         # omitted: not listed
+        self.assertIn("WITH OMISSIONS", listing.result["notice"])
+        self.assertFalse(listing.provenance["coverage"]["fullRepositoryCoverage"])                   # recorded in every call
+        self.assertEqual(listing.provenance["coverage"]["scope"], "repository-with-omissions")
+        self.assertTrue(listing.provenance["manifestVerifiedOnEveryRead"])
+        for omitted in ("bin.dat", "big.txt", "vendor/m"):                                           # binary/oversize/submodule
             c = s.call("read_file", {"side": "head", "path": omitted})
             self.assertEqual(c.result["status"], "unavailable")
             self.assertIn("is not in the head snapshot view", c.result["notice"])
-            self.assertNotIn("omit", c.result["notice"].lower())                                     # no 'it may exist' caveat
-        self.assertEqual(s.view.note(), "")
+            self.assertIn("may exist", c.result["notice"])
+            self.assertIn("binary=1, oversize=1, submodule=1", c.result["notice"])
+            self.assertFalse(c.provenance["coverage"]["fullRepositoryCoverage"])
+        kept = s.call("read_file", {"side": "head", "path": "ok.txt"})
+        self.assertEqual(kept.result["status"], "ok")
+        self.assertIn("WITH OMISSIONS", kept.result["notice"])
+
+    def test_CONTROL_complete_import_view_still_claims_full_repository_coverage(self):
+        """Positive control: an import without omissions keeps full-repository/True and adds no omission notice."""
+        wb, (sb,) = self.repo([({"a.txt": "x\n"}, {}, None)], name="cb")
+        wh, (sh,) = self.repo([({"a.txt": "y\n"}, {}, None)], name="ch")
+        b = import_repository(self.remote(wb), sb, self.store)
+        h = import_repository(self.remote(wh), sh, self.tmp / "store2")
+        self.assertEqual(coverage_of(h.record)["scope"], "full-repository")
+        v = full_view_of(b, h)
+        vc = v.coverage()
+        self.assertEqual((vc["scope"], vc["fullRepositoryCoverage"]), ("full-repository", True))
+        self.assertFalse(v.omitted)
+        self.assertEqual(v.note(), "")
+        s = ToolSession(v)
+        self.assertEqual(s.call("list_files", {"side": "head"}).result["completeness"], "exact")
+        c = s.call("read_file", {"side": "head", "path": "missing.txt"})
+        self.assertEqual(c.result["status"], "unavailable")
+        self.assertNotIn("omission", c.result["notice"].lower())
+        self.assertTrue(c.provenance["coverage"]["fullRepositoryCoverage"])
 
     def test_CONTROL_record_cannot_claim_full_coverage_without_verify_noticing(self):
         b, h = self.pair()
