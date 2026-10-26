@@ -39,11 +39,6 @@ class ConfigError(ValueError):
     """A refusal before any output, state, key or model action. Messages never echo file content at length."""
 
 
-def _shown(v) -> str:
-    s = v if isinstance(v, str) else type(v).__name__
-    return repr(s[:60] + ("..." if len(s) > 60 else ""))
-
-
 @dataclass(frozen=True)
 class ReviewModels:
     investigator: str = DEFAULT_MODEL
@@ -54,7 +49,7 @@ class ReviewModels:
         for r in ROLES:
             m = getattr(self, r)
             if not isinstance(m, str) or m not in ALLOWED_ROUTER_MODELS:
-                raise ConfigError(f"{r}: model {_shown(m)} is not in the exact OpenRouter allowlist")
+                raise ConfigError(f"{r}: model is not in the exact OpenRouter allowlist {sorted(ALLOWED_ROUTER_MODELS)}")
 
     @classmethod
     def uniform(cls, model: str) -> "ReviewModels":
@@ -114,8 +109,10 @@ def parse(text: str) -> ReviewModels:
         doc = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ConfigError(f"config is not valid TOML: {str(e)[:120]}") from None
+    except RecursionError:        # pathologically nested arrays/tables inside the size cap
+        raise ConfigError("config is not valid TOML: nesting too deep") from None
     if set(doc) - _TOP:
-        raise ConfigError(f"unknown top-level field(s): {sorted(map(_shown, set(doc) - _TOP))}")
+        raise ConfigError(f"unknown top-level field(s); allowed: {sorted(_TOP)}")
     if doc.get("schema") != SCHEMA:
         raise ConfigError(f"config must declare schema = \"{SCHEMA}\"")
     review = doc.get("review", {})
@@ -132,7 +129,7 @@ def parse(text: str) -> ReviewModels:
         if provider in HELD_PROVIDERS:
             raise ConfigError(f"{r}: {HELD_PROVIDERS[provider]}")
         if provider != PROVIDER:
-            raise ConfigError(f"{r}: unsupported provider {_shown(provider)} (supported: {PROVIDER})")
+            raise ConfigError(f"{r}: unsupported provider (supported: {PROVIDER})")
         chosen[r] = t.get("model", DEFAULT_MODEL)
     return ReviewModels(**chosen)
 

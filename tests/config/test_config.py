@@ -79,6 +79,23 @@ class Parse(unittest.TestCase):
             with self.subTest(name), self.assertRaises(ConfigError):
                 resolve_config(self.write(text))
 
+    def test_deeply_nested_config_is_a_config_error_not_a_traceback(self):
+        for text in ("x = " + "[" * 5000 + "\n", "[" * 3000 + "a" + "]" * 3000 + "\n"):
+            with self.assertRaisesRegex(ConfigError, "not valid TOML"):
+                resolve_config(self.write(text))
+
+    def test_errors_never_echo_a_secret_like_value(self):
+        secret = "sk-or-v1-" + "f4k3" * 8
+        for name, text in {
+                "model": toml(inv=secret), "provider": toml().replace('"anthropic"', f'"{secret}"', 1),
+                "non-string model": toml().replace('"%s"' % SONNET, f"[\"{secret}\"]", 1),
+                "unknown field": toml(extra=f"{secret} = 1\n"), "unknown role": toml(extra=f'[review.{secret}]\n'),
+                "unknown role field": toml().replace('provider = "anthropic"', f'{secret} = "x"', 1)}.items():
+            with self.subTest(name), self.assertRaises(ConfigError) as cm:
+                resolve_config(self.write(text))
+            self.assertNotIn(secret, str(cm.exception))
+            self.assertNotIn("f4k3", str(cm.exception))
+
     def test_held_openai_refuses_clearly_and_has_no_fallback(self):
         t = toml().replace('provider = "anthropic"\nmodel = "%s"' % SONNET, 'provider = "openai"\nmodel = "gpt-5.6-terra"', 1)
         with self.assertRaisesRegex(ConfigError, "held.*no fallback"):
