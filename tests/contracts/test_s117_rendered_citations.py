@@ -91,8 +91,9 @@ class RenderedCitations(Rig):
 class RenderedUnit(unittest.TestCase):
     """_rendered on hand-built hop documents: exact, ordered, complete excerpts only; anything else shows nothing."""
 
-    T = {"toolCallId": "tool_00000000000000a1", "result": {"evidence": [{"excerpt": "a"}, {"excerpt": "b"}]}}
-    E = {"toolCallId": "tool_00000000000000e0", "result": {"evidence": []}}
+    T = {"toolCallId": "tool_00000000000000a1", "seq": 3, "result": {"evidence": [{"excerpt": "a"}, {"excerpt": "b"}]}}
+    E = {"toolCallId": "tool_00000000000000e0", "seq": 4, "result": {"evidence": []}}
+    LISTED = ["tool_00000000000000a1", "tool_00000000000000e0", "tool_00000000000000ff"]     # S1-18: hop lists them
 
     class Idx:
         def __init__(self, *tools):
@@ -101,8 +102,9 @@ class RenderedUnit(unittest.TestCase):
         def tool(self, tid):
             return self.t.get(tid)
 
-    def shown(self, content, role="user"):
-        hop = {"request": {"messages": [{"role": "system", "content": "s"}, {"role": role, "content": content}]}}
+    def shown(self, content, role="user", listed=None, seq=9):
+        hop = {"seq": seq, "request": {"messages": [{"role": "system", "content": "s"}, {"role": role, "content": content}],
+                                       "contextResults": self.LISTED if listed is None else listed}}
         return entities._rendered(hop, self.Idx(self.T, self.E))
 
     def doc(self, **kw):
@@ -113,6 +115,15 @@ class RenderedUnit(unittest.TestCase):
         full = {"toolCallId": tid, "excerpts": ["a", "b"]}
         for d in ({"context": [full]}, {"pinnedContext": [full]}, {"history": [{"results": [full]}]}):
             self.assertEqual(self.shown(json.dumps(d)), {tid}, d)
+
+    def test_complete_item_needs_this_hops_membership_and_an_earlier_tool_seq(self):     # S1-18
+        tid = self.T["toolCallId"]
+        d = json.dumps({"context": [{"toolCallId": tid, "excerpts": ["a", "b"]}]})
+        self.assertEqual(self.shown(d), {tid})
+        self.assertEqual(self.shown(d, listed=[self.E["toolCallId"]]), set())          # rendered, not listed
+        self.assertEqual(self.shown(d, listed=[]), set())
+        for seq in (self.T["seq"], self.T["seq"] - 1):                                 # tool logged at/after the hop
+            self.assertEqual(self.shown(d, seq=seq), set(), seq)
 
     def test_omitted_partial_reordered_duplicate_empty_or_unknown_items_show_nothing(self):
         tid = self.T["toolCallId"]
@@ -129,7 +140,8 @@ class RenderedUnit(unittest.TestCase):
                               (json.dumps({"context": "x", "history": "y"}), "user"),
                               (json.dumps({"history": [1, {"results": 3}]}), "user")):
             self.assertEqual(self.shown(content, role), set(), content)
-        self.assertEqual(entities._rendered({"request": {"messages": [{"role": "system", "content": full}]}},
+        self.assertEqual(entities._rendered({"seq": 9, "request": {"messages": [{"role": "system", "content": full}],
+                                                                    "contextResults": self.LISTED}},
                                             self.Idx(self.T)), set())
 
 

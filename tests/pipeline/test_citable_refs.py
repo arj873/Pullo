@@ -219,13 +219,13 @@ class Refs(Rig):
     # ---- identity
     def test_versions_and_identity_effect(self):
         self.assertEqual((retrieval.RETRIEVAL_VERSION, retrieval.INVESTIGATOR_PROMPT, retrieval.VERIFIER_PROMPT),
-                         ("retrieval@2", "investigator.retrieve@v2", "verifier.refute@v3"))
+                         ("retrieval@2", "investigator.retrieve@v2", "verifier.refute@v4"))
         self.assertEqual(identity.RETRIEVAL_BEHAVIOR, "retrieval-pipeline@2")
         self.assertIn("citations", prompts.retrieval_template_digests())
         self.assertNotIn("citations", prompts.template_digests())                       # legacy digests untouched
         doc = retrieval.RetrievalPolicy().to_doc()
         self.assertEqual((doc["version"], doc["investigator_prompt"], doc["verifier_prompt"]),
-                         ("retrieval@2", "investigator.retrieve@v2", "verifier.refute@v3"))
+                         ("retrieval@2", "investigator.retrieve@v2", "verifier.refute@v4"))
 
     def test_legacy_non_turn_requests_carry_no_citations(self):
         m = self.case()

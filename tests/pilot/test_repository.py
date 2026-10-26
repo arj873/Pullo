@@ -251,7 +251,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((on["investigator"]["outputSchema"], on["investigator"]["promptVersion"]),
                          ("InvestigatorTurn", "investigator.retrieve@v2"))
         self.assertEqual((on["verifier"]["outputSchema"], on["verifier"]["promptVersion"]),
-                         ("VerifierTurn", "verifier.refute@v3"))
+                         ("VerifierTurn", "verifier.refute@v4"))
         self.assertEqual((off["investigator"]["outputSchema"], off["verifier"]["outputSchema"]),
                          ("InvestigatorOutput", "VerifierOutput"))
         self.assertEqual(repository_policy(True), RetrievalPolicy())

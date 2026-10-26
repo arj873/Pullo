@@ -551,6 +551,7 @@ def _chain_issues(ev: dict, idx: _Index) -> list[str]:
 
 def _rendered(hop: dict, idx: _Index) -> set:
     """toolCallIds this hop's request document shows WITH every excerpt of the logged result, in order (S1-17).
+    Only ids in this hop's own contextResults whose tool call was logged before the hop count (S1-18).
     Read from the request-hashed host JSON (messages[1]: host context `context`/`pinnedContext` and
     `history[].results`). An omitted, duplicate-marker or partial item, or a missing/malformed document, shows
     nothing (fail closed)."""
@@ -564,11 +565,11 @@ def _rendered(hop: dict, idx: _Index) -> set:
     items = [doc.get("context"), doc.get("pinnedContext")]
     history = doc.get("history")
     items += [h.get("results") for h in history if isinstance(h, dict)] if isinstance(history, list) else []
-    out = set()
+    listed, out = set(hop["request"].get("contextResults", [])), set()
     for it in (x for group in items if isinstance(group, list) for x in group):
         tid = it.get("toolCallId") if isinstance(it, dict) else None
         t = idx.tool(tid) if isinstance(tid, str) else None
-        if t is not None and t["result"]["evidence"] \
+        if t is not None and tid in listed and t["seq"] < hop["seq"] and t["result"]["evidence"] \
                 and it.get("excerpts") == [e["excerpt"] for e in t["result"]["evidence"]]:
             out.add(tid)
     return out
