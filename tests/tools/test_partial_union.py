@@ -313,6 +313,8 @@ class FullViewControls(Env):
 class RealFixture1347(unittest.TestCase):
     """The S0B-02c bridge recipe on the real Vesktop 1347 fixture (head = 3 changed + 2 context)."""
 
+    @unittest.skipUnless((ROOT / "fixtures" / "historical" / "Vencord--Vesktop--1347").is_dir(),
+                         "optional private input absent: fixtures/historical/Vencord--Vesktop--1347 (unpublished historical fixture)")
     def test_bridge_recipe_keeps_head_context_out_of_the_changed_list(self):
         from reviewer.historical import capture_bridge_pins, materialize
         with tempfile.TemporaryDirectory() as t:
