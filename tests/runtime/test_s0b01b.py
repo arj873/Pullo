@@ -113,6 +113,7 @@ class OldLedgerReplay(RT):
         self.assertEqual(self.ledger.totals()["calls"], 2)
         self.assertGreater(self.ledger.totals()["committedUsdMicros"], 2814)
 
+    @unittest.skipUnless(EVIDENCE.is_file(), "optional private input absent: orchestration/validation/first-live-sonnet-canary-reconciliation.json (unpublished host reconciliation evidence)")
     def test_reconcile_with_saved_host_evidence_is_append_only_idempotent_and_exact(self):
         ev = json.loads(EVIDENCE.read_text())
         self.write(old_rows(ev["generation"]["id"]))
@@ -134,6 +135,7 @@ class OldLedgerReplay(RT):
         with self.assertRaises(ValueError):
             RuntimeLedger(self.ledger_path, 50_000_000).reconcile("old|k", {"id": "gen-other", "total_cost": 0})
 
+    @unittest.skipUnless(EVIDENCE.is_file(), "optional private input absent: orchestration/validation/first-live-sonnet-canary-reconciliation.json (unpublished host reconciliation evidence)")
     def test_reconcile_cli_previews_then_applies_and_never_creates_a_ledger(self):
         ev = json.loads(EVIDENCE.read_text())
         self.write(old_rows(ev["generation"]["id"]))

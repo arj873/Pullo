@@ -943,14 +943,16 @@ class G_LegacyCompatibility(unittest.TestCase):
         self.assertEqual(validate("TraceEvent", ev), [])
 
     def test_legacy_call_ids_tool_ids_and_cost_ids_are_unchanged(self):
-        # values computed at @5 (HEAD) and pinned here; the recipes are documented as unchanged
+        # values computed at @5 (the pinned initial commit) ; the recipes are documented as unchanged
+        if not _BASE_IDS:
+            self.skipTest("the pinned @5 baseline commit or git is unavailable (source-only export)")
         self.assertEqual(C.call_id("VERIFY", "verifier", "v-hyp_9c3143aeef6c1758", 0, 0), self.head_value("call"))
         self.assertEqual(C.tool_call_id("VERIFY", "v-tool", 0, "pytest", {"k": 1}), self.head_value("tool"))
         self.assertEqual(C.cost_id("call_0123456789abcdef"), self.head_value("cost"))
 
     @staticmethod
     def head_value(kind):
-        return _HEAD_IDS.get(kind)
+        return _BASE_IDS.get(kind)
 
     def test_legacy_traces_validate_and_mix_with_turn_chains(self):
         s = T.TurnScenario()
@@ -975,13 +977,14 @@ class G_LegacyCompatibility(unittest.TestCase):
         self.assertTrue(prov(f, [b.inv, ref, fix]))
 
     def test_differential_against_the_s0a_contracts_5_tree(self):
-        """Run HEAD's (s0a-contracts@5) canonical recipes in a subprocess over a battery of legacy requests and require
-        byte-identical request hashes under @6, and that every @5 example document still validates."""
-        if shutil.which("git") is None:
-            self.skipTest("git unavailable")
-        head = subprocess.run(["git", "show", "HEAD:reviewer/contracts/__init__.py"], cwd=ROOT, capture_output=True, text=True)
-        if head.returncode or 's0a-contracts@5"' not in head.stdout:
-            self.skipTest("HEAD is no longer the @5 baseline")
+        """Run the pinned initial commit's (s0a-contracts@5) canonical recipes in a subprocess over a battery of legacy
+        requests and require byte-identical request hashes under @6, and that every @5 example document still validates.
+        The baseline is the immutable commit BASELINE_COMMIT, never HEAD, so later commits cannot change what is compared."""
+        if not _baseline_available():
+            self.skipTest("git or the pinned @5 baseline commit is unavailable (source-only export)")
+        head = subprocess.run(["git", "show", f"{BASELINE_COMMIT}:reviewer/contracts/__init__.py"], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(head.returncode, 0, head.stderr)
+        self.assertIn('s0a-contracts@5"', head.stdout, "the pinned baseline commit is not the @5 contracts")
         base = F.ex("TraceEvent.model-call")["request"]
         battery = []
         for i, content in enumerate(("hello", "unicode é中文 \U0001f600", "tabs\tand\nnewlines", "x" * 5000, "run-ish but not an id: run_123")):
@@ -997,7 +1000,7 @@ class G_LegacyCompatibility(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tree = Path(td, "head")
             tree.mkdir()
-            tar = subprocess.run(["git", "archive", "HEAD", "reviewer/contracts"], cwd=ROOT, capture_output=True, timeout=120)
+            tar = subprocess.run(["git", "archive", BASELINE_COMMIT, "reviewer/contracts"], cwd=ROOT, capture_output=True, timeout=120)
             self.assertEqual(tar.returncode, 0, tar.stderr)
             subprocess.run(["tar", "-x", "-C", str(tree)], input=tar.stdout, check=True, timeout=120)
             (tree / "reviewer" / "__init__.py").touch()
@@ -1020,14 +1023,31 @@ class G_LegacyCompatibility(unittest.TestCase):
                 self.assertEqual(validate(stem.split(".")[0], F.ex(stem)), [], "an @5-valid example is invalid under @6")
 
 
-def _head_ids():
-    """Ids computed by the HEAD (@5) canonical module, or None when HEAD is not @5 / git is unavailable."""
+# Full immutable initial commit (Pullo pre-alpha checkpoint) holding the s0a-contracts@5 tree.
+BASELINE_COMMIT = "8f3befdb70b1016debd3585596a622e44cf39824"
+
+
+def _baseline_available():
+    """True when git can read the pinned @5 baseline commit (false in a source-only export without history)."""
+    if shutil.which("git") is None:
+        return False
     try:
-        head = subprocess.run(["git", "show", "HEAD:reviewer/contracts/__init__.py"], cwd=ROOT, capture_output=True, text=True, timeout=60)
+        return subprocess.run(["git", "cat-file", "-e", f"{BASELINE_COMMIT}^{{commit}}"], cwd=ROOT, capture_output=True,
+                              timeout=60).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _base_ids():
+    """Ids computed by the pinned @5 canonical module, or {} when the baseline commit / git is unavailable."""
+    try:
+        if not _baseline_available():
+            return {}
+        head = subprocess.run(["git", "show", f"{BASELINE_COMMIT}:reviewer/contracts/__init__.py"], cwd=ROOT, capture_output=True, text=True, timeout=60)
         if head.returncode or 's0a-contracts@5"' not in head.stdout:
             return {}
         with tempfile.TemporaryDirectory() as td:
-            tar = subprocess.run(["git", "archive", "HEAD", "reviewer/contracts"], cwd=ROOT, capture_output=True, timeout=120)
+            tar = subprocess.run(["git", "archive", BASELINE_COMMIT, "reviewer/contracts"], cwd=ROOT, capture_output=True, timeout=120)
             subprocess.run(["tar", "-x", "-C", td], input=tar.stdout, check=True, timeout=120)
             Path(td, "reviewer", "__init__.py").touch()
             code = ("import sys,json\nsys.path.insert(0, sys.argv[1])\nfrom reviewer.contracts import canonical as C\n"
@@ -1039,7 +1059,7 @@ def _head_ids():
         return {}
 
 
-_HEAD_IDS = _head_ids()
+_BASE_IDS = _base_ids()
 
 
 # ====================================================================================== L: pinned limits

@@ -59,6 +59,7 @@ class OldRowReplay(_Led):
                          (2814, 2814, 0, 0))
         self.assertEqual((t["routerReportedUsdMicros"], t["upstreamReportedUsdMicros"]), (0, 2814))
 
+    @unittest.skipUnless(EVIDENCE.is_file(), "optional private input absent: orchestration/validation/first-live-sonnet-canary-reconciliation.json (unpublished host reconciliation evidence)")
     def test_reconcile_cli_preview_then_apply_then_repeat_with_the_repo_evidence(self):
         self.write(canary_old_rows())
         before = self.ledger_path.read_bytes()
@@ -77,6 +78,7 @@ class OldRowReplay(_Led):
         self.assertEqual((row["type"], row["generationId"], row["isByok"], row["keyRemainingUsd"]), ("reconcile", GEN, True, "49.997186"))
         self.assertEqual(self.led.totals()["committedUsdMicros"], 2814)                # key usage==0 never lowered anything
 
+    @unittest.skipUnless(EVIDENCE.is_file(), "optional private input absent: orchestration/validation/first-live-sonnet-canary-reconciliation.json (unpublished host reconciliation evidence)")
     def test_cli_refuses_missing_ledger_and_unknown_generation(self):
         with self.assertRaises(SystemExit):
             self.cli()                                                                  # no ledger file: never creates a book
