@@ -15,8 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _support import Base, CLEAN, GIT, ShimMixin, alive, g  # noqa: E402
+from tests.repoimport_review._support import Base, CLEAN, GIT, ShimMixin, alive, g  # noqa: E402
 
 from reviewer.repoimport import ImportPolicy, Remote, RepoImportError, github_remote, import_repository  # noqa: E402
 from reviewer.repoimport import fsio  # noqa: E402

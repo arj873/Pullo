@@ -32,8 +32,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import finalreview_support as F
-import turn_support as T
+from tests.contract_review import finalreview_support as F
+from tests.contract_review import turn_support as T
 from reviewer.contracts import CONTRACTS_VERSION, ROLE_SCHEMAS, check_finding_provenance, check_turn_trace
 from reviewer.contracts import canonical as C
 from reviewer.contracts import citable_tool_calls, serves_request, terminal_payload, turn_chain, usable_output

@@ -42,7 +42,9 @@ from tests.tools.helpers import make_case
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "fixtures" / "historical"
-REAL = sorted(p.name for p in CORPUS.iterdir() if p.is_dir())
+# fixtures/historical is unpublished: when absent the module still imports and the corpus classes skip explicitly.
+HAVE_CORPUS = CORPUS.is_dir()
+REAL = sorted(p.name for p in CORPUS.iterdir() if p.is_dir()) if HAVE_CORPUS else []
 CTX_CASE = "Vencord--Vesktop--1347"
 AT = "2026-10-25T20:00:00Z"
 CANARIES = ("OUTCOME_SECRET", "LABELS_SECRET", "LABELS_DEEP")        # planted by make_case in source/ and labels/
@@ -1316,6 +1318,7 @@ class Gaps(Env):
 
 # ===================================================================== 10. the nine real cases
 
+@unittest.skipUnless(HAVE_CORPUS, "optional private input absent: fixtures/historical (unpublished historical corpus)")
 class RealCorpus(Tmp):
     @classmethod
     def setUpClass(cls):
@@ -1512,6 +1515,7 @@ def expect_entries(expect):
 
 # ===================================================================== 11. what is and is NOT integrated
 
+@unittest.skipUnless(HAVE_CORPUS, "optional private input absent: fixtures/historical (unpublished historical corpus)")
 class IntegrationStatus(Tmp):
     @classmethod
     def setUpClass(cls):

@@ -20,7 +20,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(Path(__file__).resolve().parent))      # share the S0-06 review's self-contained corpus-case builder
 
 from reviewer.contracts import validate  # noqa: E402
 from reviewer.contracts.canonical import tool_call_id  # noqa: E402
@@ -28,7 +27,7 @@ from reviewer.contracts.snapshot import build_manifest  # noqa: E402
 from reviewer.tools import (Limits, ToolSession, View, ViewError, capture_historical_pins, full_view,  # noqa: E402
                             historical_input_view, make_layer, normalize, partial_union_view, policy)
 
-from test_tools_review import Clock, corpus_case, write_tree  # noqa: E402
+from tests.tools_review.test_tools_review import Clock, corpus_case, write_tree  # noqa: E402
 
 NEXT = "Next page: list_files "
 ROW = re.compile(r"(.*)  \((\d+) bytes\)\Z", re.S)

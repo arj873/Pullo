@@ -15,9 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests" / "repoimport_review"))
 
-from _support import Base, g  # noqa: E402
+from tests.repoimport_review._support import Base, g  # noqa: E402
 
 from reviewer.contracts.snapshot import build_manifest  # noqa: E402
 from reviewer.pipeline import repocov  # noqa: E402

@@ -20,11 +20,9 @@ import threading
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
-sys.path.insert(0, str(HERE.parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import test_gateway_rereview as R  # noqa: E402  (module import, not class import: its tests are not re-collected)
+from tests.gateway_review import test_gateway_rereview as R  # noqa: E402  (module import, not class import: its tests are not re-collected)
 from reviewer.contracts import REGISTRY  # noqa: E402
 from reviewer.contracts.canonical import call_id  # noqa: E402
 from reviewer.gateway import ProviderResult  # noqa: E402

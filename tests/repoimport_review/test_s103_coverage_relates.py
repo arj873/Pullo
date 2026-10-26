@@ -12,8 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _support import ROOT, Base, g  # noqa: E402
+from tests.repoimport_review._support import ROOT, Base, g  # noqa: E402
 
 from reviewer.contracts.snapshot import snapshot_id  # noqa: E402
 from reviewer.repoimport import (ImportPolicy, RelatesSpec, RepoImportError, capture_import_pins, coverage_of, full_view_of,  # noqa: E402
