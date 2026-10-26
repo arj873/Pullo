@@ -182,8 +182,14 @@ class RunDir:
     def remove_empty(self) -> None:
         """Undo a directory this process created when nothing durable was written yet."""
         try:
-            for n in os.listdir(self._fd):
-                os.unlink(n, dir_fd=self._fd)
+            # a fresh fd: listdir on a long-lived dir fd can miss entries created after it was opened (seen on ext4)
+            fd = os.open(".", _DIR, dir_fd=self._fd)
+            try:
+                for n in os.listdir(fd):
+                    if not stat.S_ISDIR(os.stat(n, dir_fd=fd, follow_symlinks=False).st_mode):
+                        os.unlink(n, dir_fd=fd)
+            finally:
+                os.close(fd)
         except OSError:
             pass
         out_fd = os.open(self.real_out, _DIR)

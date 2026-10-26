@@ -293,7 +293,7 @@ def _execute(spec, run, rd, *, resume: "_Resume | None", orig) -> RunResult:
                                   eval_case_id=ev_cfg.case_id if ev_cfg else None, guard=guard)
     except PipelineError:
         recorder.close()
-        if resume is None and rd.created:
+        if resume is None and rd.created and not any(e["type"] == "model.call" for e in recorder.events):
             rd.remove_empty()
         rd.close()
         raise
