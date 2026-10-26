@@ -31,7 +31,8 @@ PIPELINE_VERSION = "pipeline@1"
 PARTIAL_BEHAVIOR = "partial-disclosure@2"
 # Behaviour of the retrieval chains (hop/ordinal allocation, dedup, caps, honest ends, history rendering). Bound only
 # when a role returns the Turn envelope, so legacy profiles keep their ids.
-RETRIEVAL_BEHAVIOR = "retrieval-pipeline@1"
+#   @2: citations.citableRefs (S1-15) are built from the chain's delivered results; @1 had none.
+RETRIEVAL_BEHAVIOR = "retrieval-pipeline@2"
 RECEIPT_SCHEMA = "run-receipt@1"
 
 

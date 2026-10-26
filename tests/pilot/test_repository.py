@@ -249,9 +249,9 @@ class ProfileTests(unittest.TestCase):
     def test_retrieval_on_uses_turn_schemas_and_prompts_off_is_plain_with_no_policy(self):
         on, off = repository_profile(True)["roles"], repository_profile(False)["roles"]
         self.assertEqual((on["investigator"]["outputSchema"], on["investigator"]["promptVersion"]),
-                         ("InvestigatorTurn", "investigator.retrieve@v1"))
+                         ("InvestigatorTurn", "investigator.retrieve@v2"))
         self.assertEqual((on["verifier"]["outputSchema"], on["verifier"]["promptVersion"]),
-                         ("VerifierTurn", "verifier.refute@v2"))
+                         ("VerifierTurn", "verifier.refute@v3"))
         self.assertEqual((off["investigator"]["outputSchema"], off["verifier"]["outputSchema"]),
                          ("InvestigatorOutput", "VerifierOutput"))
         self.assertEqual(repository_policy(True), RetrievalPolicy())
@@ -411,7 +411,7 @@ class PlanTests(Base):
         self.assertEqual((p["runCeilingUsdMicros"], p["retries"], p["repairs"]), (4_000_000, 0, 0))
         self.assertEqual((p["providerCalls"], p["networkCalls"], p["keyRead"], p["scratchOnly"]), (0, 0, False, True))
         self.assertEqual(p["outputCaps"], OUTPUT_CAPS)
-        self.assertEqual(p["retrievalPolicy"]["version"], "retrieval@1")
+        self.assertEqual(p["retrievalPolicy"]["version"], "retrieval@2")
         self.assertEqual(rep["coverage"]["scope"], "repository-with-omissions")
         self.assertTrue(any("independent" in g for g in rep["unmetGates"]))
         self.assertTrue(any("fork is not implemented" in g for g in rep["unmetGates"]))
