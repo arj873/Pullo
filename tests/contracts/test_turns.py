@@ -29,17 +29,42 @@ BASE_REQ = ex("TraceEvent.model-call")["request"]
 RUN = ex("Finding")["runId"]
 
 
+def turn_doc(role, hop, results, *, history=(), duplicates=()):
+    """Render logged results in the host's context/history shape, never from ids alone."""
+    items = []
+    for index, ev in enumerate(results):
+        res = ev["result"]
+        item = {"toolCallId": ev["toolCallId"], "tool": ev["tool"], "args": ev["args"],
+                **{k: res[k] for k in ("status", "completeness", "truncated", "notice")},
+                "excerpts": [e["excerpt"] for e in res["evidence"]]}
+        if hop:
+            item["index"] = index
+        if ev["toolCallId"] in duplicates:
+            item.update(excerpts=[], duplicateOf=ev["toolCallId"])
+        items.append(item)
+    key = "pinnedContext" if role == "verifier" else "context"
+    doc = {key: items if hop == 0 else [], "history": copy.deepcopy(list(history))}
+    if hop:
+        doc["history"].append({"turn": hop - 1, "results": items})
+    return doc
+
+
 def call(stage, role, agent, ordinal, output, *, seq, attempt=0, status="ok", repair_of=None,
-         turn=False, hop=None, cont=None, results=None, hyp=None, content=None):
+         turn=False, hop=None, cont=None, results=None, hyp=None, content=None,
+         history=(), duplicates=()):
     schema = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput"}[role]
     req = {**BASE_REQ, "role": role, "outputSchema": schema.replace("Output", "Turn") if turn else schema,
            "messages": [{"role": "user", "content": content or f"{stage} {agent} {ordinal}"}]}
     if turn:
+        # Legacy calls keep their original text; Turn requests carry host-rendered JSON.
+        doc = turn_doc(role, hop, results or [], history=history, duplicates=duplicates)
+        req["messages"] = [{"role": "system", "content": "Synthetic Turn contract fixture."},
+                           {"role": "user", "content": content if content is not None else json.dumps(doc)}]
         req["hop"] = hop
         if cont:
             req["continuationOf"] = cont
         if results is not None:
-            req["contextResults"] = results
+            req["contextResults"] = [e["toolCallId"] for e in results]
     if hyp:
         req["hypothesisId"] = hyp
     cid = C.call_id(stage, role, agent, ordinal, attempt)
@@ -101,7 +126,7 @@ class ChainBase(unittest.TestCase):
                          [text_item("-ok\n+bad")], seq=2)
         self.v0 = call("VERIFY", "verifier", "verifier", 0,
                        {"contextRequests": [READ, SHELL], "output": None}, seq=3, turn=True, hop=0,
-                       results=[self.host["toolCallId"]], hyp=self.hid)
+                       results=[self.host], hyp=self.hid)
         self.t0 = tool("VERIFY", "verifier", 1, "read_file", NORM_READ, [code_item()], seq=4,
                        by=self.v0["callId"], index=0)
         self.t1 = tool("VERIFY", "verifier", 2, "unknown-tool", {"requested": "shell"}, [], seq=5,
@@ -119,7 +144,7 @@ class ChainBase(unittest.TestCase):
         return call("VERIFY", "verifier", "verifier", ordinal,
                     {"contextRequests": [], "output": output or self.confirm}, seq=seq, turn=True,
                     hop=1, cont=self.v0["callId"], attempt=kw.get("attempt", 0),
-                    results=results or [self.t0["toolCallId"], self.t1["toolCallId"]],
+                    results=[self.t0, self.t1] if results is None else results,
                     hyp=kw.get("hyp", self.hid))
 
     @property
@@ -151,10 +176,43 @@ class Chain(ChainBase):
         hops, issues = turn_chain(self.v1["callId"], self.events)
         self.assertEqual(([h["callId"] for h in hops], issues), ([self.v0["callId"], self.v1["callId"]], []))
         self.assertEqual(set(citable_tool_calls(self.v1["callId"], self.events)),
-                         {self.host["toolCallId"], self.t0["toolCallId"], self.t1["toolCallId"]})
+                         {self.host["toolCallId"], self.t0["toolCallId"]})
         self.assertEqual(set(citable_tool_calls(self.v0["callId"], self.events)), {self.host["toolCallId"]})
         self.assertTrue(serves_request(READ, self.t0))
         self.assertFalse(serves_request(SHELL, self.t1))
+
+    def test_rendered_results_are_hashed_and_denied_results_are_status_only(self):
+        for ev, group, tools in ((self.v0, "pinnedContext", [self.host]),
+                                 (self.v1, "history", [self.t0, self.t1])):
+            doc = json.loads(ev["request"]["messages"][1]["content"])
+            items = doc[group] if group != "history" else doc[group][0]["results"]
+            self.assertEqual([i["toolCallId"] for i in items], [t["toolCallId"] for t in tools])
+            self.assertEqual([i["excerpts"] for i in items],
+                             [[e["excerpt"] for e in t["result"]["evidence"]] for t in tools])
+            self.assertEqual(C.request_hash(ev["request"]), ev["requestHash"])
+            self.assertEqual(validate("TraceEvent", ev), [])
+        self.assertEqual(items[1]["status"], "denied")
+        got, problems = materialize_evidence([{"kind": "tool-ref", "toolCallId": self.t1["toolCallId"]}],
+                                             citable_tool_calls(self.v1["callId"], self.events), "verifier")
+        self.assertEqual(got, [])
+        self.assertTrue(problems)
+
+    def test_omitted_rendering_does_not_materialize_an_otherwise_valid_chain(self):
+        v1 = copy.deepcopy(self.v1)
+        doc = json.loads(v1["request"]["messages"][1]["content"])
+        item = doc["history"][0]["results"][0]
+        item.update(excerpts=[], excerptsOmitted="retrieval context budget")
+        v1["request"]["messages"][1]["content"] = json.dumps(doc)
+        v1["requestHash"] = C.request_hash(v1["request"])
+        evs = self.events[:-1] + [v1]
+        self.assertEqual(validate("TraceEvent", v1), [])
+        self.assertEqual(check_turn_trace(evs), [])
+        citable = citable_tool_calls(v1["callId"], evs)
+        self.assertEqual(set(citable), {self.host["toolCallId"]})
+        got, problems = materialize_evidence(self.confirm["evidence"], citable, "verifier")
+        self.assertEqual(got, [])
+        self.assertTrue(problems)
+        self.assertRejected("not shown to", events=evs)
 
     def test_materialize_from_citable_calls_rebuilds_the_finding_evidence(self):
         got, problems = materialize_evidence(self.confirm["evidence"],
@@ -163,12 +221,12 @@ class Chain(ChainBase):
 
     def test_repair_inside_a_hop_is_one_logical_call(self):
         bad = call("VERIFY", "verifier", "verifier", 1, {"nope": 1}, seq=6, turn=True, hop=1,
-                   cont=self.v0["callId"], results=[self.t0["toolCallId"], self.t1["toolCallId"]],
+                   cont=self.v0["callId"], results=[self.t0, self.t1],
                    hyp=self.hid)
         self.assertFalse(usable_output(bad))          # status ok but schema-invalid (D3)
         rep = call("VERIFY", "verifier", "verifier", 1, {"contextRequests": [], "output": self.confirm},
                    seq=7, attempt=1, repair_of=bad["callId"], turn=True, hop=1, cont=self.v0["callId"],
-                   results=[self.t0["toolCallId"], self.t1["toolCallId"]], hyp=self.hid)
+                   results=[self.t0, self.t1], hyp=self.hid)
         f = copy.deepcopy(self.f)
         f["verification"]["callIds"] = [rep["callId"]]
         evs = [self.inv, self.host, self.v0, self.t0, self.t1, bad, rep]
@@ -178,16 +236,23 @@ class Chain(ChainBase):
     def test_dedup_recites_an_earlier_result_of_the_same_chain(self):
         v1 = call("VERIFY", "verifier", "verifier", 1, {"contextRequests": [READ], "output": None},
                   seq=6, turn=True, hop=1, cont=self.v0["callId"],
-                  results=[self.t0["toolCallId"], self.t1["toolCallId"]], hyp=self.hid)
+                  results=[self.t0, self.t1], hyp=self.hid)
         v2 = call("VERIFY", "verifier", "verifier", 2, {"contextRequests": [], "output": self.confirm},
-                  seq=7, turn=True, hop=2, cont=v1["callId"], results=[self.t0["toolCallId"]], hyp=self.hid)
+                  seq=7, turn=True, hop=2, cont=v1["callId"], results=[self.t0], hyp=self.hid,
+                  history=json.loads(v1["request"]["messages"][1]["content"])["history"],
+                  duplicates=[self.t0["toolCallId"]])
         f = copy.deepcopy(self.f)
         f["verification"]["callIds"] = [v2["callId"]]
         evs = [self.inv, self.host, self.v0, self.t0, self.t1, v1, v2]
         self.assertEqual(check_turn_trace(evs), [])
         self.assertEqual(self.msgs(f, evs), [])
+        doc = json.loads(v2["request"]["messages"][1]["content"])
+        self.assertEqual(doc["history"][-1]["results"][0]["excerpts"], [])
+        self.assertEqual(doc["history"][-1]["results"][0]["duplicateOf"], self.t0["toolCallId"])
+        self.assertEqual(set(citable_tool_calls(v2["callId"], evs)),
+                         {self.host["toolCallId"], self.t0["toolCallId"]})
         wrong = call("VERIFY", "verifier", "verifier", 2, {"contextRequests": [], "output": self.confirm},
-                     seq=7, turn=True, hop=2, cont=v1["callId"], results=[self.host["toolCallId"]],
+                     seq=7, turn=True, hop=2, cont=v1["callId"], results=[self.host],
                      hyp=self.hid)                    # an earlier result that does NOT serve READ
         self.assertTrue(check_turn_trace(evs[:-1] + [wrong]))
 
@@ -195,21 +260,21 @@ class Chain(ChainBase):
         """The chain rebuilt so hop 0 is attempt len(earlier), repairing earlier[-1] (logged at seq 3..)."""
         n = len(earlier)
         v0 = call("VERIFY", "verifier", "verifier", 0, {"contextRequests": [READ, SHELL], "output": None},
-                  seq=3 + n, turn=True, hop=0, results=[self.host["toolCallId"]], hyp=self.hid,
+                  seq=3 + n, turn=True, hop=0, results=[self.host], hyp=self.hid,
                   attempt=n, repair_of=earlier[-1]["callId"])
         t0, t1 = copy.deepcopy(self.t0), copy.deepcopy(self.t1)
         t0["requestedBy"] = t1["requestedBy"] = v0["callId"]
         t0["seq"], t1["seq"] = 4 + n, 5 + n
         v1 = call("VERIFY", "verifier", "verifier", 1, {"contextRequests": [], "output": self.confirm},
                   seq=6 + n, turn=True, hop=1, cont=v0["callId"],
-                  results=[self.t0["toolCallId"], self.t1["toolCallId"]], hyp=self.hid)
+                  results=[self.t0, self.t1], hyp=self.hid)
         f = copy.deepcopy(self.f)
         f["verification"]["callIds"] = [v1["callId"]]
         return f, [self.inv, self.host, *earlier, v0, t0, t1, v1]
 
     def hop0_attempt(self, output, attempt=0, repair_of=None, agent="verifier", status="ok"):
         return call("VERIFY", "verifier", agent, 0, output, seq=3 + attempt, turn=True, hop=0,
-                    results=[self.host["toolCallId"]], hyp=self.hid, attempt=attempt,
+                    results=[self.host], hyp=self.hid, attempt=attempt,
                     repair_of=repair_of, status=status)
 
     def test_repair_of_an_unusable_earlier_hop_keeps_the_chain(self):
@@ -250,9 +315,10 @@ class Chain(ChainBase):
         evs = [self.inv, self.host, self.v0, self.t1, self.v1, late]
         self.assertTrue(any("after" in i.message for i in check_turn_trace(evs)))
         self.assertRejected("retrieval chain", events=evs)
+        self.assertEqual(citable_tool_calls(self.v1["callId"], evs), {})
 
     def test_results_must_be_shown_in_request_order(self):
-        v1 = self.hop1(results=[self.t1["toolCallId"], self.t0["toolCallId"]])
+        v1 = self.hop1(results=[self.t1, self.t0])
         evs = self.events[:-1] + [v1]
         self.assertTrue(check_turn_trace(evs))
         f = copy.deepcopy(self.f)
@@ -262,7 +328,7 @@ class Chain(ChainBase):
     def test_executed_result_for_other_arguments_is_refused(self):
         t0 = tool("VERIFY", "verifier", 1, "read_file", {**NORM_READ, "path": "src/other.h"},
                   [code_item(path="src/other.h")], seq=4, by=self.v0["callId"], index=0)
-        v1 = self.hop1(results=[t0["toolCallId"], self.t1["toolCallId"]])
+        v1 = self.hop1(results=[t0, self.t1])
         msgs = [i.message for i in check_turn_trace([self.inv, self.host, self.v0, t0, self.t1, v1])]
         self.assertTrue(any("other arguments" in m for m in msgs), msgs)
 
@@ -282,7 +348,7 @@ class Chain(ChainBase):
     def test_hop0_shows_only_host_prepared_context_of_its_stage(self):
         inv_tool = tool("INVESTIGATE", "generalist-0", 0, "read_file", NORM_READ, [code_item()], seq=2)
         v0 = call("VERIFY", "verifier", "verifier", 0, {"contextRequests": [READ], "output": None}, seq=3,
-                  turn=True, hop=0, results=[inv_tool["toolCallId"]], hyp=self.hid)
+                  turn=True, hop=0, results=[inv_tool], hyp=self.hid)
         self.assertTrue(any("context, not INVESTIGATE" in i.message
                             for i in check_turn_trace([self.inv, inv_tool, v0])))
 
