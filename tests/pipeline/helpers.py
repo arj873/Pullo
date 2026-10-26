@@ -36,8 +36,8 @@ EVR1, EVR2 = "evr_" + "1" * 16, "evr_" + "2" * 16
 # ---- a retrieval profile/plan: the same synthetic roles, but investigator and verifier return the Turn envelope
 TURN_PROFILE = copy.deepcopy(PROFILE)
 TURN_PROFILE["id"] = "smoke-synthetic-retrieval"
-TURN_PROFILE["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion="investigator.retrieve@v1")
-TURN_PROFILE["roles"]["verifier"].update(outputSchema="VerifierTurn", promptVersion="verifier.refute@v2")
+TURN_PROFILE["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion="investigator.retrieve@v2")
+TURN_PROFILE["roles"]["verifier"].update(outputSchema="VerifierTurn", promptVersion="verifier.refute@v3")
 TURN_PLAN = copy.deepcopy(PLAN)
 TURN_PLAN["modelProfile"] = f"{TURN_PROFILE['id']}@{TURN_PROFILE['version']}"
 TURN_PLAN["budget"].update(maxToolCalls=160, maxToolCallsPerAgent=60)

@@ -1,4 +1,4 @@
-"""Host-driven retrieval chains (`retrieval@1`).
+"""Host-driven retrieval chains (`retrieval@2`).
 
 A retrieval role asks the gateway for the Turn envelope on every hop. The model may only return `contextRequests`
 (data); this module alone decides what runs, through one `ToolSession`, and logs every requested call before the
@@ -22,12 +22,14 @@ from reviewer.contracts.severity import TRUSTED_TOOL_STATUSES
 from reviewer.tools import TOOLS, ArgError, ToolCall, normalize
 from reviewer.tools.ops import Outcome
 
-RETRIEVAL_VERSION = "retrieval@1"
+RETRIEVAL_VERSION = "retrieval@2"
 MAX_HOPS = 15
 MAX_REQUESTS = 6
-INVESTIGATOR_PROMPT = "investigator.retrieve@v1"
-VERIFIER_PROMPT = "verifier.refute@v2"
+INVESTIGATOR_PROMPT = "investigator.retrieve@v2"
+VERIFIER_PROMPT = "verifier.refute@v3"
 MAX_HOST_RESULTS = 200          # ModelRequest.contextResults bound
+MAX_REF_RESULTS = 60            # results templated in one request (the most recent ones win)
+MAX_REF_ITEMS = 20              # materialize_evidence reads at most 20 items of an un-indexed tool-ref
 
 _NUMERIC = ("investigator_turns", "verifier_turns", "requests_per_turn", "run_tool_calls", "agent_tool_calls",
             "hypothesis_tool_calls", "context_chars")
@@ -103,6 +105,29 @@ def result_item(index: int, ev: dict, *, duplicate_of: str | None = None, omitte
     else:
         item["excerpts"] = [e["excerpt"] for e in res["evidence"]]
     return item
+
+
+def citable_refs(delivered: dict) -> tuple[list[dict], int]:
+    """-> (copyable tool-ref templates, number of delivered results not templated because of the list bound).
+
+    `delivered` is a Chain's own map of logged tool.call events the model was actually shown with excerpts and whose
+    status is trusted. A template is built from that logged event alone (id, tool, item path/lines): it never
+    names a denied, omitted, future or other-chain result, and nothing about it depends on the run."""
+    usable = [ev for ev in delivered.values()
+              if ev["result"]["status"] in TRUSTED_TOOL_STATUSES and ev["result"]["evidence"]]
+    kept = usable[-MAX_REF_RESULTS:]
+    out = []
+    for ev in kept:
+        tid = ev["toolCallId"]
+        items = []
+        for i, x in enumerate(ev["result"]["evidence"][:MAX_REF_ITEMS]):
+            item = {"index": i}
+            if x.get("kind") == "code":
+                item["path"], item["lines"] = x["path"], list(x["lines"])
+            items.append(item)
+        out.append({"toolCallId": tid, "tool": ev["tool"], "cite": {"kind": "tool-ref", "toolCallId": tid},
+                    "items": items})
+    return out, len(usable) - len(kept)
 
 
 def excerpt_chars(ev: dict) -> int:
@@ -258,6 +283,7 @@ class Chain:
                      "toolsExhausted": self.tools_exhausted, "contextExhausted": self.context_exhausted,
                      "toolCallsRemaining": self._allowed(),
                      "contextCharsRemaining": max(0, self.policy.context_chars - self.shown_chars)}
+            state["citableRefs"], state["refsOmitted"] = citable_refs(self.delivered)
             req = build(hop, state)
             ordinal = eng.next_ordinal(self.stage, self.role, self.agent)
             out, err, attempts = eng.model_call(self.stage, self.role, self.agent, ordinal, req)
