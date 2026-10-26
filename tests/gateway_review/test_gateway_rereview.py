@@ -62,6 +62,13 @@ def rundoc(n, mode="live", auth_digest=None, replay_of=None):
     return d
 
 
+def inv_out(n):
+    """A schema-valid InvestigatorOutput whose single hypothesis claim is `claim <n>` (GW-02-review: D3 validates ok output)."""
+    return {"hypotheses": [{"claim": f"claim {n}", "category": "bug", "suspectedSeverity": "P1", "impact": "crash",
+                            "location": {"path": f"src/f{n}.py", "line": n + 1},
+                            "evidence": [{"kind": "tool-ref", "toolCallId": "tool_" + "1" * 16}]}]}
+
+
 class Direct(unittest.TestCase):
     """Direct constructors. No author Env, no auto book, no auto pin."""
 
@@ -313,18 +320,22 @@ class Pin(Direct):
 
     def test_CONTROL_deliberate_trusted_edited_trace_with_explicit_repin(self):
         """A caller who CHOOSES to trust an edited trace re-pins it explicitly. This documents that the pin is
-        equality with a trusted value only (and that a pin learned from the edited file would always match)."""
-        gw, events, pin = self.one_call_trace(H.entry(response=H.response(output={"hypotheses": []})))
+        equality with a trusted value only (and that a pin learned from the edited file would always match).
+        GW-02-review: the edit was {"hypotheses": "TRUSTED-EDIT"} (schema-invalid under D3); it is now a different
+        schema-valid answer, so the repinned edit is actually SERVED rather than refused by local validation."""
+        gw, events, pin = self.one_call_trace(H.entry(response=H.response(output=inv_out(1))))
         edited = copy.deepcopy(events)
         for e in edited:
             if e["type"] == "model.call":
-                e["response"]["output"] = {"hypotheses": "TRUSTED-EDIT"}
+                e["response"]["output"] = inv_out(9)
         p = self.tampered_file("trusted-edit.jsonl", edited)
         with self.assertRaises(TraceError):
             self.replay(p, pin)
         repin = sha(p.read_bytes())              # explicit operator decision, not derived inside a replay check
+        self.assertNotEqual(repin, pin)
         r = self.replay(p, repin).call(*INV, 0, H.request())
-        self.assertEqual(r.output, {"hypotheses": "TRUSTED-EDIT"})
+        self.assertEqual(r.output, inv_out(9))
+        self.assertEqual(self.replay(gw.path, pin).call(*INV, 0, H.request()).output, inv_out(1))
 
     def test_CONTROL_stale_request_hash_edit_rejected_then_repinned_edit_misses(self):
         """Adapted from Controls.test_CONTROL_request_edit_...: the original pin rejects the edited bytes; only an
@@ -512,7 +523,13 @@ class Binding(Direct):
         rec.start(rd)
         r = gw.call(*INV, 0, H.request())
         self.assertEqual((r.ok, r.error["code"], provs["synthetic"].calls), (False, "contract-violation", 0))
-        self.assertEqual([e["type"] for e in rec.events], ["run.start", "error"])
+        # GW-02 (NEW6): was ["run.start", "error"]; a binding refusal must not write into the misbound recorder
+        self.assertEqual([e["type"] for e in rec.events], ["run.start"])
+        self.assertEqual(gw.book.totals()["committed"] + gw.book.totals()["inflight"], 0)
+        self.assertEqual((gw.report()["liveCalls"], gw.report()["newSpendUsdMicros"]), (0, 0))
+        rec.events[0]["run"]["spendAuthorization"] = h.digest      # binding repaired in memory
+        self.assertTrue(gw.call(*INV, 0, H.request()).ok, "the refused attempt consumed the coordinate")
+        self.assertEqual(provs["synthetic"].calls, 1)
 
     def test_recorder_without_run_start_admits_nothing_and_appends_nothing(self):
         h = self.handle()
@@ -920,8 +937,11 @@ class HypothesisId(Direct):
                 r["hypothesisId"] = hyp
             return r
         a, b = "hyp_" + "1" * 16, "hyp_" + "2" * 16
-        gw = self.mk(self.synth(H.entry(stage=stage, role=role, response=H.response()),
-                                H.entry(stage=stage, role=role, agent="generalist", ordinal=1, response=H.response())),
+        # GW-02-review: scripted answers were {"hypotheses": []} (an investigator shape, schema-invalid for a verifier
+        # under D3); they are now schema-valid VerifierOutput documents. Subject/hash/replay assertions unchanged.
+        gw = self.mk(self.synth(H.entry(stage=stage, role=role, response=H.response(output=H.verifier_out())),
+                                H.entry(stage=stage, role=role, agent="generalist", ordinal=1,
+                                        response=H.response(output=H.verifier_out("confirmed")))),
                      book=SpendBook(h), handle=h)
         self.assertTrue(gw.call(stage, role, "generalist", 0, req(a)).ok)
         self.assertTrue(gw.call(stage, role, "generalist", 1, req(None)).ok)       # no subject: still a valid call
@@ -930,8 +950,9 @@ class HypothesisId(Direct):
         self.assertEqual(len(set(hashes)), 2)
         rp = self.replay(gw.path, pin)
         self.assertEqual(rp.call(stage, role, "generalist", 0, req(b)).error["code"], "replay-miss")
-        self.assertTrue(rp.call(stage, role, "generalist", 0, req(a)).ok)
-        self.assertTrue(rp.call(stage, role, "generalist", 1, req(None)).ok)
+        self.assertEqual(rp.call(stage, role, "generalist", 0, req(a)).output, H.verifier_out())
+        self.assertEqual(rp.call(stage, role, "generalist", 1, req(None)).output, H.verifier_out("confirmed"))
+        self.assertEqual((rp.report()["liveCalls"], rp.unconsumed()), (0, 0))
 
 
 # ===================================================================== NEW defects found in the corrected code (FAIL = repro)
