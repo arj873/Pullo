@@ -8,6 +8,8 @@ bounded for JSON interoperability.
 
 from __future__ import annotations
 
+import json
+
 from .canonical import (GITHUB_REPO, call_id, comment_id, cost_id, digest, hypothesis_id,
                         idempotency_key_eval, idempotency_key_local, idempotency_key_pr,
                         request_hash, run_id, tool_call_id)
@@ -547,15 +549,43 @@ def _chain_issues(ev: dict, idx: _Index) -> list[str]:
     return out
 
 
+def _rendered(hop: dict, idx: _Index) -> set:
+    """toolCallIds this hop's request document shows WITH every excerpt of the logged result, in order (S1-17).
+    Read from the request-hashed host JSON (messages[1]: host context `context`/`pinnedContext` and
+    `history[].results`). An omitted, duplicate-marker or partial item, or a missing/malformed document, shows
+    nothing (fail closed)."""
+    msgs = hop["request"]["messages"]
+    try:
+        doc = json.loads(msgs[1]["content"]) if len(msgs) > 1 and msgs[1]["role"] == "user" else None
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        return set()
+    items = [doc.get("context"), doc.get("pinnedContext")]
+    history = doc.get("history")
+    items += [h.get("results") for h in history if isinstance(h, dict)] if isinstance(history, list) else []
+    out = set()
+    for it in (x for group in items if isinstance(group, list) for x in group):
+        tid = it.get("toolCallId") if isinstance(it, dict) else None
+        t = idx.tool(tid) if isinstance(tid, str) else None
+        if t is not None and t["result"]["evidence"] \
+                and it.get("excerpts") == [e["excerpt"] for e in t["result"]["evidence"]]:
+            out.add(tid)
+    return out
+
+
 def _citable(ev: dict, idx: _Index) -> dict:
     cid = ev["callId"]
     if cid not in idx.cache:
         if "hop" in ev["request"]:
             got: dict = {}
             if not _chain_issues(ev, idx):
-                for h in _hops(ev, idx)[0]:
+                hops = _hops(ev, idx)[0]
+                shown = set().union(*(_rendered(h, idx) for h in hops))
+                for h in hops:
                     for tid in h["request"].get("contextResults", []):
-                        got[tid] = idx.tool(tid)
+                        if tid in shown:
+                            got[tid] = idx.tool(tid)
             idx.cache[cid] = got
         else:
             allowed = HOST_CONTEXT_STAGES.get(ev["stage"], ())
@@ -584,7 +614,8 @@ def turn_chain(call_id: str, events: list) -> tuple[list[dict], list[Issue]]:
 
 def citable_tool_calls(call_id: str, events: list) -> dict:
     """toolCallId -> tool.call event that the call `call_id` was shown and may cite. Turn call: the
-    union of contextResults over its own valid chain ({} if the chain is invalid). Legacy call: tool
+    union of contextResults over its own valid chain that some hop rendered with every excerpt (_rendered;
+    {} if the chain is invalid). Legacy call: tool
     calls logged once before it, not model-requested, from HOST_CONTEXT_STAGES[its stage]. Pass this
     to severity.materialize_evidence instead of every tool call of the run."""
     idx = _Index(events, _run_of(call_id, events))

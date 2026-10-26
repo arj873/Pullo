@@ -8,9 +8,12 @@ checks they are used to test.
 from __future__ import annotations
 
 import copy
+import json
 
 from tests.contract_review import finalreview_support as F
 from reviewer.contracts import canonical as C
+
+_LOGGED: dict = {}      # toolCallId -> the tool.call event last built for it (what the host would render)
 
 STAGES = {"investigator": "INVESTIGATE", "verifier": "VERIFY"}
 TURN = {"investigator": "InvestigatorTurn", "verifier": "VerifierTurn"}
@@ -21,9 +24,27 @@ def creq(tool="read_file", args=None, purpose="check the cited lines"):
             "purpose": purpose}
 
 
+def rendered_doc(task, results, shown=None):
+    """The host JSON a hop's request carries as messages[1]: the hop's own results as a `history` entry, each shown
+    with exactly the excerpts of the logged tool.call (as pipeline.retrieval.result_item renders them). `shown`
+    maps toolCallId -> event for results the caller built elsewhere; otherwise the event tool_event last logged.
+    An id with no built event is listed unrendered (no item), never as a result the model saw."""
+    src = {**_LOGGED, **(shown or {})}
+    items = []
+    for n, tid in enumerate(results):
+        t = src.get(tid)
+        if t is None:
+            continue
+        r = t["result"]
+        items.append({"index": n, "toolCallId": tid, "tool": t["tool"], "args": t["args"], "status": r["status"],
+                      "completeness": r["completeness"], "truncated": r["truncated"], "notice": r["notice"],
+                      "excerpts": [e["excerpt"] for e in r["evidence"]]})
+    return {"task": task, "history": [{"turn": 0, "requested": [], "results": items}] if items else []}
+
+
 def turn_call(run, role, agent, ordinal, *, hop=0, cont=None, results=(), requests=None, output=None,
               seq=0, hyp=None, attempt=0, repair_of=None, status="ok", raw_output="unset",
-              stage=None, schema=None, content=None, omit_hyp=False, drop=(), hash_check=True):
+              stage=None, schema=None, content=None, omit_hyp=False, drop=(), hash_check=True, shown=None):
     """A Turn model.call. `requests`/`output` build the envelope (exactly one non-empty for a valid
     one); `raw_output` replaces the whole envelope. `drop` removes request keys (schema attacks).
     The verifier request subject is derived from the honest agent label `v-hyp_...` like F.model_call."""
@@ -32,7 +53,9 @@ def turn_call(run, role, agent, ordinal, *, hop=0, cont=None, results=(), reques
                 if raw_output == "unset" else raw_output)
     req = {**F.ex("TraceEvent.model-call")["request"], "role": role,
            "outputSchema": schema or TURN[role],
-           "messages": [{"role": "user", "content": content or f"{stage} {role} {agent} {ordinal}"}],
+           "messages": [{"role": "system", "content": "synthetic fixture system prompt"},
+                        {"role": "user", "content": content if content is not None else json.dumps(
+                            rendered_doc(f"{stage} {role} {agent} {ordinal}", results, shown), sort_keys=True)}],
            "hop": hop, "contextResults": list(results)}
     if cont is not None:
         req["continuationOf"] = cont
@@ -63,6 +86,7 @@ def tool_event(run, stage, agent, ordinal, tool, args, items, *, status="ok", se
     ev = {"schema": "trace-event@1", "runId": run, "seq": seq, "type": "tool.call", "toolCallId": tid,
           "stage": stage, "agentId": agent, "ordinal": ordinal, "tool": tool, "args": args,
           "resultHash": C.digest(res), "result": res, "redactions": {}}
+    _LOGGED[tid] = ev
     if by is not None:
         ev["requestedBy"] = by["callId"] if isinstance(by, dict) else by
         ev["requestIndex"] = index
@@ -100,6 +124,7 @@ class TurnScenario:
     needs no change except its call ids and the tool item each chain delivered."""
 
     def __init__(self, with_tool_cites=False, same_line=False):
+        _LOGGED.clear()                 # each scenario renders only the tool results it logs itself
         base = F.Scenario()
         self.base = base
         self.run = base.run
