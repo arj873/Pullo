@@ -90,6 +90,7 @@ class LoadedTrace:
         self.events = events
         self.run_id = events[0]["runId"]
         self.byte_digest = byte_digest
+        self._events_digest = bytes_digest(events_to_bytes(events))   # canonical snapshot taken at load time
         self.complete = events[-1]["type"] == "run.end"
         self.calls: dict[str, list[dict]] = {}       # requestHash -> model.call events in order
         self.costs: dict[str, dict] = {}             # costRecordId -> CostRecord
@@ -102,6 +103,10 @@ class LoadedTrace:
     @property
     def model_calls(self) -> int:
         return sum(len(v) for v in self.calls.values())
+
+    def mutated(self) -> bool:
+        """True when the events no longer match what was verified at load time."""
+        return bytes_digest(events_to_bytes(self.events)) != self._events_digest
 
 
 def _fail(i, why):
@@ -138,6 +143,8 @@ def verify_events(events: list, data: bytes | None = None, *, allow_partial: boo
     seen_calls, seen_tools, cost_of = set(), set(), {}
     for i, ev in enumerate(events):
         t = ev["type"]
+        if t == "run.start" and i != 0:
+            _fail(i, "duplicate run.start: a trace names exactly one run document")
         if t == "model.call":
             req = ev["request"]
             try:

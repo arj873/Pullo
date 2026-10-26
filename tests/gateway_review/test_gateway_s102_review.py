@@ -460,39 +460,54 @@ class NEW1(Rv):
         self.assertEqual((r.error["code"], rp.report()["replayedUsdMicros"]), ("cancelled", RESERVE))
 
 
-# ============================================================================================ NEW5 (open)
+# ============================================================================================ NEW5 (fixed by GW-02)
 class Forgery(Rv):
+    """GW-02-review: NEW5 is fixed; strict replay construction refuses a LoadedTrace whose events changed after
+    load_trace(). Each test proves the mutation is real (the events no longer serialize to the pinned bytes) and
+    that the untouched recording with the same pin is still served, so a refusal is not vacuous."""
+
     def _forged_replay(self, forged_output):
+        """(result or None if construction refused, the TraceError or None, mutated-events digest, pin, path)."""
         gw = self.live(H.entry(response=good(1)))
         rcall(gw)
         events, pin = self.seal(gw)
         tr = load_trace(gw.path)
         for lst in tr.calls.values():
             lst[0]["response"]["output"] = forged_output
+        changed = R.sha(R.ser(tr.events))
         rd = R.rundoc(9006, mode="strict-replay", replay_of=tr.run_id)
         rec = R.Recorder(rd["id"])
         rec.start(rd)
         try:
             rp = Gateway(mode="strict-replay", profile=H.PROFILE, budget=H.BUDGET, run_id=rd["id"], replay=tr,
                          recorder=rec, expected_trace_digest=pin)
-        except (TraceError, R.GatewayConfigError):
-            return None
-        return rcall(rp)
+        except TraceError as e:
+            return None, e, changed, pin, gw.path
+        return rcall(rp), None, changed, pin, gw.path
+
+    def _genuine_still_served(self, path, pin):
+        r = rcall(self.replay(path, pin))
+        self.assertEqual(r.output, inv_out(1))
 
     def test_NEW5_original_mutation_is_now_rejected_only_because_it_is_schema_invalid(self):
-        """INCIDENTAL: D3 rejects the repro's forged output because it violates the schema, not because the gateway
-        compares the pin with the events it serves. Passing here does NOT mean NEW5 is fixed."""
-        r = self._forged_replay({"hypotheses": "MUTATED-AFTER-LOAD"})
-        self.assertIsNotNone(r)
-        self.assertEqual(r.error["code"], "schema-invalid")
-
-    @unittest.expectedFailure
-    def test_OPEN_NEW5_schema_valid_forgery_after_load_is_still_served(self):
-        """OPEN. Same mutation as NEW5 but with a schema-valid forged answer: pin passes, forged answer served."""
-        r = self._forged_replay(inv_out(7))
+        """Originally INCIDENTAL (D3 rejected the schema-invalid forged output). GW-02 makes the constructor refuse
+        the mutated trace; that refusal is now accepted. A served answer, if any, must still be schema-invalid."""
+        r, err, changed, pin, path = self._forged_replay({"hypotheses": "MUTATED-AFTER-LOAD"})
+        self.assertNotEqual(changed, pin, "negative control: the mutation did not change the event content")
         if r is None:
-            return                                              # hardened: constructor refused the mutated events
-        self.assertNotEqual(r.output, inv_out(7), "a schema-valid forged answer was served under an unchanged pin")
+            self.assertIn("changed after load_trace", str(err))
+        else:
+            self.assertEqual(r.error["code"], "schema-invalid")
+        self._genuine_still_served(path, pin)
+
+    def test_NEW5_schema_valid_forgery_after_load_is_refused_at_construction(self):
+        """Was test_OPEN_NEW5_... (expectedFailure). Same mutation with a schema-valid forged answer: the pin passes
+        on the byte_digest attribute, so only the post-load mutation check can stop it; it must refuse."""
+        r, err, changed, pin, path = self._forged_replay(inv_out(7))
+        self.assertNotEqual(changed, pin, "negative control: the mutation did not change the event content")
+        self.assertIsNone(r, "a schema-valid forged answer was served under an unchanged pin")
+        self.assertIn("changed after load_trace", str(err))
+        self._genuine_still_served(path, pin)
 
 
 # ============================================================================================ replay accounting / kinds

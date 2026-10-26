@@ -30,7 +30,7 @@ from .errors import AuthorizationError, GatewayConfigError, SettlementError, Tra
 from .guard import GUARD_CODES, REFUSED_BY, AttemptContext, AttemptGuard, GuardRefusal, normalize_refusal
 from .providers import ProviderResult, default_providers
 from .script import ROLES, SLUG
-from .trace import LoadedTrace, Recorder, error_charge_class
+from .trace import LoadedTrace, Recorder, error_charge_class, verify_events
 
 MODES = ("live", "strict-replay", "disabled")
 RETRYABLE_CODES = frozenset({"provider-error", "provider-timeout"})
@@ -150,8 +150,13 @@ class Gateway:
                     "trusted configuration or a separately pinned run artifact, never from the trace itself")
             if not replay.complete:
                 raise GatewayConfigError("strict replay needs a complete recording (the trace has no run.end)")
+            if replay.mutated():
+                raise TraceError("loaded trace events changed after load_trace(): re-load the (re-pinned) bytes")
             if not hmac.compare_digest(replay.byte_digest, expected_trace_digest):
                 raise TraceError("trace bytes do not match the pinned expected_trace_digest")
+            # serve from a private verified copy: later mutation of the caller's LoadedTrace cannot reach this gateway
+            self.replay = verify_events(copy.deepcopy(replay.events), allow_partial=False)
+            self.replay.byte_digest = replay.byte_digest
         else:
             if replay is not None or authorization is not None:
                 raise GatewayConfigError("disabled gateway takes neither trace nor authorization")
@@ -178,6 +183,10 @@ class Gateway:
         run = started["run"]
         if run["id"] != self.run_id or (self.mode != "disabled" and run["mode"] != self.mode):
             return "config", "recorder run.start does not match this gateway's run id/mode"
+        if run.get("profile") != self.profile_ref:
+            return "config", "recorder run.start names a different profile than this gateway's trusted profile"
+        if self.mode == "strict-replay" and run.get("replayOf") != self.replay.run_id:
+            return "config", "recorder run.start replayOf is not the replayed recording's run id"
         if self.mode == "live" and run.get("spendAuthorization") != self.auth.digest:
             return "auth", "run.spendAuthorization is not the digest of the trusted authorization"
         return None
@@ -273,7 +282,8 @@ class Gateway:
     def _refuse(self, info: AttemptInfo, err: dict, record: bool = True) -> dict:
         info.outcome = err["code"]
         # a trace cannot begin with an error event: with no run.start yet there is nothing to append to
-        if record and self.recorder.events:
+        # a refusal never writes into a recorder whose run.start is not bound to this gateway (NEW6)
+        if record and self.recorder.events and self._binding_problem() is None:
             self.recorder.append("error", error=err)
         return {"error": err, "response": None, "info": info}
 
@@ -282,7 +292,8 @@ class Gateway:
         bad = self._binding_problem()
         if bad is None:
             return None
-        return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=c["stage"]))
+        # effect-free: the recorder is not this gateway's to write into
+        return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=c["stage"]), record=False)
 
     def _check_request(self, role: str, req: dict) -> dict | None:
         spec = self.profile["roles"][role]
