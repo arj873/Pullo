@@ -1,33 +1,17 @@
-# Known test issues at this checkpoint
+# Known test issues at the public checkpoint
 
-Command: `python3 -m unittest discover -s tests -t .` from a clean export of this tree (no `orchestration/`, no `fixtures/historical`, no credentials).
+Run the offline suite with `nice -n 19 python3 -B -m unittest discover -s tests -t .` from a clean checkout. It uses no credentials or network. [Hosted CI for PR #9](https://github.com/arj873/Pullo/actions/runs/40306956738) completed on 2026-10-26: **2,401 tests, OK, 30 skipped, 22 expected failures, zero errors or unexpected failures**. This is the completed full run after the startup-cleanup PR. A later provenance change is under review and is not included in these counts.
 
-Observed result (2026-10-26, Python 3.14, exact export of the first commit of this branch): **Ran 1316 tests, errors=6, skipped=2, expected failures=13.** The README and this file are the only later additions to that tree.
+## Skips
 
-## Errors that need private inputs absent from this repository (5)
+The public repository excludes raw third-party historical pull-request fixtures and private operator reconciliation evidence. Tests that require them are marked with explicit `skipUnless` checks; the hosted run reported 30 skips. Static historical import-boundary gauges now run without that corpus. Permission-sensitive tests can also skip when the runner's privileges make the permission probe meaningless. Skips are not evidence that those behaviours passed on the public checkout.
 
-Each reads private operator evidence or a third-party historical fixture that is deliberately not published. The rest of each file runs and passes.
+## Expected failures
 
-| Test | Missing input |
-|---|---|
-| `tests.runtime.test_s0b01b.OldLedgerReplay.test_reconcile_cli_previews_then_applies_and_never_creates_a_ledger` | `orchestration/validation/first-live-sonnet-canary-reconciliation.json` |
-| `tests.runtime.test_s0b01b.OldLedgerReplay.test_reconcile_with_saved_host_evidence_is_append_only_idempotent_and_exact` | same |
-| `tests.runtime_review.test_s0b01b_review.OldRowReplay.test_cli_refuses_missing_ledger_and_unknown_generation` | same |
-| `tests.runtime_review.test_s0b01b_review.OldRowReplay.test_reconcile_cli_preview_then_apply_then_repeat_with_the_repo_evidence` | same |
-| `tests.tools.test_partial_union.RealFixture1347.test_bridge_recipe_keeps_head_context_out_of_the_changed_list` | third-party historical case directory |
+Twenty-two tests remain marked `expectedFailure` for disclosed, unresolved defects or safety conditions. They are part of the default suite and produce a non-failing result while still pinning their intended behaviour. Examples include Terra CLI isolation/parser issues, a gateway trusted-object edge case, and benchmark input/scoring gates. Search `rg -n 'expectedFailure' tests` for the markers and read their companion handoffs for scope. An unexpected success should prompt marker removal and an independent regression review.
 
-## Unexplained intermittent error (1 in this run)
+## Local temporary-directory interference
 
-`tests.pilot_review.test_repository_gate.Live.test_CONTROL_no_retry_no_repair_no_second_attempt_for_http_errors_and_unusable_answers` (subtest `[500]`) errored with `RepoImportError: bad-store: store must be outside every Git repository work tree`.
+Some local runs using the default `/tmp` have encountered a separate process's intermittent `/tmp/.git`, causing the repository importer to correctly reject temporary stores beneath it. Do not remove unknown host files or weaken the importer guard. Use a verified non-Git temporary root such as `TMPDIR=/var/tmp` when running these tests locally. The hosted clean-checkout suite above had no such error.
 
-- An earlier broader run errored on a different pilot test with the same message (`tests.pilot.test_repository.CliTests.test_config_identity_binds_pins_records_profile_policy_and_retrieval`).
-- Re-running those tests alone (their class, `tests/pilot`, and the module) passes every time.
-- Cause not identified. The store check refuses a store that has a `.git` entry in any ancestor, so something transiently puts one above the test's temporary directory during the full run. Not hidden or skipped.
-
-## Excluded from this repository (not published)
-
-`tests/corpus`, `tests/corpus_review`, `tests/historical`, `tests/tools/test_tr_fixes.py`: they need raw third-party pull-request fixtures or private corpus manifests. Their code under `reviewer/corpus` and `reviewer/historical` is included.
-
-## Expected failures (13) and skips (2)
-
-Expected failures are known defects or open gates kept as `expectedFailure` repros in the tree (find them with `grep -rn expectedFailure tests`). The skips need a private fixture.
+The suite verifies mechanics and known controls. Its green exit code is not a measurement of review precision, recall, safety against all adversarial input, cost per review or competitive quality.
