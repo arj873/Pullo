@@ -16,8 +16,10 @@ S0-09b update (independent re-check of the S0-07b corrections): N1 N2 N3 N4 N5 N
 `expectedFailure` marker and each former `*_symptom_*` test became a `*_fixed_*` regression that keeps the original scenario and
 asserts the REASON for the new behaviour (drop reason/detail, nothing written), because a marker that merely flips can hide a fix
 that works for the wrong reason. The sharper attacks are in test_corrections_review.py. STILL OPEN and still held by
-expectedFailure: D4 (gateway attempts), N6 (run-id token evasion), N7 (unpinned CLI replay). N7 is now tested against a recording
-that is proven to have succeeded (see Evaluator), because an unpinned replay that fails earlier would also "not say pinned".
+expectedFailure: N7 (unpinned CLI replay). N7 is tested against a recording that is proven to have succeeded (see Evaluator),
+because an unpinned replay that fails earlier would also "not say pinned".
+RELEASE-02-compat: D4 (no gateway attempt after the hard deadline / cancellation) and N6 (run-id-shaped token on a cited line) are
+fixed on this ordinary legacy path as well (S1-05 proved them on Turn chains); their markers and `*_symptom_*` tests are retired.
 """
 
 from __future__ import annotations
@@ -239,35 +241,14 @@ class DeadlineCancel(Base):
         return script(entry("INVESTIGATE", "investigator", "generalist", 0, 0, error=terr("provider-timeout", "INVESTIGATE")),
                       inv(a, attempt=1), ver(0, m, path="src/a.py", line=2), judge(w([hid(0, a)])))
 
-    def test_symptom_D4_inherited_gateway_retries_after_the_hard_deadline_and_the_answer_is_used(self):
-        m = self.mini()
-        a = hyp(m, "src/a.py", 2)
-        res, spy = self.hooked_record(m, self.retry_script(m, a),
-                                      lambda n: self.clock_value.__setitem__(0, 1000.0) if n == 1 else None)
-        self.assertEqual(spy.calls, 2)                           # attempt 1 started after the hard deadline
-        self.assertEqual(len(res.hypotheses), 1)                 # and its answer became a hypothesis
-        self.assertEqual(res.stages["INVESTIGATE"]["status"], "completed")   # stage does not say it overran
-        self.assertEqual(spy.calls, 2)                           # VERIFY was (correctly) not started
-        self.assertEqual([d["reason"] for d in res.drops], ["deadline"])
-
-    @unittest.expectedFailure
-    def test_DEFECT_D4_no_provider_attempt_starts_after_the_hard_deadline(self):
+    def test_fixed_D4_no_provider_attempt_starts_after_the_hard_deadline(self):
         m = self.mini()
         a = hyp(m, "src/a.py", 2)
         _, spy = self.hooked_record(m, self.retry_script(m, a),
                                     lambda n: self.clock_value.__setitem__(0, 1000.0) if n == 1 else None)
         self.assertEqual(spy.calls, 1)
 
-    def test_symptom_D4_inherited_gateway_retries_after_cancellation(self):
-        m = self.mini()
-        a = hyp(m, "src/a.py", 2)
-        flag = [False]
-        res, spy = self.hooked_record(m, self.retry_script(m, a), lambda n: flag.__setitem__(0, True) if n == 1 else None,
-                                      cancel=lambda: flag[0])
-        self.assertEqual((res.status, spy.calls), ("cancelled", 2))
-
-    @unittest.expectedFailure
-    def test_DEFECT_D4_no_provider_attempt_starts_after_cancellation(self):
+    def test_fixed_D4_no_provider_attempt_starts_after_cancellation(self):
         m = self.mini()
         a = hyp(m, "src/a.py", 2)
         flag = [False]
@@ -504,18 +485,14 @@ class RunIdToken(Base):
         res, _ = self.run_with(m, "    return x * 2  # see ticket")
         self.assertEqual(len(res.comments), 1)
 
-    def test_symptom_N6_a_run_id_shaped_token_on_the_defective_line_makes_that_line_uncitable(self):
+    def test_fixed_N6_the_model_is_shown_the_preserved_source_string_and_the_line_stays_citable(self):
+        shown = "    return x * 2  # run_0123456789abcdef"                  # the actual preserved source, not scrubbed text
         m = self.planted("run_0123456789abcdef")
-        res, spy = self.run_with(m, "    return x * 2  # run_[id-removed]")        # exactly what the model was shown
-        self.assertIn("run_[id-removed]", json.dumps(spy.requests[0]))
-        self.assertEqual((res.hypotheses, res.comments), ([], []))
-        self.assertEqual([d["reason"] for d in res.drops], ["invalid-citation"])
-
-    @unittest.expectedFailure
-    def test_DEFECT_N6_a_planted_token_cannot_suppress_a_finding_on_its_own_line(self):
-        m = self.planted("run_0123456789abcdef")
-        res, _ = self.run_with(m, "    return x * 2  # run_[id-removed]")
+        res, spy = self.run_with(m, shown)
+        self.assertIn("run_0123456789abcdef", json.dumps(spy.requests[0]))
+        self.assertNotIn("run_[id-removed]", json.dumps(spy.requests[0]))
         self.assertEqual(len(res.comments), 1)
+        self.assertEqual(res.drops, [])
 
 
 # ======================================================================================================================
