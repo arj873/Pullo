@@ -4,7 +4,7 @@ Read-only AI code review with independent verification. Pullo investigates a cha
 
 **Status: pre-alpha.** Review quality has not been measured. There is no precision/recall figure, no competitive-quality claim and no cost-per-review claim (including any mid-sized-review price target). Treat everything below as mechanics, not capability.
 
-This repository state is a **checkpoint for review, not a release**. The public default test suite currently exits successfully, with explicit optional skips and expected-failure repros (see Tests).
+This repository state is a **checkpoint for review, not a release**. The public default test suite at `c2b8ef758cecfe92984f963c929d0fb35cd6c46e` exits successfully, with explicit optional skips and expected-failure repros (see Tests).
 
 The Python package is named `reviewer`; the product name is Pullo. Everything is stdlib-only (tested on Python 3.14).
 
@@ -12,7 +12,7 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 
 ## What exists
 
-- Typed contracts, a canonical-JSON/digest layer, a model gateway with a trace and strict replay, read-only repository tools, a staged pipeline (investigate, verify, judge) and local review output.
+- Typed contracts, a canonical-JSON/digest layer, a model gateway with a trace and strict replay, read-only repository tools, a staged pipeline (investigate, verify, judge) and local review output. Citation provenance checks require complete logged excerpts rendered at an eligible hop of the same retrieval chain; verifier citation templates use references the host can materialize. These controls were hardened in [PR #10](https://github.com/arj873/Pullo/pull/10) and [PR #13](https://github.com/arj873/Pullo/pull/13).
 - Read-only importers that pin a historical commit pair or a repository head/base by object ID. Reviewed code is data: nothing from a reviewed repository is executed, and nothing is posted upstream.
 - Bounded live trials through trusted-host launchers (`reviewer.runtime`, `reviewer.pilot`) against Anthropic Sonnet via OpenRouter, with a hard spend cap, an exact model allowlist, no retries and no fallback. These need a key and a trusted host; they are not run by anything below, and no key is bundled.
 - An experimental benchmark scorer exists in the project's working tree but is **not part of this checkpoint**; it will be proposed separately. Nothing here depends on it and no benchmark score is claimed.
@@ -21,7 +21,8 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 
 - Synthetic smoke suite: six scripted cases record and strictly replay offline (19/19 replayed calls, zero live calls, zero spend). This checks mechanics only.
 - First repository-backed trial (a real pinned public pull request, one bounded Sonnet run): it completed and replayed identically, with no hypotheses and no comments. An independent read found no concrete defect in what the model was shown. That is not a clean-repository claim and not a recall measurement.
-- First synthetic positive trial (a planted clock-unit bug): the investigator found the intended hypothesis, but the verifier's final output carried invalid evidence identifiers and was refused by validation. Result: partial, one dropped hypothesis, no finding, no comment, and the judge did not run. This is a preserved format/provenance failure, not a successful end-to-end positive case. The strict replay of it was identical.
+- First synthetic positive trial (a planted clock-unit bug): the investigator found the intended hypothesis, but invalid verifier evidence identifiers were refused. The run was partial, with one dropped hypothesis and no finding or comment; strict replay was identical.
+- A subsequent bounded Sonnet positive control on the planted clock-unit bug completed all stages: one hypothesis, one verification, one finding and one local comment, with no drops. Four model calls and nine tool calls were reproduced by strict offline replay, with no new model calls or spend during replay. Independent adjudication accepted the trigger, impact, location and excerpts. This establishes full-chain mechanics on one synthetic case; it does not measure real-review quality, model-family independence or cost per review.
 
 ## Known open limits
 
@@ -58,13 +59,13 @@ The historical, repository and synthetic review commands accept `--config /path/
 ## Run the offline smoke suite
 
 ```sh
-python3 -m reviewer smoke record --out /tmp/smoke-rec
-python3 -m reviewer smoke replay --recording /tmp/smoke-rec --out /tmp/smoke-rep
+nice -n 19 python3 -m reviewer smoke record --out /tmp/smoke-rec
+nice -n 19 python3 -m reviewer smoke replay --recording /tmp/smoke-rec --out /tmp/smoke-rep --manifest-digest sha256:REPLACE_WITH_DIGEST_PRINTED_BY_RECORD
 ```
 
 `record` runs every case in `fixtures/smoke` through the pipeline with a scripted synthetic provider, scores each result and writes a validated report. `replay` re-executes all cases offline against the recorded traces, with zero provider calls, and compares hypotheses, findings, comments, statuses and call counts.
 
-Both need a new or empty `--out` directory outside the suite (and, for replay, outside the recording). Options: `--suite DIR`; `replay --manifest-digest sha256:...` pins the recording's `eval.json` bytes (printed on `record`'s last line). Exit codes: `0` all cases ran and every expectation/comparison held; `1` a report was written but something failed; `2` refused before any case ran.
+Replace `REPLACE_WITH_DIGEST_PRINTED_BY_RECORD` with the hexadecimal digest from the last line of `record` output. Both need a new or empty `--out` directory outside the suite (and, for replay, outside the recording). Options: `--suite DIR`; `replay --manifest-digest sha256:...` pins the recording's `eval.json` bytes (printed on `record`'s last line). Exit codes: `0` all cases ran and every expectation/comparison held; `1` a report was written but something failed; `2` refused before any case ran.
 
 No credential, network call or paid spend is possible from these commands. Prices in the cost lines are synthetic. Comments are local drafts.
 
@@ -74,11 +75,11 @@ No credential, network call or paid spend is possible from these commands. Price
 nice -n 19 python3 -B -m unittest discover -s tests -t .
 ```
 
-The suite is offline and needs no credentials or network. [Hosted CI for PR #9](https://github.com/arj873/Pullo/actions/runs/40306956738) ran 2,401 tests with zero errors or unexpected failures, 30 skips and 22 expected failures. A later provenance PR has its own check and is not included in these counts. Limits remain visible:
+The suite is offline and needs no credentials or network. [Hosted CI for PR #13](https://github.com/arj873/Pullo/actions/runs/40324991362) completed on 2026-10-26: **2,441 tests, OK, 30 skips, 22 expected failures**, with zero errors or unexpected failures. Contract export and all six smoke record/replay cases also passed. Its head commit and the public checkpoint above share tree `d1e467637f6a8ad173bd855d084680c0c519a728`; these counts include the citation-provenance hardening. Limits remain visible:
 
 - Raw third-party pull-request fixtures and private operator evidence are not published. Corpus-only test modules are left out of this repository; included tests requiring those inputs use explicit skips. Static historical import-boundary tests run without the private corpus.
 - Known defects are kept as expected-failure tests so the repro stays in the tree.
 - Some tests skip when a private fixture is absent.
 - Local tests under `/tmp` can encounter an unrelated intermittent `/tmp/.git`, which makes the importer correctly reject a temporary store. Use a verified non-Git `TMPDIR` locally; hosted CI did not encounter this.
 
-See `KNOWN_TEST_ISSUES.md` for the exact test IDs and counts at this checkpoint.
+See [KNOWN_TEST_ISSUES.md](KNOWN_TEST_ISSUES.md) for the exact public test IDs, reasons and counts at this checkpoint.
