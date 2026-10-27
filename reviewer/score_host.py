@@ -128,6 +128,22 @@ def _schema_sha256() -> str:
                                      for n in ("ScoreExtraction", "ScoreDedup", "ScorePair")})).hexdigest()
 
 
+def _abort_trace(rec) -> None:
+    """Cleanup/audit only: after `rec.start`, any exception leaves a VALID typed terminal event (`failed`) when possible, else the
+    recorder is closed. Never raises, so the caller re-raises the ORIGINAL exception; charges and holds stay in the ledger
+    untouched. A trace that already ended is left alone. The same-id trace is never deleted or overwritten (O_EXCL stays)."""
+    try:
+        if rec.events and str(rec.events[-1].get("type", "")).endswith("run.end"):
+            rec.close()
+            return
+        rec.end("failed", [{"reason": "unsent", "stage": "MATCH"}])
+    except BaseException:  # noqa: BLE001 - fallback must not mask the original error
+        try:
+            rec.close()
+        except BaseException:  # noqa: BLE001
+            pass
+
+
 class ScoreHost:
     def __init__(self, cfg: ScoreConfig, baseline: LaunchBaseline, units, *, profile_ref: str, price: dict, auth, book,
                  ledger: RuntimeLedger, key: Secret, transport, store_dir, eval_run_id: str, eval_case_id: str = "campaign",
@@ -299,13 +315,17 @@ class ScoreHost:
                        "evalCaseId": self.case_id, "repeat": self.repeat, "profile": self.profile_ref, "mode": "live",
                        "inputDigest": self.baseline.digest, "status": "running", "incomplete": [],
                        "spendAuthorization": self.auth.digest})
-            _need(self.ledger.scoring_startup_hold() is None, "scoring-startup-hold")      # recheck right before the first send
-            mappings, exts, dds, g, plans, adm, results = self._pipeline(gw, provider, money=True)
-            att_complete = A.attempt_set(exts, dds, adm, results)["complete"]
-            rec.end("completed" if att_complete else "partial", None if att_complete else [{"reason": "unsent", "stage": "MATCH"}])
-            docs = self._documents(mappings, exts, dds, results, self.evr) if att_complete else []
-            stored = self._store(f"{self.run_id}.documents.json", docs) if docs else None
-            return self._report(mappings, exts, dds, g, adm, results, "offline-fake-transport", stored)
+            try:
+                _need(self.ledger.scoring_startup_hold() is None, "scoring-startup-hold")      # recheck right before the first send
+                mappings, exts, dds, g, plans, adm, results = self._pipeline(gw, provider, money=True)
+                att_complete = A.attempt_set(exts, dds, adm, results)["complete"]
+                rec.end("completed" if att_complete else "partial", None if att_complete else [{"reason": "unsent", "stage": "MATCH"}])
+                docs = self._documents(mappings, exts, dds, results, self.evr) if att_complete else []
+                stored = self._store(f"{self.run_id}.documents.json", docs) if docs else None
+                return self._report(mappings, exts, dds, g, adm, results, "offline-fake-transport", stored)
+            except BaseException:
+                _abort_trace(rec)                    # typed failed end (or close); the ORIGINAL exception propagates
+                raise
         finally:
             os.close(fd)
 
@@ -329,14 +349,18 @@ class ScoreHost:
                        "evalCaseId": self.case_id, "repeat": self.repeat, "profile": self.profile_ref,
                        "mode": "strict-replay", "inputDigest": self.baseline.digest, "status": "running", "incomplete": [],
                        "replayOf": trace.run_id})
-            mappings, exts, dds, g, plans, adm, results = self._pipeline(gw, None, money=False)
-            ok = A.attempt_set(exts, dds, adm, results)["complete"]
-            rec.end("completed" if ok else "partial", None if ok else [{"reason": "unsent", "stage": "MATCH"}])
-            docs = self._documents(mappings, exts, dds, results, new_eval_run_id) if ok else []
-            report = self._report(mappings, exts, dds, g, adm, results, "strict-replay", None)
-            report["liveCalls"] = gw.live_calls
-            report["documents"] = docs                       # returned to the trusted caller only (never in a public report)
-            return report
+            try:
+                mappings, exts, dds, g, plans, adm, results = self._pipeline(gw, None, money=False)
+                ok = A.attempt_set(exts, dds, adm, results)["complete"]
+                rec.end("completed" if ok else "partial", None if ok else [{"reason": "unsent", "stage": "MATCH"}])
+                docs = self._documents(mappings, exts, dds, results, new_eval_run_id) if ok else []
+                report = self._report(mappings, exts, dds, g, adm, results, "strict-replay", None)
+                report["liveCalls"] = gw.live_calls
+                report["documents"] = docs                       # returned to the trusted caller only (never in a public report)
+                return report
+            except BaseException:
+                _abort_trace(rec)                    # typed failed end (or close); the ORIGINAL exception propagates
+                raise
         finally:
             os.close(fd)
 
