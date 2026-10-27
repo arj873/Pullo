@@ -485,7 +485,7 @@ class TurnSchemas(unittest.TestCase):
         self.assertTrue(validate("TraceEvent", {**t, "requestedBy": "call_" + "0" * 16, "requestIndex": 6}))
 
     def test_version(self):
-        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@6")
+        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@7")
 
 
 class D6RepositoryTextIsNeverFiltered(unittest.TestCase):

@@ -1,7 +1,8 @@
 """python3 -m reviewer.contracts {export [--check] | validate <Entity> <file.json|file.jsonl>}
 
 Files are parsed with loads_strict (duplicate keys, NaN/Infinity and unsafe JSON are errors).
-For TraceEvent .jsonl files the whole-file trace rules (seq, single run, ordering) also apply.
+For TraceEvent .jsonl files the whole-file trace rules (seq, single run, ordering) also apply; for
+ScoreTraceEvent .jsonl files the score-family rules (validate_score_trace) apply instead.
 Exit codes: 0 ok, 1 invalid document / stale bundle, 2 usage error.
 """
 
@@ -12,7 +13,7 @@ import sys
 from pathlib import Path
 
 from . import (CONTRACTS_VERSION, REGISTRY, ContractInputError, export_bundle, loads_strict,
-               validate, validate_trace)
+               validate, validate_score_trace, validate_trace)
 
 BUNDLE = Path(__file__).with_name("schemas") / "contracts.schema.json"
 
@@ -43,6 +44,8 @@ def _validate_file(name: str, path: Path) -> int:
         return 1
     if name == "TraceEvent" and path.suffix == ".jsonl":
         issues = validate_trace(docs)
+    elif name == "ScoreTraceEvent" and path.suffix == ".jsonl":
+        issues = validate_score_trace(docs)
     else:
         issues = [i for d in docs for i in validate(name, d)]
     for issue in issues:

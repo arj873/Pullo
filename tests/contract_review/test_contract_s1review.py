@@ -860,7 +860,7 @@ class S_SchemaSurface(Base):
         out = subprocess.run([sys.executable, "-m", "reviewer.contracts", "export", "--check"], cwd=ROOT,
                              capture_output=True, text=True, timeout=120)
         self.assertEqual((out.returncode, out.stdout.strip()), (0, "schema bundle up to date"), out.stderr)
-        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@6")
+        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@7")
 
 
 # ====================================================================================== D6: literals and the typed boundary

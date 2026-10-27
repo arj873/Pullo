@@ -1,0 +1,81 @@
+{
+  "id": "score-invented",
+  "roles": {
+    "deduper": {
+      "caps": {
+        "maxOutputTokens": 4000,
+        "maxRepairs": 0,
+        "maxRetries": 0,
+        "timeoutSec": 120
+      },
+      "fallbacks": [],
+      "family": "anthropic",
+      "model": "anthropic/claude-opus-5.5",
+      "outputSchema": "ScoreDedup",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 6250000,
+        "cachedInputPerMTokUsdMicros": 500000,
+        "inputPerMTokUsdMicros": 5000000,
+        "outputPerMTokUsdMicros": 25000000,
+        "priceVersion": "invented-catalog@0"
+      },
+      "promptVersion": "bench.dedup@v1",
+      "provider": "anthropic",
+      "resolved": true
+    },
+    "extractor": {
+      "caps": {
+        "maxOutputTokens": 8000,
+        "maxRepairs": 0,
+        "maxRetries": 0,
+        "timeoutSec": 120
+      },
+      "fallbacks": [],
+      "family": "anthropic",
+      "model": "anthropic/claude-opus-5.5",
+      "outputSchema": "ScoreExtraction",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 6250000,
+        "cachedInputPerMTokUsdMicros": 500000,
+        "inputPerMTokUsdMicros": 5000000,
+        "outputPerMTokUsdMicros": 25000000,
+        "priceVersion": "invented-catalog@0"
+      },
+      "promptVersion": "bench.extract@v1",
+      "provider": "anthropic",
+      "resolved": true
+    },
+    "matcher": {
+      "caps": {
+        "maxOutputTokens": 256,
+        "maxRepairs": 0,
+        "maxRetries": 0,
+        "timeoutSec": 120
+      },
+      "fallbacks": [],
+      "family": "anthropic",
+      "model": "anthropic/claude-opus-5.5",
+      "outputSchema": "ScorePair",
+      "params": {
+        "temperature": 0
+      },
+      "price": {
+        "cacheWriteInputPerMTokUsdMicros": 6250000,
+        "cachedInputPerMTokUsdMicros": 500000,
+        "inputPerMTokUsdMicros": 5000000,
+        "outputPerMTokUsdMicros": 25000000,
+        "priceVersion": "invented-catalog@0"
+      },
+      "promptVersion": "bench.pair@v1",
+      "provider": "anthropic",
+      "resolved": true
+    }
+  },
+  "version": 1
+}

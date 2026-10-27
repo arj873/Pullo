@@ -1,0 +1,12 @@
+{
+  "candidates": [
+    {
+      "sourceCommentId": "c001",
+      "text": "Invented candidate text."
+    },
+    {
+      "sourceCommentId": "c002",
+      "text": "   "
+    }
+  ]
+}

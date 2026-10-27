@@ -359,7 +359,7 @@ class R_RoleAndSchema(ScenarioCase):
 
     def test_R4_contract_surface_is_versioned_and_exported(self):
         from reviewer.contracts import CONTRACTS_VERSION
-        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@6")      # S1-01 review: expected version bump
+        self.assertEqual(CONTRACTS_VERSION, "s0a-contracts@7")      # additive score family (SCORE-CONTRACT-01/03)
         import json
         from pathlib import Path
         bundle = json.loads((Path(F.ROOT) / "reviewer/contracts/schemas/contracts.schema.json").read_text())

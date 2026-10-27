@@ -51,6 +51,17 @@ class ExamplesAndBundle(Base):
         bundle = json.loads((ROOT / "reviewer/contracts/schemas/contracts.schema.json").read_text())
         self.assertEqual(sorted(bundle["$defs"]), list(ENTITY_NAMES))
 
+    def test_score_family_is_registered_with_examples(self):
+        """SCORE-CONTRACT-01: the isolated score family is part of the bundle and has valid invented examples;
+        the full compatibility pins live in tests/score_contracts."""
+        bundle = json.loads((ROOT / "reviewer/contracts/schemas/contracts.schema.json").read_text())
+        for name in ("ScoreStage", "ScoreRole", "ScoreExtraction", "ScoreDedup", "ScorePair", "ScoreProfile",
+                     "ScoreRequest", "ScoreRun", "ScoreTraceEvent"):
+            self.assertIn(name, bundle["$defs"])
+            self.assertTrue(list(EXAMPLES.glob(f"{name}.*.json")) or name in ("ScoreStage", "ScoreRole"), name)
+        self.assertIn("score", bundle["$defs"]["CostRecord"]["properties"]["kind"]["enum"])
+        self.assertEqual(validate("CostRecord", ex("CostRecord.score-invented")), [])
+
     def test_require_raises(self):
         with self.assertRaises(ContractViolation):
             require("Plan", {})

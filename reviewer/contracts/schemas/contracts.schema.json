@@ -507,7 +507,8 @@
             "review",
             "chat",
             "index",
-            "eval"
+            "eval",
+            "score"
           ]
         },
         "model": {
@@ -2910,6 +2911,1077 @@
         "run-identity: id, key and rerunOf recompute from the run's fields"
       ]
     },
+    "ScoreDedup": {
+      "additionalProperties": false,
+      "description": "Groups of 0-based candidate indices judged duplicates. Partition checks are local.",
+      "properties": {
+        "groups": {
+          "items": {
+            "items": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "maxItems": 1000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        }
+      },
+      "required": [
+        "groups"
+      ],
+      "type": "object"
+    },
+    "ScoreExtraction": {
+      "additionalProperties": false,
+      "description": "Candidate findings extracted from one tool's review. text is required data and is kept exactly as supplied, including whitespace-only non-empty strings.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "sourceCommentId": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 100000,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "sourceCommentId",
+              "text"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "ScorePair": {
+      "additionalProperties": false,
+      "description": "One gold/candidate judgment; confidence is a finite number, not clamped.",
+      "properties": {
+        "confidence": {
+          "type": "number"
+        },
+        "match": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "match",
+        "confidence"
+      ],
+      "type": "object"
+    },
+    "ScoreProfile": {
+      "additionalProperties": false,
+      "description": "Immutable; referenced as '<id>@<version>'. Exactly the three score roles, one model, zero retries/repairs, priced, no fallbacks. Not a ModelProfile: it cannot be used for review.",
+      "properties": {
+        "id": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "roles": {
+          "additionalProperties": false,
+          "properties": {
+            "deduper": {
+              "additionalProperties": false,
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "const": 0
+                    },
+                    "maxRetries": {
+                      "const": 0
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "const": "anthropic"
+                },
+                "model": {
+                  "enum": [
+                    "anthropic/claude-opus-5.5"
+                  ]
+                },
+                "outputSchema": {
+                  "const": "ScoreDedup"
+                },
+                "params": {},
+                "price": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cacheWriteInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "cachedInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "inputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "outputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "priceVersion": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "priceVersion",
+                    "inputPerMTokUsdMicros",
+                    "cachedInputPerMTokUsdMicros",
+                    "cacheWriteInputPerMTokUsdMicros",
+                    "outputPerMTokUsdMicros"
+                  ],
+                  "type": "object"
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "const": "anthropic"
+                },
+                "resolved": {
+                  "const": true
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "score-model: the one explicit score model; no alias, no dev-only model"
+              ]
+            },
+            "extractor": {
+              "additionalProperties": false,
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "const": 0
+                    },
+                    "maxRetries": {
+                      "const": 0
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "const": "anthropic"
+                },
+                "model": {
+                  "enum": [
+                    "anthropic/claude-opus-5.5"
+                  ]
+                },
+                "outputSchema": {
+                  "const": "ScoreExtraction"
+                },
+                "params": {},
+                "price": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cacheWriteInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "cachedInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "inputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "outputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "priceVersion": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "priceVersion",
+                    "inputPerMTokUsdMicros",
+                    "cachedInputPerMTokUsdMicros",
+                    "cacheWriteInputPerMTokUsdMicros",
+                    "outputPerMTokUsdMicros"
+                  ],
+                  "type": "object"
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "const": "anthropic"
+                },
+                "resolved": {
+                  "const": true
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "score-model: the one explicit score model; no alias, no dev-only model"
+              ]
+            },
+            "matcher": {
+              "additionalProperties": false,
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "const": 0
+                    },
+                    "maxRetries": {
+                      "const": 0
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "const": "anthropic"
+                },
+                "model": {
+                  "enum": [
+                    "anthropic/claude-opus-5.5"
+                  ]
+                },
+                "outputSchema": {
+                  "const": "ScorePair"
+                },
+                "params": {},
+                "price": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "cacheWriteInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "cachedInputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "inputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "outputPerMTokUsdMicros": {
+                      "maximum": 1000000000000,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "priceVersion": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "priceVersion",
+                    "inputPerMTokUsdMicros",
+                    "cachedInputPerMTokUsdMicros",
+                    "cacheWriteInputPerMTokUsdMicros",
+                    "outputPerMTokUsdMicros"
+                  ],
+                  "type": "object"
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "const": "anthropic"
+                },
+                "resolved": {
+                  "const": true
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "score-model: the one explicit score model; no alias, no dev-only model"
+              ]
+            }
+          },
+          "required": [
+            "extractor",
+            "deduper",
+            "matcher"
+          ],
+          "type": "object"
+        },
+        "version": {
+          "maximum": 999999,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "roles"
+      ],
+      "type": "object"
+    },
+    "ScoreRequest": {
+      "additionalProperties": false,
+      "description": "Redacted before hashing; score_request_hash(request) is the strict-replay key. Closed and typed: no field carries a run/eval id or timestamp (host metadata is kept out by construction), no tools, no hop/hypothesis fields. Distinct from ModelRequest, which it never validates as, and vice versa.",
+      "properties": {
+        "messages": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "maxLength": 2000000,
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "system",
+                  "user",
+                  "assistant",
+                  "tool"
+                ]
+              }
+            },
+            "required": [
+              "role",
+              "content"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "type": "array"
+        },
+        "model": {
+          "enum": [
+            "anthropic/claude-opus-5.5"
+          ]
+        },
+        "outputSchema": {
+          "enum": [
+            "ScoreExtraction",
+            "ScoreDedup",
+            "ScorePair"
+          ]
+        },
+        "params": {},
+        "profile": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+          "type": "string"
+        },
+        "promptVersion": {
+          "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+          "type": "string"
+        },
+        "provider": {
+          "const": "anthropic"
+        },
+        "role": {
+          "enum": [
+            "extractor",
+            "deduper",
+            "matcher"
+          ]
+        },
+        "tools": {
+          "items": {},
+          "maxItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "profile",
+        "role",
+        "promptVersion",
+        "outputSchema",
+        "params",
+        "messages",
+        "tools"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "score-role-schema: each score role requests its own output schema",
+        "no-secrets: persisted ScoreRequest contains no protected text (redact first)"
+      ]
+    },
+    "ScoreRole": {
+      "enum": [
+        "extractor",
+        "deduper",
+        "matcher"
+      ]
+    },
+    "ScoreRun": {
+      "additionalProperties": false,
+      "description": "id is run_<16 hex> (so CostRecord.runId fits) but derived by canonical.score_run_id, never run_id. inputDigest digests the external store's rendered inputs, never text. A strict replay uses a fresh evalRunId, hence a different id, with replayOf pinned. No repo, snapshot, trigger, PR or prompt fields.",
+      "properties": {
+        "endedAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "error": {
+          "$ref": "#/$defs/TypedError"
+        },
+        "evalCaseId": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+          "type": "string"
+        },
+        "evalRunId": {
+          "pattern": "^(?:evr_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "family": {
+          "const": "score"
+        },
+        "id": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "incomplete": {
+          "items": {
+            "additionalProperties": false,
+            "description": "What did not finish. No free text: a reason class only.",
+            "properties": {
+              "reason": {
+                "enum": [
+                  "budget",
+                  "provider-failure",
+                  "extraction-invalid",
+                  "dedup-invalid",
+                  "oversize",
+                  "unsent",
+                  "cancelled",
+                  "guard"
+                ]
+              },
+              "stage": {
+                "$ref": "#/$defs/ScoreStage"
+              }
+            },
+            "required": [
+              "stage",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "inputDigest": {
+          "pattern": "^(?:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "live",
+            "strict-replay"
+          ]
+        },
+        "profile": {
+          "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+          "type": "string"
+        },
+        "repeat": {
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replayOf": {
+          "pattern": "^(?:run_[0-9a-f]{16})$",
+          "type": "string"
+        },
+        "schema": {
+          "const": "score-run@1"
+        },
+        "spendAuthorization": {
+          "pattern": "^(?:sha256:[0-9a-f]{64})$",
+          "type": "string"
+        },
+        "startedAt": {
+          "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "partial",
+            "superseded",
+            "cancelled",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "id",
+        "family",
+        "evalRunId",
+        "evalCaseId",
+        "repeat",
+        "profile",
+        "mode",
+        "inputDigest",
+        "status",
+        "incomplete"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "score-run-rules: mode, authorization, replay and status rules",
+        "score-run-identity: id = score_run_id(evalRunId, evalCaseId, repeat)"
+      ]
+    },
+    "ScoreStage": {
+      "enum": [
+        "EXTRACT",
+        "DEDUP",
+        "MATCH"
+      ]
+    },
+    "ScoreTraceEvent": {
+      "description": "One JSON object per line in a score trace. Whole-file rules: scoring_family.validate_score_trace. The review TraceEvent changes only by its cost variant refusing kind=score.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "run": {
+              "$ref": "#/$defs/ScoreRun"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "score.run.start"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "run"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "$ref": "#/$defs/ScoreStage"
+            },
+            "type": {
+              "const": "score.stage.start"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "artifactDigest": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "$ref": "#/$defs/ScoreStage"
+            },
+            "status": {
+              "enum": [
+                "completed",
+                "partial",
+                "skipped",
+                "failed"
+              ]
+            },
+            "type": {
+              "const": "score.stage.end"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "status"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "score-stage-error: no review Stage on the error",
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "attempt": {
+              "maximum": 0,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "callId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "costRecordId": {
+              "pattern": "^(?:cost_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "latencyMs": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ordinal": {
+              "maximum": 1000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "redactions": {
+              "description": "map patternId -> count applied before persistence"
+            },
+            "request": {
+              "$ref": "#/$defs/ScoreRequest"
+            },
+            "requestHash": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/ModelResponse"
+                }
+              ]
+            },
+            "role": {
+              "$ref": "#/$defs/ScoreRole"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "$ref": "#/$defs/ScoreStage"
+            },
+            "type": {
+              "const": "score.model.call"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "callId",
+            "stage",
+            "role",
+            "agentId",
+            "ordinal",
+            "attempt",
+            "requestHash",
+            "request",
+            "response",
+            "costRecordId",
+            "redactions"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "score-call-outcome: response xor error; callId, requestHash and costRecordId recompute from the payload; request role/schema and stage match the event role; the error omits stage",
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "record": {
+              "$ref": "#/$defs/CostRecord"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "cost"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "record"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "score-cost-kind: only score costs",
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "error": {
+              "$ref": "#/$defs/TypedError"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": {
+              "const": "error"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "error"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "score-error: no review Stage on the error",
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "incomplete": {
+              "items": {
+                "additionalProperties": false,
+                "description": "What did not finish. No free text: a reason class only.",
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "budget",
+                      "provider-failure",
+                      "extraction-invalid",
+                      "dedup-invalid",
+                      "oversize",
+                      "unsent",
+                      "cancelled",
+                      "guard"
+                    ]
+                  },
+                  "stage": {
+                    "$ref": "#/$defs/ScoreStage"
+                  }
+                },
+                "required": [
+                  "stage",
+                  "reason"
+                ],
+                "type": "object"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "score-trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "enum": [
+                "queued",
+                "running",
+                "completed",
+                "partial",
+                "superseded",
+                "cancelled",
+                "failed"
+              ]
+            },
+            "type": {
+              "const": "score.run.end"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "status",
+            "incomplete"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "no-secrets: persisted ScoreTraceEvent contains no protected text (redact first)"
+          ]
+        }
+      ]
+    },
     "Severity": {
       "description": "P0 ships a bug/security hole; P1 likely bug; P2 worthwhile improvement. Ceilings are executable in severity.py.",
       "enum": [
@@ -4055,6 +5127,7 @@
           ],
           "type": "object",
           "x-invariants": [
+            "review-cost-kind: a review trace carries no score cost (kind=score belongs to the score family)",
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },
@@ -4496,7 +5569,7 @@
       ]
     }
   },
-  "$id": "reviewer-contracts-s0a-contracts@6",
+  "$id": "reviewer-contracts-s0a-contracts@7",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Generated from reviewer/contracts/entities.py; do not edit by hand. The Python validator is authoritative and stricter than this bundle: (1) x-invariants (cross-field rules) are enforced only in Python; (2) Python rejects integer-valued floats such as 1.0 where JSON Schema 'integer' accepts them; (3) nesting depth (64), node/size limits, duplicate keys and lone surrogates cannot be expressed here; use reviewer.contracts.loads_strict; (4) every pattern uses the Python/ECMA-262 common subset ([0-9], no \\d) and is anchored with ^(?:...)$, while Python uses fullmatch. Canonical hashes are recomputed only by Python (see canonical.py).",
   "title": "Reviewer Stage 0A contracts"
