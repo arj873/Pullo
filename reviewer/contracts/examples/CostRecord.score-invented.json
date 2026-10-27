@@ -1,0 +1,22 @@
+{
+  "basis": "estimated",
+  "callId": "call_9357872cd6ee01d3",
+  "evalCaseId": "u000-t00",
+  "evalRunId": "evr_1111111111111111",
+  "id": "cost_f9718b7597615e42",
+  "kind": "score",
+  "model": "anthropic/claude-opus-5.5",
+  "priceVersion": "invented-catalog@0",
+  "provider": "anthropic",
+  "reservedUsdMicros": 1500,
+  "role": "matcher",
+  "runId": "run_11db08e69129356c",
+  "usage": {
+    "cacheWriteInputTokens": 0,
+    "cachedInputTokens": 0,
+    "outputTokens": 12,
+    "reasoningTokens": null,
+    "uncachedInputTokens": 120
+  },
+  "usdMicros": 900
+}

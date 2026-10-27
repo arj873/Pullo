@@ -1123,6 +1123,22 @@ ModelResponse = define("ModelResponse", Obj(
 
 def _cost_ok(d):
     k = d["kind"]
+    if k == "score":
+        # score family (scoring_family.py): attribution is by call and role; the review Stage enum is not used
+        from .scoring_family import SCORE_ROLES
+        missing = [x for x in ("runId", "evalRunId", "evalCaseId", "callId") if x not in d]
+        if missing:
+            yield "", "score costs carry runId, evalRunId, evalCaseId and callId"
+        if "stage" in d:
+            yield ".stage", "score costs omit stage (a review Stage); the score model call names role and stage"
+        if "toolCallId" in d:
+            yield ".toolCallId", "a score cost covers a model call"
+        if d.get("role") not in SCORE_ROLES:
+            yield ".role", f"a score cost names one of {list(SCORE_ROLES)}"
+        if "retryOf" in d:
+            yield ".retryOf", "score calls are never retried"
+        if "callId" in d and d["id"] != cost_id(d["callId"]):
+            yield ".id", "must equal cost_id(callId)"
     if k in ("review", "chat") and "runId" not in d:
         yield ".runId", f"{k} costs attach to a ReviewRun"
     if k == "eval" and not all(x in d for x in ("runId", "evalRunId", "evalCaseId")):
@@ -1139,6 +1155,8 @@ def _cost_ok(d):
     if b == "synthetic" and d.get("provider") not in (None, "synthetic"):
         yield ".provider", "synthetic basis only for the synthetic provider"
     subjects = [d[x] for x in ("callId", "toolCallId") if x in d]
+    if k == "score":
+        return
     if len(subjects) > 1:
         yield "", "a CostRecord covers one call"
     elif subjects and d["id"] != cost_id(subjects[0]):
@@ -1148,7 +1166,7 @@ def _cost_ok(d):
 
 
 CostRecord = define("CostRecord", Obj(
-    required={"id": Id("cost"), "kind": Enum("review", "chat", "index", "eval"),
+    required={"id": Id("cost"), "kind": Enum("review", "chat", "index", "eval", "score"),
               "basis": Enum("measured", "estimated", "unknown", "replayed", "synthetic"),
               "usage": Usage, "usdMicros": Nullable(UsdMicros),
               "reservedUsdMicros": UsdMicros, "priceVersion": Nullable(Str(min_len=1, max_len=64))},
@@ -1206,6 +1224,11 @@ def _tool_call_ok(d):
         yield ".costRecordId", "must equal cost_id(toolCallId)"
 
 
+def _review_cost_event_ok(d):
+    if d["record"]["kind"] == "score":
+        yield ".record.kind", "a review trace carries no score cost"
+
+
 TraceEvent = define("TraceEvent", Union("type", {
     "run.start": _event("run.start", {"run": ReviewRun}),
     "stage.start": _event("stage.start", {"stage": Stage}),
@@ -1228,7 +1251,9 @@ TraceEvent = define("TraceEvent", Union("type", {
          "requestIndex": Int(0, MAX_TURN_REQUESTS - 1)},
         [Invariant("tool-identity", "toolCallId, resultHash and costRecordId recompute from the "
                    "payload; requestedBy and requestIndex come together", _tool_call_ok)]),
-    "cost": _event("cost", {"record": CostRecord}),
+    "cost": _event("cost", {"record": CostRecord},
+                   invariants=[Invariant("review-cost-kind", "a review trace carries no score cost (kind=score "
+                                         "belongs to the score family)", _review_cost_event_ok)]),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
     "error": _event("error", {"error": TypedError}),
@@ -1529,5 +1554,7 @@ EvalReport = define("EvalReport", Obj(
                 "null if P or R is null and 0 if P+R=0. Real-PR datasets are unscored "
                 "(unadjudicated@1): metrics null with reason. Never a parity claim.",
 ))
+
+from . import scoring_family as _scoring_family  # noqa: E402,F401  (registers the isolated score family)
 
 ENTITY_NAMES = tuple(sorted(REGISTRY))

@@ -1,0 +1,15 @@
+{
+  "evalCaseId": "u000-t00",
+  "evalRunId": "evr_1111111111111111",
+  "family": "score",
+  "id": "run_11db08e69129356c",
+  "incomplete": [],
+  "inputDigest": "sha256:8e4d318ce3bbe31ba87b65f67158c479ba6c8febc42ca41bd85c2418d383a76b",
+  "mode": "live",
+  "profile": "score-invented@1",
+  "repeat": 0,
+  "schema": "score-run@1",
+  "spendAuthorization": "sha256:bb6f5cd8815e01e13ea5a96fa71eb48e9811457d4611dc812b44487c492641ed",
+  "startedAt": "2026-01-01T00:00:00Z",
+  "status": "running"
+}

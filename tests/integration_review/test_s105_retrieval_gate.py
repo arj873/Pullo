@@ -525,7 +525,7 @@ class Identity(S105):
         self.assertNotIn("legacy_baseline", inspect.signature(HostConfig).parameters)
         self.assertFalse(hasattr(pidentity, "LEGACY_BASELINES"))
         self.assertEqual(inspect.signature(engine_identity).parameters, {})
-        self.assertTrue(engine_identity()["contracts"].endswith("@6"))
+        self.assertTrue(engine_identity()["contracts"].endswith("@7"))
 
     def test_CONTROL_tightened_limits_change_the_config_identity(self):
         m = self.case()

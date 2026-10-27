@@ -107,6 +107,11 @@ COMPARE_IGNORE: dict[str, frozenset[str]] = {
     "EvalReport": frozenset({"evalRunId", "replayOf", "createdAt", "mode", "cost", "latency",
                              "limitations"}),
     "CaseResult": frozenset({"runId", "latencyMs"}),
+    # score family (scoring_family.py): run-level identity/mode/timing only on ScoreRun; per-event envelope
+    # fields only on ScoreTraceEvent. Everything else (family, evalCaseId, repeat, profile, inputDigest, status,
+    # incomplete, requests, responses, stages) is compared.
+    "ScoreRun": frozenset({"id", "mode", "evalRunId", "replayOf", "spendAuthorization", "startedAt", "endedAt"}),
+    "ScoreTraceEvent": frozenset({"runId", "at", "latencyMs"}),
 }
 _NESTED: dict[str, dict[str, str]] = {
     "TraceEvent": {"run": "ReviewRun", "record": "CostRecord"},
@@ -114,9 +119,11 @@ _NESTED: dict[str, dict[str, str]] = {
     "StagePayload": {"run": "ReviewRun", "hypotheses": "Hypothesis[]", "findings": "Finding[]",
                      "comments": "Comment[]"},
     "EvalReport": {"cases": "CaseResult[]"},
+    "ScoreTraceEvent": {"run": "ScoreRun", "record": "CostRecord"},
 }
 _SCHEMA_TAGS = {"trace-event@1": "TraceEvent", "stage-artifact@1": "StageArtifact",
-                "eval-report@1": "EvalReport"}
+                "eval-report@1": "EvalReport", "score-trace-event@1": "ScoreTraceEvent",
+                "score-run@1": "ScoreRun"}
 
 
 def entity_of(doc: Any) -> str | None:
@@ -259,6 +266,27 @@ def tool_call_id(stage: str, agent_id: str, ordinal: int, tool: str, args: Any) 
 
 def cost_id(subject_id: str) -> str:
     return derive_id("cost", subject_id)
+
+
+# ---------------------------------------------------------------- score family identity
+
+def score_run_id(eval_run_id: str, eval_case_id: str, repeat: int) -> str:
+    """ScoreRun.id. Derived from (evalRunId, evalCaseId, repeat) under the tag "score-run", so it can never equal a
+    review run_id (derive_id("run", idempotency_key, attempt) has two parts, this has four). A strict replay must
+    use a FRESH evalRunId, hence a different run id: the replay runs under another id and must reproduce the
+    recorded request hashes (D6 leak catch) and the recorded ScoreRun differs only in the ScoreRun ignore set."""
+    return derive_id("run", "score-run", eval_run_id, eval_case_id, repeat)
+
+
+def score_request_hash(request: dict) -> str:
+    """Strict-replay key for a ScoreRequest; separate from request_hash (hard-wired to ModelRequest). Rejects
+    (ValueError) requests that are invalid or still contain protected text."""
+    from .redaction import contains_protected
+    from .schema import require
+    require("ScoreRequest", request)
+    if contains_protected(canonical_json(request).decode("utf-8")):
+        raise ValueError("request contains protected text; redact before hashing")
+    return digest(request)
 
 
 def comment_fingerprint(category: str, path: str, anchor_text: str, claim: str,
