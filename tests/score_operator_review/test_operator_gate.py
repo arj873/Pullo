@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import stat
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +15,14 @@ from reviewer import score_host as H
 from reviewer import score_host_cli as C
 from reviewer.score_baseline import sha256_hex
 from tests.score_host_operator.test_operator import EVR, SENT, Fixture, NOW
+
+ROOT = Path(__file__).resolve().parents[2]
+# Fresh interpreter (-I -B, empty env): runs the actual CLI PLAN, then reports which review-pipeline/tools modules got loaded.
+# Isolated from whatever the parent test process (e.g. full discovery) already imported.
+PLAN_IMPORTS = ("import sys, io, json; sys.path.insert(0, %r); from reviewer.score_host_cli import main\n"
+                "rc = main(sys.argv[1:], out=io.StringIO(), now=%r)\n"
+                "bad = sorted(n for n in sys.modules if n in ('reviewer.pipeline', 'reviewer.tools') or n.startswith(('reviewer.pipeline.', 'reviewer.tools.')))\n"
+                "print(json.dumps({'rc': rc, 'bad': bad}))\n") % (str(ROOT), NOW)
 
 
 class Positive(Fixture):
@@ -33,8 +42,13 @@ class Positive(Fixture):
         self.op("plan")
         for p in (self.tmp / "out").iterdir():
             self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
-        for m in ("reviewer.pipeline", "reviewer.tools"):
-            self.assertNotIn(m, sys.modules)
+        base = self.write_baseline()
+        args = ["plan", "--config", str(self.config), "--baseline", str(base), "--store", str(self.tmp / "child-out")]
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", PLAN_IMPORTS, *args], cwd=self.tmp, env={}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr[-300:])
+        child = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(child, {"rc": 0, "bad": []})            # the child's plan really ran, and imported neither pipeline nor tools
+        self.assertTrue(list((self.tmp / "child-out").iterdir()))
 
     def test_budget_constants_pinned(self):
         from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
