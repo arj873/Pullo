@@ -31,6 +31,8 @@ from pathlib import Path
 
 from reviewer.contracts.redaction import redact_json
 
+from .scoring_budget import CATEGORIES, DEFAULT_CATEGORY, validate_admission
+
 MAX_LOG_BYTES = 32 << 20
 SAFE_KEYS = frozenset({
     "type", "at", "callKey", "kind", "model", "resolvedModel", "resolvedModelSource", "generationId",
@@ -107,12 +109,20 @@ def accountable_cost(f: dict, worst: int) -> tuple[int, str]:
     return cost, basis
 
 
+def _intent_category(intent: dict) -> str:
+    c = intent.get("category", DEFAULT_CATEGORY)
+    if type(c) is not str or c not in CATEGORIES:
+        raise ValueError("ledger holds an intent with an unknown category; refusing")
+    return c
+
+
 class RuntimeLedger:
     def __init__(self, path, cap_usd_micros: int, *, clock=_now):
         if type(cap_usd_micros) is not int or cap_usd_micros < 1:
             raise ValueError("cap must be a positive integer of USD micros")
         self.path, self.cap, self._clock = Path(path), cap_usd_micros, clock
         self._lock = threading.Lock()
+        self._owned: dict[str, int] = {}     # scoring call key -> pid of the live admission in THIS instance
 
     def _txn(self, fn):
         with self._lock:
@@ -133,14 +143,19 @@ class RuntimeLedger:
                 os.close(fd)
 
     @staticmethod
-    def _tally(rows) -> dict:
+    def _tally(rows, category=None) -> dict:
         """Replays every row, old or new, through `accountable_cost` (rows written before the BYOK fix carry no
         `isByok`/`accountable*` fields and are re-derived from their raw facts). A `reconcile` row overlays the
-        authoritative generation facts for its call key; nothing is ever rewritten."""
+        authoritative generation facts for its call key; nothing is ever rewritten.
+
+        `category` (None = every call, the legacy shape) keeps only intents of that category. An intent without a
+        `category` is a legacy review row; an unrecognised stored category fails closed when filtering."""
         intents, results, recon = {}, {}, {}
         for r in rows:
             t = r["type"]
             (intents if t == "intent" else results if t == "result" else recon if t == "reconcile" else {})[r.get("callKey")] = r
+        if category is not None:
+            intents = {k: i for k, i in intents.items() if _intent_category(i) == category}
         known = estimated = unknown = router_sum = upstream_sum = 0
         for k, i in intents.items():
             res = results.get(k)
@@ -167,29 +182,78 @@ class RuntimeLedger:
     def _committed(t: dict) -> int:
         return t["knownUsdMicros"] + t["estimatedUsdMicros"] + t["unknownBoundUsdMicros"]
 
-    def totals(self) -> dict:
-        t = self._txn(lambda rows: (self._tally(rows), []))
-        return {**t, "capUsdMicros": self.cap, "committedUsdMicros": self._committed(t)}
+    def totals(self, category=None) -> dict:
+        """Default (category None) is the legacy all-calls shape. A category filter adds a `category` key."""
+        if category is not None and (type(category) is not str or category not in CATEGORIES):
+            raise ValueError("unknown ledger category")
+        t = self._txn(lambda rows: (self._tally(rows, category), []))
+        out = {**t, "capUsdMicros": self.cap, "committedUsdMicros": self._committed(t)}
+        return out if category is None else {**out, "category": category}
 
-    def admit(self, call_key: str, worst_case: int, *, model: str) -> dict | None:
-        """Atomically record intent; None = admitted, else a refusal detail dict (nothing was sent)."""
+    def scoring_startup_hold(self) -> dict | None:
+        """Read-only startup guard for a NEW scoring process. None = no prior unresolved scoring exposure; else a
+        fixed dict. Unresolved = a scoring intent with no result row, or a scoring call whose cost is still unknown
+        (e.g. outcome `unknown`) or only ESTIMATED (unverifiable-zero, byok-upstream-missing, suspect-floored), and not overlaid by a reconcile row. Resolved/reconciled costs and review exposure
+        never hold. Never mutates (a missing ledger file is not created) and never releases or edits anything;
+        an unreadable ledger or unrecognised stored category also holds (fail closed)."""
+        if not os.path.lexists(self.path):
+            return None
+        try:
+            t = self.totals("scoring")
+        except (ValueError, OSError):
+            return {"reason": "scoring-ledger-unreadable"}
+        return {"reason": "prior-unresolved-scoring-exposure"} if t["unknownBoundUsdMicros"] + t["estimatedUsdMicros"] > 0 else None
+
+    def admit(self, call_key: str, worst_case: int, *, model: str, category: str = DEFAULT_CATEGORY,
+              category_cap: int | None = None, aggregate_ceiling: int | None = None) -> dict | None:
+        """Atomically record intent; None = admitted, else a refusal detail dict (nothing was sent).
+
+        Review (default) is the legacy admission. Scoring needs both trusted caps (validated before any file
+        access): `scoring-campaign-cap` when scoring committed + worst > category_cap, `review-reserve` when
+        all-category committed + worst > aggregate_ceiling, plus the unchanged runtime cap and duplicate check, all
+        inside one flock transaction. The category is stored on the intent, so a crashed or in-flight call stays in it."""
+        if type(worst_case) is not int or worst_case < 0:
+            raise ValueError("worst_case must be a non-negative integer of USD micros")
+        validate_admission(category, category_cap, aggregate_ceiling)
+
         def f(rows):
             t = self._tally(rows)
             used = self._committed(t)
             if used + worst_case > self.cap:
                 return {"reason": "runtime-aggregate-cap", "wouldReach": used + worst_case, "limit": self.cap}, []
+            if category == "scoring":
+                sc = self._committed(self._tally(rows, "scoring"))
+                if sc + worst_case > category_cap:
+                    return {"reason": "scoring-campaign-cap", "wouldReach": sc + worst_case, "limit": category_cap}, []
+                if used + worst_case > aggregate_ceiling:
+                    return {"reason": "review-reserve", "wouldReach": used + worst_case, "limit": aggregate_ceiling}, []
             if any(r["type"] == "intent" and r["callKey"] == call_key for r in rows):
                 return {"reason": "duplicate-call-key"}, []
-            return None, [{"type": "intent", "at": self._clock(), "callKey": call_key, "model": model,
-                           "worstCaseUsdMicros": worst_case}]
-        return self._txn(f)
+            row = {"type": "intent", "at": self._clock(), "callKey": call_key, "model": model,
+                   "worstCaseUsdMicros": worst_case}
+            if category != DEFAULT_CATEGORY:
+                row["category"] = category           # review rows stay byte-identical to the legacy shape
+            return None, [row]
+        res = self._txn(f)
+        if res is None and category == "scoring":
+            self._owned[call_key] = os.getpid()      # trusted live admission by this instance in this process
+        return res
 
     def finish(self, call_key: str, **fields) -> None:
         bad = set(fields) - SAFE_KEYS
         if bad:
             raise ValueError(f"unsafe receipt fields: {sorted(bad)}")
         row, _ = redact_json({"type": "result", "at": self._clock(), "callKey": call_key, **fields})
-        self._txn(lambda rows: (None, [row]))
+
+        def f(rows):
+            intent = next((r for r in reversed(rows) if r["type"] == "intent" and r.get("callKey") == call_key), None)
+            if intent is not None and intent.get("category") == "scoring":      # review keeps the legacy rules
+                if any(r["type"] == "result" and r.get("callKey") == call_key for r in rows):
+                    raise ValueError("a scoring call already has a result; it cannot be overwritten")
+                if self._owned.get(call_key) != os.getpid():
+                    raise ValueError("a scoring result needs the live admission of this ledger instance")
+            return None, [row]
+        self._txn(f)
 
     def note(self, **fields) -> None:
         """Append a non-call receipt (e.g. key status snapshots)."""
