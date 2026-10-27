@@ -10,7 +10,8 @@ from .codex_cli import CodexTerraProvider, check_cli_isolation
 from .envfile import EnvFileError, Secret, load_openrouter_key
 from .openrouter import OpenRouterProvider
 from .receipts import RuntimeLedger, accountable_cost
+from .scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX, validate_admission
 
 __all__ = ["ALLOWED_ROUTER_MODELS", "CodexTerraProvider", "EnvFileError", "OpenRouterProvider", "PRICE_VERSION",
-           "RuntimeLedger", "Secret", "accountable_cost", "TERRA_MODEL", "TRIAL_TOTAL_USD_MICROS", "check_cli_isolation",
-           "load_openrouter_key"]
+           "RuntimeLedger", "SCORING_AGGREGATE_CEILING_MAX", "SCORING_CATEGORY_CAP_MAX", "Secret", "accountable_cost", "TERRA_MODEL", "TRIAL_TOTAL_USD_MICROS", "check_cli_isolation",
+           "load_openrouter_key", "validate_admission"]

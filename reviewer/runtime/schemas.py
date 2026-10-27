@@ -8,13 +8,16 @@ from __future__ import annotations
 import copy
 import json
 
-from reviewer.contracts import export_bundle, is_turn_schema, validate
+from reviewer.contracts import SCORE_ROLE_SCHEMA, export_bundle, is_turn_schema, validate
 from reviewer.contracts.entities import ROLE_SCHEMAS
 
 PROJECTION_VERSION = "role-schema-projection@2"
 _STRIP = frozenset({"minLength", "maxLength", "minimum", "maximum", "pattern", "uniqueItems", "minItems",
                     "maxItems", "maxProperties", "propertyNames", "x-invariants", "format"})
-SCHEMA_NAMES = tuple(n for names in ROLE_SCHEMAS.values() for n in names)
+SCHEMA_NAMES = tuple(n for names in ROLE_SCHEMAS.values() for n in names)      # review family (legacy projections)
+SCORE_SCHEMA_NAMES = tuple(SCORE_ROLE_SCHEMA.values())                            # score family: ScoreExtraction/Dedup/Pair
+ALL_SCHEMA_NAMES = SCHEMA_NAMES + SCORE_SCHEMA_NAMES
+FAMILY_ROLE_SCHEMAS = {"review": dict(ROLE_SCHEMAS), "score": {r: (n,) for r, n in SCORE_ROLE_SCHEMA.items()}}
 _DEFS = export_bundle("runtime")["$defs"]
 
 
@@ -31,12 +34,21 @@ def _inline(node, seen=()):
     return {k: _inline(v, seen) for k, v in node.items()}
 
 
-def select_schema(request) -> str | None:
-    """The schema a request asks for: request.outputSchema, legal only for its role (ROLE_SCHEMAS). Never coerced."""
-    if not isinstance(request, dict):
+def select_schema(request, family: str = "review") -> str | None:
+    """The schema a request asks for: request.outputSchema, legal only for its role in `family` (default review:
+    ROLE_SCHEMAS; "score": SCORE_ROLE_SCHEMA). Never coerced; a role of the other family yields None."""
+    if not isinstance(request, dict) or family not in FAMILY_ROLE_SCHEMAS:
         return None
     role, name = request.get("role"), request.get("outputSchema")
-    return name if isinstance(role, str) and isinstance(name, str) and name in ROLE_SCHEMAS.get(role, ()) else None
+    return name if isinstance(role, str) and isinstance(name, str) and name in FAMILY_ROLE_SCHEMAS[family].get(role, ()) else None
+
+
+def request_family(request) -> str | None:
+    """'score' / 'review' from the request ROLE (never from params); None for a role of neither family."""
+    role = request.get("role") if isinstance(request, dict) else None
+    if not isinstance(role, str):
+        return None
+    return "score" if role in FAMILY_ROLE_SCHEMAS["score"] else "review" if role in FAMILY_ROLE_SCHEMAS["review"] else None
 
 
 def _is_map(node) -> bool:
@@ -46,7 +58,7 @@ def _is_map(node) -> bool:
 
 def original(output_schema: str) -> dict:
     """The authoritative role schema with $refs inlined (still carries every constraint)."""
-    if output_schema not in SCHEMA_NAMES:
+    if output_schema not in ALL_SCHEMA_NAMES:
         raise KeyError(output_schema)
     return _inline(_DEFS[output_schema])
 
@@ -156,4 +168,9 @@ def schema_bytes(output_schema: str, flavor: str) -> bytes:
 
 def projection_snapshot() -> dict:
     return copy.deepcopy({f"{n}/{f}": provider_schema(n, f) for n in SCHEMA_NAMES
+                          for f in ("anthropic", "openai-strict")})
+
+
+def score_projection_snapshot() -> dict:
+    return copy.deepcopy({f"{n}/{f}": provider_schema(n, f) for n in SCORE_SCHEMA_NAMES
                           for f in ("anthropic", "openai-strict")})

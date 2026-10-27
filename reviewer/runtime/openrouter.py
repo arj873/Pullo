@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from reviewer.contracts import is_turn_schema
+from reviewer.contracts import SCORE_MODELS, is_turn_schema
 from reviewer.contracts.redaction import redact
 from reviewer.gateway.auth import AuthorizationHandle
 from reviewer.gateway.errors import AuthorizationError, typed_error
@@ -28,6 +28,7 @@ from . import schemas
 from .catalog import (ALLOWED_ROUTER_MODELS, PRICE_VERSION, TRIAL_TOTAL_USD_MICROS, token_priced_micros,
                       worst_case_router_micros)
 from .envfile import Secret
+from .scoring_budget import DEFAULT_CATEGORY, validate_admission
 from .receipts import RuntimeLedger, accountable_cost, make_scope, micros_from_usd_text, ESTIMATED_BASES
 
 HOST = "openrouter.ai"
@@ -242,9 +243,14 @@ class OpenRouterProvider:
     name = "anthropic"
 
     def __init__(self, *, enabled: bool, key: Secret, authorization: AuthorizationHandle, book, ledger: RuntimeLedger,
-                 transport=None, default_timeout_sec: int = DEFAULT_TIMEOUT_SEC, run_scope: str | None = None):
+                 transport=None, default_timeout_sec: int = DEFAULT_TIMEOUT_SEC, run_scope: str | None = None,
+                 category: str = DEFAULT_CATEGORY, category_cap: int | None = None, aggregate_ceiling: int | None = None):
         if enabled is not True:
             raise AuthorizationError("live OpenRouter adapter requires enabled=True (opt-in)")
+        try:                       # host-pinned ledger category and caps; a scoring provider cannot omit/widen them
+            validate_admission(category, category_cap, aggregate_ceiling)
+        except ValueError as e:
+            raise AuthorizationError(str(e)) from None
         if not isinstance(key, Secret):
             raise AuthorizationError("key must be a Secret from load_openrouter_key")
         if not isinstance(authorization, AuthorizationHandle):
@@ -261,6 +267,17 @@ class OpenRouterProvider:
         self._key, self._ledger = key, ledger
         self.scope = make_scope(run_scope)     # F3: execution scope for ledger call keys; never sent to the provider
         self._models = frozenset(set(auth["models"]) & set(ALLOWED_ROUTER_MODELS))
+        self.category, self._admit_kw = category, {"category": category, "category_cap": category_cap,
+                                                  "aggregate_ceiling": aggregate_ceiling}
+        self._family = "score" if category == "scoring" else "review"
+        if self._family == "score":      # scoring runs on the allowlisted Opus route only, under this authorization
+            hold = ledger.scoring_startup_hold()     # construction is the startup boundary: before any admit or HTTP
+            if hold is not None:
+                raise AuthorizationError("scoring startup hold: prior unresolved scoring exposure in the ledger; "
+                                         "independently gated recovery required (" + hold["reason"] + ")")
+            self._models &= frozenset(SCORE_MODELS)
+            if not self._models:
+                raise AuthorizationError("authorization does not cover the allowlisted score model")
         self._transport = transport or HttpsTransport()
         self._timeout = default_timeout_sec
         self.calls = 0
@@ -292,12 +309,18 @@ class OpenRouterProvider:
         model = request.get("model")
         if model not in self._models:
             return None, {"why": "model is not in the exact authorized router allowlist"}
-        out_name = schemas.select_schema(request)      # request.outputSchema, legal for the role; Turn schemas included
+        if schemas.request_family(request) != self._family:    # family from the role, category from the host: never params
+            return None, {"why": "request family does not match this adapter's ledger category"}
+        out_name = schemas.select_schema(request, self._family)      # request.outputSchema, legal for the role; Turn schemas included
         if out_name is None:
             return None, {"why": "role/outputSchema mismatch"}
         if request.get("tools"):
             return None, {"why": "tool requests are not supported by this adapter (no native tool continuations)"}
         params = request.get("params") if isinstance(request.get("params"), dict) else {}
+        if self._family == "score":
+            if any(k in request for k in ("tool_choice", "toolChoice", "models", "route", "plugins", "provider_options")) \
+                    or any(k not in TOKEN_PARAM_KEYS and k != "timeoutSec" for k in params):
+                return None, {"why": "score requests allow no routing, fallback or extra params"}
         caps = [params[k] for k in TOKEN_PARAM_KEYS if type(params.get(k)) is int and params[k] > 0]
         if not caps:
             return None, {"why": "params must carry an explicit positive output token cap (maxOutputTokens)"}
@@ -333,7 +356,7 @@ class OpenRouterProvider:
         if len(raw) > MAX_REQUEST_BYTES:
             return self._err("provider-error", "request body exceeds the adapter bound", "not-sent", reason="request-too-large")
         worst = info["worst"] = worst_case_router_micros(body["model"], len(raw), info["maxTokens"])
-        refusal = self._ledger.admit(ck, worst, model=body["model"])
+        refusal = self._ledger.admit(ck, worst, model=body["model"], **self._admit_kw)
         if refusal is not None:
             return self._err("provider-error", "runtime aggregate trial ledger refused the call", "not-sent", **refusal)
         t0 = time.monotonic()
