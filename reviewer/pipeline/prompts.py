@@ -151,7 +151,7 @@ def verifier_request(profile, profile_ref, case: dict, hyp: dict, context: list[
 
 
 def judge_request(profile, profile_ref, case: dict, survivors: list[dict], groups: list[list[str]] | None = None,
-                  coverage: dict | None = None) -> dict:
+                  coverage: dict | None = None, *, task: str = JUDGE_TASK) -> dict:
     items = []
     for f, sev in survivors:
         items.append({"findingId": f["id"], "category": f["category"], "severity": sev, "claim": f["claim"],
@@ -160,7 +160,7 @@ def judge_request(profile, profile_ref, case: dict, survivors: list[dict], group
                       "verifierNotes": f["verification"]["notes"],
                       "evidence": [{"path": e.get("path"), "lines": e.get("lines"), "excerpt": e["excerpt"]}
                                    for e in (f["evidence"] + f["verification"]["evidence"])][:6]})
-    doc = {"task": JUDGE_TASK, "untrustedPullRequest": {"title": redact(case["pr"]["title"])[0]},
+    doc = {"task": task, "untrustedPullRequest": {"title": redact(case["pr"]["title"])[0]},
            "verifiedFindings": items, "duplicateCandidateGroups": [list(g) for g in (groups or [])],
            "answerFormat": JUDGE_FORMAT}
     if coverage is not None:        # the judge writes the user-visible wording: it must not imply a whole-repository review
@@ -297,6 +297,89 @@ def turn_request(profile, profile_ref, role: str, doc: dict, state: dict, reques
     return _request(profile, profile_ref, role, d, hypothesis_id=hypothesis_id, system=RETRIEVAL_SYSTEM,
                     turn={"hop": state["hop"], "continuationOf": state["continuationOf"],
                           "contextResults": state["contextResults"]})
+
+
+# ---------------------------------------------------------------- opt-in experiment: context-check@1
+#
+# A prompt-only arm on the EXISTING VerifierTurn / JudgeOutput schemas. It is selected only by an explicit prompt id on
+# the profile (verifier role via the retrieval policy, judge role via the profile) and is never a default. The baseline
+# TEMPLATES / RETRIEVAL_TEMPLATES above are untouched, so their digests (and every default request) are unchanged. The
+# experimental task texts are digested by experiment_task_digests() and bound into the run's config identity
+# (identity.config_snapshot_id) only when the experiment is selected. It does not make a comment audited: the
+# deterministic fallback wording (judge unavailable or rejected) is the baseline's and can repeat unverified detail.
+
+EXPERIMENT_BASELINE = "baseline"
+EXPERIMENT_CONTEXT_CHECK = "context-check@1"
+EXPERIMENTS = (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK)
+VERIFIER_CONTEXT_CHECK_PROMPT = "verifier.context-check@v1"
+JUDGE_FACT_WORDING_PROMPT = "judge.fact-wording@v1"
+
+VERIFIER_CONTEXT_CHECK_TASK = (
+    "Independently try to refute the claim below. First separate the central defect (the changed code that is wrong "
+    "and why) from the concrete explanatory details that the claim, mechanism or reach add: configuration or setting "
+    "names, who calls the code and how, derived numbers or argument counts, quoted error or exception messages, and "
+    "statements about other files, other callers or other types. Re-derive whether the central defect is real and "
+    "reachable and what its impact is. For each explanatory detail you intend to rely on or repeat in notes, check it "
+    "against the code and results you were given. When the context shown does not establish a detail that matters, "
+    "ask for the definition, caller, configuration or implementation that would (for a name that is built or defined "
+    "elsewhere, search for it) rather than assuming. Do not request context for a self-contained local defect whose "
+    "claim is fully visible in the shown code; requests that cannot change your answer are not wanted. Do not write "
+    "an exact-looking detail (a count, range, setting name or message text) in notes unless code or a result you were "
+    "shown establishes it; describe the behavior in general terms or leave the detail out. In notes, say which "
+    "details you verified, which you did not check, and what scope (callers, files, settings, configurations) or "
+    "impact you did not establish. A confirmed verdict means the central defect is supported, not that every detail "
+    "in the claim is. Confirm only with at least one exact code citation (path, lines, commit, excerpt) or a tool-ref "
+    "copied from citations.citableRefs. A search result that shows only a signature or a call site does not show "
+    "what the code does. A refutation also needs a citation you were shown; without one it counts as uncertain. "
+    "originalEvidence is the earlier investigator's claim context. Each of its `code` entries has exactly the five "
+    "fields of a code citation (kind, path, lines, commit, excerpt) and may be copied as it stands; add no other "
+    "field. Its other entries are context only and are not a template for a code citation. If you still cannot "
+    "decide after retrieval, answer uncertain and say which context you could not obtain and why. Give your final "
+    "answer in `output` and leave contextRequests empty; while you still need context, request it and leave "
+    "`output` null."
+)
+JUDGE_FACT_TASK = (
+    "Write the wording of review comments for the verified findings below. You may only reference the given "
+    "findingIds, one comment per finding. You cannot add findings, change locations or severity, or cite anything "
+    "new. The investigator's claim and mechanism are hypotheses about the change; the verifier's notes say what was "
+    "checked. A confirmed verdict is not proof of every detail, and the verifier's confidence alone is not evidence. "
+    "State as fact only the concrete mechanism that the cited evidence and the verifier's notes support. Do not add "
+    "detail that no field of the finding establishes (names, numbers, ranges, messages, other callers or files), do "
+    "not turn a hedge into a certainty, and do not describe an effect larger than the finding shows. Where the "
+    "verifier says something was not checked or not established, keep that uncertainty in plain words. Explain the "
+    "concrete issue and its impact for the pull request author. A suggestion, if any, is plain explanatory prose and "
+    "is never applied. Findings listed together in duplicateCandidateGroups merely share a location, category and "
+    "impact: that does NOT make them the same defect. Put several findingIds into ONE comment only when their claims "
+    "describe the very same defect, and then every one of those ids must come from one group; otherwise write one "
+    "comment per finding. When unsure, keep them separate."
+)
+EXPERIMENT_TASKS = {"verifier": VERIFIER_CONTEXT_CHECK_TASK, "judge": JUDGE_FACT_TASK}
+
+
+def verifier_task(prompt_version: str) -> str:
+    """The retrieval verifier task for a policy prompt id. Every id but the experiment's keeps the baseline text."""
+    return VERIFIER_CONTEXT_CHECK_TASK if prompt_version == VERIFIER_CONTEXT_CHECK_PROMPT else VERIFIER_REFUTE_TASK
+
+
+def judge_task(prompt_version: str) -> str:
+    """The judge task for a profile prompt id. Every id but the experiment's keeps the baseline text."""
+    return JUDGE_FACT_TASK if prompt_version == JUDGE_FACT_WORDING_PROMPT else JUDGE_TASK
+
+
+def experiment_task_digests() -> dict:
+    """Digests of the actual experimental task texts (what identity binds when the experiment is selected)."""
+    return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
+            for k, v in EXPERIMENT_TASKS.items()}
+
+
+def experiment_in_force(verifier_prompt: str | None, judge_prompt: str) -> str:
+    """-> the experiment id the prompt ids select. Selecting only one of the two experimental ids is incoherent and
+    raises ValueError (identity.check_retrieval_inputs turns it into a typed refusal before any call)."""
+    v = verifier_prompt == VERIFIER_CONTEXT_CHECK_PROMPT
+    j = judge_prompt == JUDGE_FACT_WORDING_PROMPT
+    if v != j:
+        raise ValueError("the context-check experiment needs both the verifier and the judge prompt id")
+    return EXPERIMENT_CONTEXT_CHECK if v else EXPERIMENT_BASELINE
 
 
 # ---------------------------------------------------------------- deterministic wording and judge checks

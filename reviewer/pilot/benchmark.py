@@ -31,7 +31,7 @@ from reviewer.historical import BridgeError
 from reviewer.historical.bridge import _check_out
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
-from reviewer.pipeline import repocov
+from reviewer.pipeline import prompts, repocov
 from reviewer.repoimport import RepoImportError, github_remote, load_import_pins, open_import, target_dir
 from reviewer.repoimport.fsio import read_nofollow
 from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_USD_MICROS, load_openrouter_key
@@ -41,7 +41,8 @@ from reviewer.runtime.turn_canary import Refused, open_state
 from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gateway_costs, ledger_costs, utc_now
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
-from .repository_profile import repository_plan, repository_policy, repository_profile
+from .profile import ProfileError
+from .repository_profile import check_experiment, repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
 CONFIG_SCHEMA = "pilot-benchmark-config@1"
@@ -110,6 +111,7 @@ class BenchmarkOptions:
     retrieval: bool = True
     repeat: int = 0
     config: str | None = None
+    experiment: str = "baseline"      # opt-in prompt arm; the default is the unchanged baseline
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,10 @@ def check_options(o: BenchmarkOptions) -> None:
     """Mode/argument consistency and path hygiene. Touches nothing on disk."""
     if o.mode not in MODES:
         raise BenchmarkLaunchError("mode must be plan, live or replay")
+    try:                                                   # an unsupported selector is refused before key/state/output
+        check_experiment(o.experiment, o.retrieval)
+    except (ProfileError, TypeError) as e:
+        raise BenchmarkLaunchError(str(e)[:200]) from None
     for name in ("case_url", "cutoff_proof", "admission", "decision", "launch_baseline", "store", "base_import_pins",
                  "head_import_pins", "out_dir"):
         if not isinstance(getattr(o, name), str) or not getattr(o, name):
@@ -485,13 +491,14 @@ def effective_config(o: BenchmarkOptions, cfg: EffectiveConfig | None = None) ->
 
 
 def _profile_parts(o: BenchmarkOptions, cfg: EffectiveConfig):
-    profile = repository_profile(o.retrieval, cfg.models)
-    return profile, repository_plan(profile), repository_policy(o.retrieval)
+    profile = repository_profile(o.retrieval, cfg.models, o.experiment)
+    return profile, repository_plan(profile), repository_policy(o.retrieval, o.experiment)
 
 
-def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retrieval: bool, cfg: EffectiveConfig) -> dict:
+def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retrieval: bool, cfg: EffectiveConfig,
+                    experiment: str = prompts.EXPERIMENT_BASELINE) -> dict:
     p = ing.proof
-    return {"schema": CONFIG_SCHEMA, "caseUrl": ing.url, "caseInputId": ing.case_id, "resolvedRepo": ing.repo,
+    ident = {"schema": CONFIG_SCHEMA, "caseUrl": ing.url, "caseInputId": ing.case_id, "resolvedRepo": ing.repo,
             "asOfBase": p["asOfBase"], "asOfHead": p["asOfHead"], "mergeBase": p["mergeBase"],
             "proofSha256": ing.hashes["proofSha256"], "admissionDigest": ing.hashes["admissionDigest"],
             "decisionSha256": ing.hashes["decisionSha256"], "launchBaselineDigest": ing.hashes["baselineDigest"],
@@ -502,6 +509,11 @@ def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retri
             "changedPaths": list(ing.changed), "profile": digest(profile), "plan": digest(plan),
             "retrievalPolicy": None if policy is None else policy.digest, "retrieval": retrieval,
             "prTextSupplied": False, "reviewModelsDigest": cfg.models.digest}
+    if experiment != prompts.EXPERIMENT_BASELINE:    # absent for the baseline => the default identity is unchanged
+        ident["experiment"] = {"id": experiment, "tasks": prompts.experiment_task_digests(),
+                               "verifierPrompt": profile["roles"]["verifier"]["promptVersion"],
+                               "judgePrompt": profile["roles"]["judge"]["promptVersion"]}
+    return ident
 
 
 def eval_run_id(o: BenchmarkOptions, ident: dict) -> str:
@@ -514,7 +526,7 @@ def eval_run_id(o: BenchmarkOptions, ident: dict) -> str:
 
 
 def build_spec(o: BenchmarkOptions, ing: BenchIngested, backend, runs: Path, profile, plan, policy, cfg) -> ReviewSpec:
-    ident = config_identity(ing, profile, plan, policy, o.retrieval, cfg)
+    ident = config_identity(ing, profile, plan, policy, o.retrieval, cfg, o.experiment)
     host = HostConfig(out_root=runs, eval=EvalIdentity(eval_run_id(o, ident), ing.case["id"], o.repeat),
                       config_identity=ident, forbidden_roots=(ing.store,), wall_clock=utc_now, retrieval=policy)
     return ReviewSpec(case=copy.deepcopy(ing.case), base=SnapshotInput(ing.base.root, copy.deepcopy(ing.base.manifest)),
@@ -525,7 +537,26 @@ def build_spec(o: BenchmarkOptions, ing: BenchIngested, backend, runs: Path, pro
 
 # ------------------------------------------------------------------ disclosure and output
 
-def disclosure_header(ing: BenchIngested, o: BenchmarkOptions) -> dict:
+EXPERIMENT_NOTE = ("context-check@1 is a prompt-only arm on the existing schemas: it asks the verifier to check concrete "
+                   "subclaims against the evidence and the judge to keep that uncertainty. It is not an audit and no "
+                   "correctness claim is made. The deterministic fallback wording (judge unavailable or rejected) is the "
+                   "baseline's and can repeat inadequately verified claim, mechanism and verifier-note text.")
+
+
+def experiment_report(experiment: str, profile: dict) -> dict:
+    """Which prompt arm this run selected, by id and by the digest of the actual task text it binds. The prompt ids are
+    read from the profile the run uses (retrieval off keeps the v1 verifier), never from the selector or a literal."""
+    roles = profile["roles"]
+    ids = {"verifierPrompt": roles["verifier"]["promptVersion"], "judgePrompt": roles["judge"]["promptVersion"]}
+    if experiment == prompts.EXPERIMENT_BASELINE:
+        return {"id": experiment, **ids}
+    return {"id": experiment, **ids, "taskDigests": prompts.experiment_task_digests(),
+            "schemas": "existing VerifierTurn / JudgeOutput; same models, caps, tools, timeouts, retries and ceiling",
+            "audited": False, "fallbackWording": "unchanged baseline fallback; may repeat unverified text",
+            "note": EXPERIMENT_NOTE}
+
+
+def disclosure_header(ing: BenchIngested, o: BenchmarkOptions, profile: dict) -> dict:
     cov = repocov.build(RepositoryImports(ing.base.record, ing.head.record), ing.base.manifest, ing.head.manifest, ing.case)
     p, omitted = ing.proof, cov["base"]["omittedTotal"] + cov["head"]["omittedTotal"]
     return {"origin": {"kind": ORIGIN_KIND, "caseUrl": ing.url, "resolvedRepo": ing.repo, "asOfBase": p["asOfBase"],
@@ -546,7 +577,7 @@ def disclosure_header(ing: BenchIngested, o: BenchmarkOptions) -> dict:
                          "warning": (f"{omitted} path(s) were omitted by the imports; every changed path is included"
                                      if omitted else None),
                          "prText": "OMITTED: the reviewer sees no PR title or body", "statement": repocov.statement(cov)},
-            "quality": QUALITY}
+            "experiment": experiment_report(o.experiment, profile), "quality": QUALITY}
 
 
 def check_out(o: BenchmarkOptions, ing: BenchIngested) -> Path:
@@ -578,7 +609,7 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         runs.mkdir()
         book = SpendBook(handle, root / BOOK_NAME)
         ledger = RuntimeLedger(root / LEDGER_NAME, TRIAL_TOTAL_USD_MICROS)
-        evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval, cfg))
+        evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval, cfg, o.experiment))
         provider = OpenRouterProvider(enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle,
                                       book=book, ledger=ledger, transport=transport,
                                       run_scope=provider_scope(evr, ing, o.repeat))
@@ -609,11 +640,16 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
     if not first:
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
-    return {**disclosure_header(ing, o), "schema": REPORT_SCHEMA, "mode": "plan",
+    return {**disclosure_header(ing, o, profile), "schema": REPORT_SCHEMA, "mode": "plan",
             "status": "planned" if planned else "plan-failed", "ok": planned,
             "plan": {"models": cfg.report()["roles"], "retrieval": o.retrieval,
                      "retrievalPolicy": None if policy is None else policy.to_doc(),
-                     "profile": f"{profile['id']}@{profile['version']}",
+                     "profile": f"{profile['id']}@{profile['version']}", "profileDigest": digest(profile),
+                     "configIdentityDigest": digest(config_identity(ing, profile, plan, policy, o.retrieval, cfg,
+                                                                    o.experiment)),
+                     "firstRequestNote": "the first request is the investigator's and is identical in every arm; the "
+                     "selected verifier/judge task text appears only in later requests and is bound through "
+                     "profileDigest, configIdentityDigest and experiment.taskDigests",
                      "authorization": "covers the profile and run ceiling" if problem is None
                      else "NOT covered / not reached: " + problem["message"],
                      "capturedRequests": first, "capturedCount": len(first), "firstRequest": first[0] if first else None,
@@ -628,8 +664,8 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
 
 # ------------------------------------------------------------------ live
 
-def run_report(o, ing, res, *, provider_calls, ledger_before, ledger_after, book) -> dict:
-    return {**disclosure_header(ing, o), "schema": REPORT_SCHEMA, "mode": o.mode, "status": res.status,
+def run_report(o, ing, res, profile, *, provider_calls, ledger_before, ledger_after, book) -> dict:
+    return {**disclosure_header(ing, o, profile), "schema": REPORT_SCHEMA, "mode": o.mode, "status": res.status,
             "ok": res.status == "completed", "incomplete": res.incomplete,
             "error": res.error and {k: res.error.get(k) for k in ("code", "stage", "message") if k in res.error},
             "idempotent": res.idempotent, "providerCalls": provider_calls, "runId": res.run_id,
@@ -661,7 +697,7 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         _check_ceiling(ledger, plan)
     except RepositoryError as e:
         raise BenchmarkLaunchError(str(e)[:300]) from None
-    evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval, cfg))
+    evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval, cfg, o.experiment))
     validate_spec(build_spec(o, ing, _Unused(handle), Path(tempfile.gettempdir()), profile, plan, policy, cfg))
     try:
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
@@ -678,17 +714,17 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         try:
             res = runner(spec)
         except PipelineError as e:             # a typed stop is a result, not a launcher refusal: spend may have occurred
-            rep = {**disclosure_header(ing, o), "schema": REPORT_SCHEMA, "mode": o.mode, "status": "pipeline-refused",
-                   "ok": False, "error": {"code": e.code, "message": str(e)[:400]}, "providerCalls": provider.calls,
+            rep = {**disclosure_header(ing, o, profile), "schema": REPORT_SCHEMA, "mode": o.mode,
+                   "status": "pipeline-refused", "ok": False, "error": {"code": e.code, "message": str(e)[:400]}, "providerCalls": provider.calls,
                    "costs": {"runtime": ledger_costs(before, ledger.totals()), "spendBook": book.totals(),
                              "note": "key/generation reconciliation is root's, outside this tool"},
                    "forkAndStageReplay": STRICT_REPLAY_ONLY}
             rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
             return rep
         except BaseException as e:
-            _best_effort_report(out, ing, o, e, key, ledger, before, provider)
+            _best_effort_report(out, ing, o, profile, e, key, ledger, before, provider)
             raise
-        rep = run_report(o, ing, res, provider_calls=provider.calls, ledger_before=before,
+        rep = run_report(o, ing, res, profile, provider_calls=provider.calls, ledger_before=before,
                          ledger_after=ledger.totals(), book=book.totals())
         rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
         return rep
@@ -697,10 +733,10 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         raise
 
 
-def _best_effort_report(out, ing, o, exc, key, ledger, before, provider) -> None:
+def _best_effort_report(out, ing, o, profile, exc, key, ledger, before, provider) -> None:
     try:
-        rep = {**disclosure_header(ing, o), "schema": REPORT_SCHEMA, "mode": o.mode, "status": "interrupted", "ok": False,
-               "error": {"type": type(exc).__name__}, "providerCalls": provider.calls,
+        rep = {**disclosure_header(ing, o, profile), "schema": REPORT_SCHEMA, "mode": o.mode, "status": "interrupted",
+               "ok": False, "error": {"type": type(exc).__name__}, "providerCalls": provider.calls,
                "costs": {"runtime": ledger_costs(before, ledger.totals())},
                "note": "an interrupted call keeps its ledger intent (worst case counted); the next invocation "
                        "refuses at the in-flight gate until root reconciles"}
@@ -725,7 +761,7 @@ def replay_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *
     cost = res.cost or {}
     live_calls, replayed = cost.get("liveCalls"), cost.get("replayedCalls")
     clean = live_calls == 0 and isinstance(replayed, int) and replayed >= 1
-    rep = run_report(o, ing, res, provider_calls=0, ledger_before=None, ledger_after=None, book=None)
+    rep = run_report(o, ing, res, profile, provider_calls=0, ledger_before=None, ledger_after=None, book=None)
     rep["replay"] = {"liveCalls": live_calls, "replayedCalls": replayed, "newSpendUsdMicros": 0 if clean else None,
                      "consumedZeroLive": clean, "traceDigestPin": o.trace_digest, "keyRead": False, "networkCalls": 0}
     rep["ok"] = rep["ok"] and clean
@@ -759,6 +795,8 @@ def render(rep: dict) -> str:
          f"  coverage: {c['statement']}", f"  PR title/body: {c['prText']}"]
     if c["warning"]:
         L.append(f"  warning: {c['warning']}")
+    L.append(f"  experiment: {rep['experiment']['id']} (verifier {rep['experiment']['verifierPrompt']}, "
+             f"judge {rep['experiment']['judgePrompt']})")
     L.append(f"  review models: { {r: v['model'] for r, v in rep['reviewModels']['roles'].items()} } "
              f"(config {rep['reviewModels']['source']} {rep['reviewModels']['digest']})")
     if rep["mode"] == "plan":
@@ -806,6 +844,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--replay-trace", help="recorded trace.jsonl (replay)")
     ap.add_argument("--trace-digest", help="operator-held sha256:<64 hex> of the trace (replay)")
     ap.add_argument("--retrieval", choices=("on", "off"), default="on", help="Turn retrieval roles (ablation switch)")
+    ap.add_argument("--experiment", choices=prompts.EXPERIMENTS, default=prompts.EXPERIMENT_BASELINE,
+                    help="opt-in prompt arm (default: baseline). Needs --retrieval on; binds the run identity")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
@@ -821,7 +861,7 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                          auth=a.auth, state_dir=a.state_dir, env_file=a.env, baseline_micros=a.baseline_micros,
                          book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
                          replay_trace=a.replay_trace, trace_digest=a.trace_digest, retrieval=a.retrieval == "on",
-                         repeat=a.repeat, config=a.config)
+                         repeat=a.repeat, config=a.config, experiment=a.experiment)
     try:
         rep = run_benchmark(o, transport=transport, key_loader=key_loader, runner=runner)
     except (BenchmarkLaunchError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:

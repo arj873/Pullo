@@ -22,6 +22,8 @@ from reviewer.contracts.severity import TRUSTED_TOOL_STATUSES
 from reviewer.tools import TOOLS, ArgError, ToolCall, normalize
 from reviewer.tools.ops import Outcome
 
+from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
+
 RETRIEVAL_VERSION = "retrieval@2"
 MAX_HOPS = 15
 MAX_REQUESTS = 6

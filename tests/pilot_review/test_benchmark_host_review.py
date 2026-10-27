@@ -44,7 +44,7 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # The exact public source/test bytes this gate reviewed (ticket BENCH-REVIEW-03-review, re-gate of the BENCH-REVIEW-02 fixes). A
 # later edit must be re-gated, not inherited. The interface document's acceptance pin is kept in private orchestration evidence,
 # not in this public test.
-GATED = {"reviewer/pilot/benchmark.py": "e38c04fb2eff9b0d385082c1b50fda2bc1b3311df0efa5da309d814cf64eabe9",
+GATED = {"reviewer/pilot/benchmark.py": "e9b18ffad67026bfc7b8803960e50a4835d5f2f190339f8902edec552ae393a6",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748"}
 
 SONNET = "anthropic/claude-sonnet-5.5"

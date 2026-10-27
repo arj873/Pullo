@@ -33,6 +33,9 @@ PARTIAL_BEHAVIOR = "partial-disclosure@2"
 # when a role returns the Turn envelope, so legacy profiles keep their ids.
 #   @2: citations.citableRefs (S1-15) are built from the chain's delivered results; @1 had none.
 RETRIEVAL_BEHAVIOR = "retrieval-pipeline@2"
+# Behaviour of the opt-in context-check prompt arm that is not in a template digest (task selection by prompt id, the
+# unchanged deterministic fallback wording). Bound only when the experiment is selected.
+EXPERIMENT_BEHAVIOR = "context-check-arm@1"
 RECEIPT_SCHEMA = "run-receipt@1"
 
 
@@ -93,6 +96,19 @@ def check_retrieval_inputs(spec) -> None:
                                     f"{want[r]!r}")
     if spec.imports is not None and spec.coverage is not None:
         raise PipelineError("invalid-input", "repository imports and a partial historical coverage are exclusive")
+    if experiment_id(spec) != prompts.EXPERIMENT_BASELINE and "verifier" not in turns:
+        raise PipelineError("invalid-input", "the context-check experiment needs a verifier role that returns the Turn schema")
+
+
+def experiment_id(spec) -> str:
+    """The opt-in prompt experiment the profile and policy select (`baseline` unless both experimental prompt ids are
+    named). Half a selection is a typed refusal, never a silent baseline."""
+    pol = retrieval_policy(spec)
+    try:
+        return prompts.experiment_in_force(None if pol is None else pol.verifier_prompt,
+                                           spec.profile["roles"]["judge"]["promptVersion"])
+    except ValueError as e:
+        raise PipelineError("invalid-input", str(e)) from None
 
 
 def config_snapshot_id(spec) -> str:
@@ -103,6 +119,11 @@ def config_snapshot_id(spec) -> str:
         extra["retrieval"] = {"behavior": RETRIEVAL_BEHAVIOR, "policy": pol.to_doc(), "turnRoles": turn_roles(spec.profile),
                               "prompts": prompts.retrieval_template_digests(),
                               "effective": retrieval.effective_limits(pol, spec.plan["budget"], lim.max_calls)}
+    exp = experiment_id(spec)
+    if exp != prompts.EXPERIMENT_BASELINE:       # absent for the baseline => default ids unchanged by this experiment
+        extra["experiment"] = {"id": exp, "behavior": EXPERIMENT_BEHAVIOR, "tasks": prompts.experiment_task_digests(),
+                               "verifierPrompt": pol.verifier_prompt,
+                               "judgePrompt": spec.profile["roles"]["judge"]["promptVersion"]}
     if spec.imports is not None:
         extra["imports"] = {"base": digest(spec.imports.base), "head": digest(spec.imports.head),
                             "behavior": repocov.BEHAVIOR}
