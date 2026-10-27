@@ -1555,6 +1555,9 @@ HOST_BRIDGE_IMPORTS = {
                                      ("reviewer.historical.bridge", "_validated")},
     "reviewer/pilot/positive.py": {("reviewer.historical", "BridgeError"),
                                    ("reviewer.historical.bridge", "_check_out")},
+    # HOST-CI-01: the benchmark launcher, an authorized host entrypoint, for output-path safety only.
+    "reviewer/pilot/benchmark.py": {("reviewer.historical", "BridgeError"),
+                                    ("reviewer.historical.bridge", "_check_out")},
 }
 
 
@@ -1627,6 +1630,28 @@ class BridgeBoundaryGauge(unittest.TestCase):
         self.assertEqual(extra, [("reviewer/pilot/repository.py", "reviewer.historical", "materialize")])
         self.assertTrue(bridge_violations({"reviewer/pilot/cli.py": "from reviewer import historical"}))
         self.assertTrue(bridge_violations({"reviewer/pilot/launcher.py": "from reviewer.historical.bridge import _check_out"}))
+        # HOST-CI-01: reviewer/pilot/benchmark.py admits exactly BridgeError and _check_out, at that path only
+        bench = "reviewer/pilot/benchmark.py"
+        bench_ok = "from reviewer.historical import BridgeError\nfrom reviewer.historical.bridge import _check_out"
+        self.assertEqual(HOST_BRIDGE_IMPORTS[bench],
+                         {("reviewer.historical", "BridgeError"), ("reviewer.historical.bridge", "_check_out")})
+        self.assertEqual(bridge_violations({bench: bench_ok}), [])
+        for extra_src, pair in (("from reviewer.historical import materialize", ("reviewer.historical", "materialize")),
+                                ("from reviewer.historical.bridge import _validated", ("reviewer.historical.bridge", "_validated")),
+                                ("from reviewer.historical.pins import load_pins", ("reviewer.historical.pins", "load_pins")),
+                                ("from reviewer import historical", ("reviewer", "historical")),
+                                ("import reviewer.historical", ("reviewer.historical", None))):
+            with self.subTest(benchmark_extra=extra_src):
+                self.assertEqual(bridge_violations({bench: bench_ok + "\n" + extra_src}), [(bench, *pair)])
+        for other in ("reviewer/pipeline/x.py", "reviewer/gateway/x.py", "reviewer/tools/x.py", "reviewer/runtime/x.py",
+                      "reviewer/scoring/x.py", "reviewer/contracts/x.py", "reviewer/pilot/other.py",
+                      "reviewer/pilot/cli.py", "reviewer/benchmark/benchmark.py", "reviewer/pilot/sub/benchmark.py"):
+            with self.subTest(benchmark_imports_elsewhere=other):
+                self.assertEqual(sorted(m for _, m, _ in bridge_violations({other: bench_ok})),
+                                 ["reviewer.historical", "reviewer.historical.bridge"])
+        # the two benchmark.py pairs do not leak to other pilot host files
+        self.assertEqual(len(bridge_violations({"reviewer/pilot/launcher.py": bench_ok})), 2)
+        self.assertEqual(len(bridge_violations({"reviewer/pilot/repository.py": "from reviewer.historical import BridgeError"})), 1)
         # the gauge compares exact sites: a permitted site that no longer imports would show up as a mismatch
         self.assertNotEqual({r: set(bridge_imports(r, "x = 1")) for r in HOST_BRIDGE_IMPORTS}, HOST_BRIDGE_IMPORTS)
 
