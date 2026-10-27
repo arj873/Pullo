@@ -4,7 +4,7 @@ Read-only AI code review with independent verification. Pullo investigates a cha
 
 **Status: pre-alpha.** Review quality has not been measured. There is no precision/recall figure, no competitive-quality claim and no cost-per-review claim (including any mid-sized-review price target). Treat everything below as mechanics, not capability.
 
-This repository state is a **checkpoint for review, not a release**. The public default test suite at `c2b8ef758cecfe92984f963c929d0fb35cd6c46e` exits successfully, with explicit optional skips and expected-failure repros (see Tests).
+This repository state is a **checkpoint for review, not a release**. Historical evidence: the earlier public checkpoint `c2b8ef758cecfe92984f963c929d0fb35cd6c46e` had a default test suite that exited successfully, with explicit optional skips and expected-failure repros (see Tests). Those counts describe that checkpoint, not a tree that adds the offline benchmark scorer.
 
 The Python package is named `reviewer`; the product name is Pullo. Everything is stdlib-only (tested on Python 3.14).
 
@@ -15,7 +15,7 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 - Typed contracts, a canonical-JSON/digest layer, a model gateway with a trace and strict replay, read-only repository tools, a staged pipeline (investigate, verify, judge) and local review output. Citation provenance checks require complete logged excerpts rendered at an eligible hop of the same retrieval chain; verifier citation templates use references the host can materialize. These controls were hardened in [PR #10](https://github.com/arj873/Pullo/pull/10) and [PR #13](https://github.com/arj873/Pullo/pull/13).
 - Read-only importers that pin a historical commit pair or a repository head/base by object ID. Reviewed code is data: nothing from a reviewed repository is executed, and nothing is posted upstream.
 - Bounded live trials through trusted-host launchers (`reviewer.runtime`, `reviewer.pilot`) against Anthropic Sonnet via OpenRouter, with a hard spend cap, an exact model allowlist, no retries and no fallback. These need a key and a trusted host; they are not run by anything below, and no key is bundled.
-- An experimental benchmark scorer exists in the project's working tree but is **not part of this checkpoint**; it will be proposed separately. Nothing here depends on it and no benchmark score is claimed.
+- An experimental **offline benchmark scorer** (`reviewer.benchmark`) that counts and pools externally supplied judgments over a pinned source, with a runnable invented-data recipe. See [Offline benchmark scorer](#offline-benchmark-scorer-experimental). It has no live producer and no benchmark score is claimed.
 
 ## What has actually been observed
 
@@ -28,8 +28,8 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 
 - General live fork and stage-replay run-mode binding are not implemented. There is no CLI resume of an interrupted evaluation.
 - Preventive isolation for the second (Terra-tier) model path is not done; that path is not claimed to work.
-- Retrieval quality, model-vs-model comparison and the benchmark pipeline are unmeasured.
-- The hosted public suite passes, but its 30 skips and 22 expected failures leave meaningful gates open (see Tests).
+- Retrieval quality, model-vs-model comparison and the benchmark pipeline are unmeasured. The benchmark package has no live producer, no paid scoring, no historical-eligibility proof from its CLI and no quality or competitive claim.
+- The hosted public suite at the earlier checkpoint passed, but its 30 skips and 22 expected failures left meaningful gates open (see Tests). The benchmark package adds two native-scorer expected failures; its own counts are reconciled from hosted CI, not stated here.
 - Source docstrings still mention private project-coordination documents that are not in this repository.
 
 ## Review models
@@ -69,13 +69,25 @@ Replace `REPLACE_WITH_DIGEST_PRINTED_BY_RECORD` with the hexadecimal digest from
 
 No credential, network call or paid spend is possible from these commands. Prices in the cost lines are synthetic. Comments are local drafts.
 
+## Offline benchmark scorer (experimental)
+
+`reviewer.benchmark` verifies a pinned benchmark source and counts judgments that someone else produced. It never calls a model, network or provider. Ordinary structured report fields omit gold and comment text, evidence bodies and free pair-error messages, but ids, case URLs, tool names, the judge block and other source metadata are caller-controlled, echoed unverified and can contain any text, and error diagnostics may echo malformed input. Keep reports and diagnostics scorer-side and review them before sharing; they are not proved opaque.
+
+```sh
+nice -n 19 python3 -B examples/benchmark_demo.py
+```
+
+The demo builds an **invented** source, pins it, writes all-pairs judgments, runs `python3 -m reviewer.benchmark reference-score` in-process and checks hand-derived counts, then shows the refusal and incomplete/missing/error/hidden controls. Two scorers stay separate: the native view (`score`) and the reference-count view (`reference-score`, all-pairs judgments, undefined ratios reported as a named zero). Neither is a quality measurement. Names and settings of a judge model are declarations the package does not verify; only the raw source files are verified, against pins. The `select` CLI has no `--admissions` option yet (the API supports admission documents).
+
+Exact flags, the pinning/store/output boundary, the judgments schema and the known limits are in [reviewer/benchmark/README.md](reviewer/benchmark/README.md). Nothing here reads real benchmark data.
+
 ## Tests
 
 ```sh
 nice -n 19 python3 -B -m unittest discover -s tests -t .
 ```
 
-The suite is offline and needs no credentials or network. [Hosted CI for PR #13](https://github.com/arj873/Pullo/actions/runs/40324991362) completed on 2026-10-26: **2,441 tests, OK, 30 skips, 22 expected failures**, with zero errors or unexpected failures. Contract export and all six smoke record/replay cases also passed. Its head commit and the public checkpoint above share tree `d1e467637f6a8ad173bd855d084680c0c519a728`; these counts include the citation-provenance hardening. Limits remain visible:
+The suite is offline and needs no credentials or network. Historical evidence for the earlier public checkpoint: [hosted CI for PR #13](https://github.com/arj873/Pullo/actions/runs/40324991362) completed on 2026-10-26: **2,441 tests, OK, 30 skips, 22 expected failures**, with zero errors or unexpected failures. Contract export and all six smoke record/replay cases also passed. Its head commit and the public checkpoint above share tree `d1e467637f6a8ad173bd855d084680c0c519a728`; these counts include the citation-provenance hardening. Limits remain visible:
 
 - Raw third-party pull-request fixtures and private operator evidence are not published. Corpus-only test modules are left out of this repository; included tests requiring those inputs use explicit skips. Static historical import-boundary tests run without the private corpus.
 - Known defects are kept as expected-failure tests so the repro stays in the tree.

@@ -239,6 +239,119 @@ class RI_Identity(Base):
         self.assertEqual(cli("check", str(self.d)).returncode, 0)
 
 
+_PROD_SCORING = {"reviewer.scoring.cases.score_case": "score_case", "reviewer.scoring.matching.match_comments": "match_comments"}
+_GUARDED = ("score_case", "match_comments")
+
+
+def _production_scoring_calls(sources: dict) -> tuple[list, list]:
+    """Calls (any scope) that reach the two production definitions reviewer.scoring.cases.score_case and
+    reviewer.scoring.matching.match_comments, as (file, enclosing function or '<module>', symbol, sorted keyword
+    names), plus calls of a guarded name whose target cannot be traced (reported, not allowed).
+    Bindings come from every file in `sources` (imports: absolute, relative, aliased, dotted, star, function-local;
+    local defs/classes; simple `x = y` aliases). Re-exports are followed to a fixed point across the whole source
+    map, so `reviewer.scoring.cases.match_comments`, `reviewer.scoring.score_case` and a third module that
+    re-exports a production symbol all resolve to the definition. The rule keys on the resolved symbol, not the
+    name, and over-approximates (all scopes of a file are one namespace)."""
+    names = {}
+    for path in sources:
+        parts = path[:-3].split("/")
+        names[path] = (".".join(parts[:-1] if parts[-1] == "__init__" else parts), ".".join(parts[:-1]))
+    trees = {path: ast.parse(text) for path, text in sources.items()}
+    envs: dict = {path: {} for path in sources}
+    modenv = {names[path][0]: envs[path] for path in sources}
+
+    def canon(q, seen=()):
+        """Terminal qualified names of `q` after following re-exports through modules in the source map."""
+        m = max((m for m in modenv if q == m or q.startswith(m + ".")), key=len, default=None)
+        if m is None or q == m:
+            return {q}
+        first, _, tail = q[len(m) + 1:].partition(".")
+        targets = modenv[m].get(first, set())
+        out = set() if targets else {q}
+        for t in targets:
+            if t == f"{m}.{first}":                       # defined here
+                out.add(q)
+            elif t not in seen:
+                out |= canon(t + ("." + tail if tail else ""), seen + (t,))
+        return out
+
+    def resolve(env, e):
+        if isinstance(e, ast.Name):
+            return {c for t in env.get(e.id, ()) for c in canon(t)}
+        if isinstance(e, ast.Attribute):
+            return {c for b in resolve(env, e.value) for c in canon(f"{b}.{e.attr}")}
+        return set()
+
+    def bind(env, n, t):
+        if t not in env.setdefault(n, set()):
+            env[n].add(t)
+            return True
+        return False
+
+    for _ in range(50):                                     # fixed point over bindings, re-exports and aliases
+        changed = False
+        for path, tree in trees.items():
+            mod, pkg = names[path]
+            env = envs[path]
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    changed |= bind(env, n.name, f"{mod}.{n.name}")
+                elif isinstance(n, ast.Import):
+                    for a in n.names:
+                        changed |= bind(env, a.asname or a.name.split(".")[0], a.name if a.asname else a.name.split(".")[0])
+                elif isinstance(n, ast.ImportFrom):
+                    base = n.module or ""
+                    if n.level:
+                        up = pkg.split(".")[: len(pkg.split(".")) - (n.level - 1)]
+                        base = ".".join(up + ([n.module] if n.module else []))
+                    for a in n.names:
+                        if a.name == "*":
+                            for k, ts in list(modenv.get(base, {}).items()):
+                                for t in list(ts):
+                                    changed |= bind(env, k, t)
+                        else:
+                            changed |= bind(env, a.asname or a.name, f"{base}.{a.name}")
+                elif isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                    for t in resolve(env, n.value):
+                        changed |= bind(env, n.targets[0].id, t)
+        if not changed:
+            break
+    else:
+        raise AssertionError("binding fixed point did not converge")
+
+    def known_function(t, attr):
+        """True only for a module-level definition `<module in the source map>.<attr>` (e.g. the benchmark's own
+        score_case). A class member (`K.score_case`), a name the module does not bind, or a module outside the map
+        is not a known unrelated function, so a guarded-name call to it is reported as unresolved."""
+        m = max((m for m in modenv if t.startswith(m + ".")), key=len, default=None)
+        return m is not None and t == f"{m}.{attr}" and t in modenv[m].get(attr, ())
+
+    callers, unresolved = [], []
+    for path, tree in trees.items():
+        env = envs[path]
+
+        def visit(node, fn):
+            for ch in ast.iter_child_nodes(node):
+                if isinstance(ch, ast.Call):
+                    f = ch.func
+                    attr = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+                    targets = resolve(env, f)
+                    hit = sorted({_PROD_SCORING[t] for t in targets if t in _PROD_SCORING})
+                    if hit:
+                        callers.append((path, fn, hit[0], sorted(k.arg for k in ch.keywords if k.arg)))
+                    elif attr in _GUARDED and not (targets and all(known_function(t, attr) for t in targets)):
+                        unresolved.append((path, fn, attr))
+                visit(ch, ch.name if isinstance(ch, (ast.FunctionDef, ast.AsyncFunctionDef)) else fn)
+
+        visit(tree, "<module>")
+    return callers, unresolved
+
+
+def _real_reviewer_sources(*subdirs) -> dict:
+    return {p.relative_to(ROOT).as_posix(): p.read_text()
+            for d in (subdirs or ("",)) for p in (ROOT / "reviewer" / d).rglob("*.py")}
+
+
 # ============================================================ SD3: foreign / base snapshot and wrong-run accounting
 class RP_Provenance(Base):
     def setUp(self):
@@ -322,18 +435,87 @@ class RP_Provenance(Base):
         self.assertEqual((prod.true_positives, prod.foreign), (0, 1))                    # production wrapper
 
     def test_CONTROL_production_code_reaches_score_case_only_through_the_wrapper(self):
-        """Static: nothing under reviewer/ calls score_case/match_comments except cases.score_loaded_case
-        (which passes both provenance arguments) and score_case's own call to match_comments."""
-        callers = []
-        for p in (ROOT / "reviewer").rglob("*.py"):
-            tree = ast.parse(p.read_text())
-            for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.Module))]:
-                for call in [n for n in ast.walk(fn) if isinstance(n, ast.Call)]:
-                    name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", "")
-                    if name in ("score_case", "match_comments") and isinstance(fn, ast.FunctionDef):
-                        callers.append((p.relative_to(ROOT).as_posix(), fn.name, name, sorted(k.arg for k in call.keywords if k.arg)))
+        """Static: nothing under reviewer/ reaches the PRODUCTION reviewer.scoring score_case/match_comments except
+        cases.score_loaded_case (which passes both provenance arguments) and score_case's own call to match_comments.
+        Calls are resolved through the file's imports/definitions, so an unrelated same-named function (e.g.
+        reviewer.benchmark.scoring.score_case) is not conflated, while aliases of the production symbols are."""
+        callers, unresolved = _production_scoring_calls(_real_reviewer_sources())
+        self.assertEqual(unresolved, [])
         self.assertEqual(sorted(callers), [("reviewer/scoring/cases.py", "score_case", "match_comments", ["head_snapshot_id", "run_id"]),
                                            ("reviewer/scoring/cases.py", "score_loaded_case", "score_case", ["error", "head_snapshot_id", "incomplete", "run_id", "status"])])
+
+    def test_CONTROL_provenance_guard_binds_symbols_not_names(self):
+        """Mutation checks of the guard itself: invented scratch modules are added to the REAL source map in memory
+        (nothing is written or imported), so re-exports resolve through the real reviewer.scoring package."""
+        def run(extra):
+            callers, unresolved = _production_scoring_calls({**_real_reviewer_sources('scoring', 'benchmark'), **extra})
+            return ([c for c in callers if c[0] in extra], [u for u in unresolved if u[0] in extra])
+        X = "reviewer/extra/bypass.py"
+        bypasses = {
+            "direct from-import": "from reviewer.scoring import score_case\ndef f(): return score_case(1)\n",
+            "from-import of the defining module": "from reviewer.scoring.cases import score_case\ndef f(): return score_case(1)\n",
+            "cases re-export of match_comments (review repro 1)":
+                "from reviewer.scoring.cases import match_comments\ndef leak(c, b): return match_comments(c, b, 3)\n",
+            "matching re-export through the package": "from reviewer.scoring import match_comments as m\ndef f(): return m([], [])\n",
+            "from-alias": "from reviewer.scoring.cases import score_case as sc\ndef f(): return sc(1)\n",
+            "module alias": "import reviewer.scoring.cases as c\ndef f(): return c.score_case(1)\n",
+            "package alias": "import reviewer.scoring as s\ndef f(): return s.score_case(1)\n",
+            "dotted import": "import reviewer.scoring.cases\ndef f(): return reviewer.scoring.cases.score_case(1)\n",
+            "submodule from-import": "from reviewer.scoring import cases as c\ndef f(): return c.match_comments([], [])\n",
+            "relative import": "from ..scoring import score_case\ndef f(): return score_case(1)\n",
+            "relative module": "from .. import scoring\ndef f(): return scoring.match_comments([], [])\n",
+            "matching module": "from reviewer.scoring.matching import match_comments as m\ndef f(): return m([], [])\n",
+            "module-level call": "from reviewer.scoring import score_case\nscore_case(1)\n",
+            "assigned alias": "from reviewer.scoring import score_case\ng = score_case\ndef f(): return g(1)\n",
+            "star import": "from reviewer.scoring import *\ndef f(): return score_case(1)\n",
+            "function-local import": "def f():\n    from reviewer.scoring import score_case as q\n    return q(1)\n",
+        }
+        for name, src in bypasses.items():
+            with self.subTest(name):
+                callers, unresolved = run({X: src})
+                self.assertEqual(unresolved, [])
+                self.assertEqual(len(callers), 1, callers)
+        # a third module re-exporting a production symbol under the same name (review repro 2), incl. chains
+        U = "reviewer/util/__init__.py"
+        for name, extra in {
+            "third-module re-export": {U: "from reviewer.scoring.cases import score_case\n",
+                                       X: "from reviewer.util import score_case\ndef f(): return score_case(1)\n"},
+            "re-export chain": {U: "from reviewer.scoring.cases import score_case\n",
+                                "reviewer/util2.py": "from reviewer.util import score_case as hop\n",
+                                X: "from reviewer.util2 import hop\ndef f(): return hop(1)\n"},
+            "re-export module attribute": {U: "from reviewer.scoring import match_comments\n",
+                                           X: "import reviewer.util as u\ndef f(): return u.match_comments([], [])\n"},
+            "re-export star": {U: "from reviewer.scoring.cases import score_case\n",
+                               X: "from reviewer.util import *\ndef f(): return score_case(1)\n"},
+        }.items():
+            with self.subTest(name):
+                callers, unresolved = run(extra)
+                self.assertEqual(unresolved, [])
+                self.assertEqual([c[2] for c in callers if c[0] == X], ["match_comments" if "match" in name or "attribute" in name else "score_case"])
+        # an untraceable receiver or unbound name is reported, never silently allowed
+        self.assertEqual(len(run({X: "def f(o): return o.score_case(1)\n"})[1]), 1)
+        self.assertEqual(len(run({X: "def f(): return score_case(1)\n"})[1]), 1)
+        # the old name-based guard's catches that must stay reported: same-name class member and unbound module name
+        self.assertEqual(len(run({X: "class K:\n    @staticmethod\n    def score_case(x): return x\ndef f(): return K.score_case(1)\n"})[1]), 1)
+        self.assertEqual(len(run({X: "class K:\n    def match_comments(self): pass\ndef f(): return K().match_comments()\n"})[1]), 1)
+        self.assertEqual(len(run({X: "import reviewer.util as u\ndef f(): return u.score_case(1)\n",
+                                  "reviewer/util/__init__.py": "x = 1\n"})[1]), 1)
+        self.assertEqual(len(run({X: "import reviewer.benchmark as b\ndef f(): return b.match_comments([], [])\n"})[1]), 1)
+        self.assertEqual(len(run({X: "import os\ndef f(): return os.score_case(1)\n"})[1]), 1)
+        # unrelated same-named functions stay allowed
+        unrelated = {
+            "reviewer/extra/a.py": "from reviewer.benchmark import score_case\ndef f(): return score_case(1, 2)\n",
+            "reviewer/extra/b.py": "import reviewer.benchmark as b\ndef f(): return b.score_case(1, 2)\n",
+            "reviewer/extra/c.py": "from reviewer.benchmark.scoring import score_case as sc\ndef f(): return sc(1, 2)\n",
+            "reviewer/extra/d.py": "def score_case(): pass\ndef match_comments(): pass\ndef f(): return score_case(), match_comments()\n",
+            "reviewer/scoring/other.py": "def score_case(): pass\ndef f(): return score_case()\n",
+            "reviewer/util/__init__.py": "from reviewer.benchmark import score_case\n",
+            "reviewer/extra/e.py": "from reviewer.util import score_case\ndef f(): return score_case(1, 2)\n",
+        }
+        self.assertEqual(run(unrelated), ([], []))
+        # the real tree itself keeps the benchmark module's own score_case out of the production set
+        callers, _ = _production_scoring_calls(_real_reviewer_sources())
+        self.assertFalse([c for c in callers if c[0].startswith("reviewer/benchmark/")])
 
     def test_CONTROL_evidence_commit_is_not_part_of_the_provenance_check(self):
         """Observation: only anchor.snapshotId and runId are checked; a head-anchored comment whose evidence cites
