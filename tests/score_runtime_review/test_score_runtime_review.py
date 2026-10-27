@@ -15,9 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-SRC = os.environ.get("SCORE_RT_SRC")
-if not SRC:
-    raise SystemExit("set SCORE_RT_SRC to the candidate tree")
+SRC = os.environ.get("SCORE_RT_SRC") or str(Path(__file__).resolve().parents[2])   # default: this checkout; env overrides
 sys.path.insert(0, SRC)
 sys.dont_write_bytecode = True
 
