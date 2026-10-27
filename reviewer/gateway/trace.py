@@ -14,9 +14,11 @@ import os
 import threading
 from pathlib import Path
 
-from reviewer.contracts import ContractInputError, ContractViolation, loads_strict, require, validate_trace
+from reviewer.contracts import (ContractInputError, ContractViolation, loads_strict, require, validate_score_trace,
+                                validate_trace)
 from reviewer.contracts.budget import release_allowed
-from reviewer.contracts.canonical import call_id, cost_id, request_hash, result_hash, tool_call_id
+from reviewer.contracts.canonical import (call_id, cost_id, request_hash, result_hash, score_request_hash,
+                                          tool_call_id)
 from reviewer.contracts.redaction import redact_json
 
 from .errors import TraceError
@@ -24,6 +26,11 @@ from .guard import GUARD_CODES, REFUSED_BY
 
 MAX_TRACE_BYTES = 64 << 20
 MAX_EVENTS = 100_000
+# score family event names (the Recorder maps the review names the gateway uses; scoring_family.py)
+_SCORE_NAMES = {"run.start": "score.run.start", "run.end": "score.run.end", "model.call": "score.model.call"}
+_FAMILIES = {"review": ("TraceEvent", "trace-event@1"), "score": ("ScoreTraceEvent", "score-trace-event@1")}
+_CALL_TYPES = ("model.call", "score.model.call")
+_END_TYPES = ("run.end", "score.run.end")
 
 
 def events_to_bytes(events: list[dict]) -> bytes:
@@ -39,7 +46,10 @@ def bytes_digest(data: bytes) -> str:
 class Recorder:
     """Thread-safe trace writer for one run. path=None keeps events in memory only."""
 
-    def __init__(self, run_id: str, path=None):
+    def __init__(self, run_id: str, path=None, *, family: str = "review"):
+        if family not in _FAMILIES:
+            raise TraceError("recorder family must be review or score")
+        self.family = family
         self.run_id = run_id
         self.events: list[dict] = []
         self._lock = threading.Lock()
@@ -49,10 +59,17 @@ class Recorder:
             self._f = os.fdopen(fd, "w", encoding="utf-8")
 
     def append(self, type_: str, **fields) -> dict:
+        entity, schema = _FAMILIES[self.family]
+        if self.family == "score":
+            type_ = _SCORE_NAMES.get(type_, type_)
+        if type_ in ("cost",) and isinstance(fields.get("record"), dict):
+            kind = fields["record"].get("kind")
+            if (kind == "score") != (self.family == "score"):
+                raise TraceError(f"a {self.family} trace refuses {kind!r} costs (D1 cost-family crossing)")
         with self._lock:
-            ev = {"schema": "trace-event@1", "runId": self.run_id, "seq": len(self.events),
+            ev = {"schema": schema, "runId": self.run_id, "seq": len(self.events),
                   "type": type_, **fields}
-            require("TraceEvent", ev)
+            require(entity, ev)
             self.events.append(ev)
             if self._f is not None:
                 self._f.write(json.dumps(ev, sort_keys=True, ensure_ascii=False) + "\n")
@@ -91,11 +108,13 @@ class LoadedTrace:
         self.run_id = events[0]["runId"]
         self.byte_digest = byte_digest
         self._events_digest = bytes_digest(events_to_bytes(events))   # canonical snapshot taken at load time
-        self.complete = events[-1]["type"] == "run.end"
+        self.complete = events[-1]["type"] in _END_TYPES
+        self.family = "score" if events[0]["type"] == "score.run.start" else "review"
+        self.run = events[0].get("run")
         self.calls: dict[str, list[dict]] = {}       # requestHash -> model.call events in order
         self.costs: dict[str, dict] = {}             # costRecordId -> CostRecord
         for ev in events:
-            if ev["type"] == "model.call":
+            if ev["type"] in _CALL_TYPES:
                 self.calls.setdefault(ev["requestHash"], []).append(ev)
             elif ev["type"] == "cost":
                 self.costs[ev["record"]["id"]] = ev["record"]
@@ -134,23 +153,33 @@ def error_charge_class(err: dict) -> str:
     return "retained"
 
 
+def _is_score(events) -> bool:
+    return isinstance(events, list) and bool(events) and isinstance(events[0], dict) \
+        and str(events[0].get("schema", "")).startswith("score-")
+
+
 def verify_events(events: list, data: bytes | None = None, *, allow_partial: bool = False) -> LoadedTrace:
-    issues = validate_trace(events)
+    score = _is_score(events)
+    issues = validate_score_trace(events) if score else validate_trace(events)
     if issues:
-        raise TraceError("trace invalid: " + "; ".join(str(x) for x in issues[:5]))
-    if events[-1]["type"] != "run.end" and not allow_partial:
+        # codes and paths only: validator messages can echo model-written text
+        raise TraceError("trace invalid: " + "; ".join(f"{x.path} {x.code}" if score else str(x)
+                                                       for x in issues[:5]))
+    if events[-1]["type"] not in _END_TYPES and not allow_partial:
         raise TraceError("trace has no run.end: not a complete recording (diagnostic loads need allow_partial=True)")
     seen_calls, seen_tools, cost_of = set(), set(), {}
     for i, ev in enumerate(events):
         t = ev["type"]
-        if t == "run.start" and i != 0:
+        if t in ("run.start", "score.run.start") and i != 0:
             _fail(i, "duplicate run.start: a trace names exactly one run document")
-        if t == "model.call":
+        if t in _CALL_TYPES:
             req = ev["request"]
             try:
-                want = request_hash(req)
+                want = score_request_hash(req) if score else request_hash(req)
             except ValueError as e:
-                _fail(i, f"request cannot be hashed: {e}")
+                _fail(i, "request cannot be hashed" if score else f"request cannot be hashed: {e}")
+            if score and req["profile"] != events[0]["run"]["profile"]:
+                _fail(i, "request profile differs from the run's profile")
             if ev["requestHash"] != want:
                 _fail(i, "requestHash does not match the recorded request")
             if redact_json(req)[0] != req or redact_json(ev["response"])[0] != ev["response"]:
@@ -182,7 +211,7 @@ def verify_events(events: list, data: bytes | None = None, *, allow_partial: boo
                 _fail(i, "duplicate cost record")
             cost_of[rec["id"]] = (i, rec)
     for i, ev in enumerate(events):
-        if ev["type"] == "model.call":
+        if ev["type"] in _CALL_TYPES:
             hit = cost_of.get(ev["costRecordId"])
             if hit is None:
                 _fail(i, "model call has no cost record")
