@@ -787,7 +787,7 @@ class Engine:
         events = self.tool_calls()
         host = [events[i] for i in host_ids]
         doc = prompts.verifier_doc(self.case, hyp, items, omitted, self.coverage_doc(),
-                                   task=prompts.VERIFIER_REFUTE_TASK)
+                                   task=prompts.verifier_task(self.policy.verifier_prompt))
         chain = retrieval.Chain(self, stage="VERIFY", role="verifier", agent=VERIFIER_AGENT, session=session, t0=t0,
                                 turns=self.policy.verifier_turns, policy=self.policy, hypothesis_id=hyp["id"],
                                 host_events=host, hyp_calls_used=len(host),
@@ -945,7 +945,8 @@ class Engine:
             else:
                 req = prompts.judge_request(self.profile, self.profile_ref, self.case,
                                             [(f, c["severity"]) for f, c in judged], in_play,
-                                            coverage=self.coverage_doc())
+                                            coverage=self.coverage_doc(),
+                                            task=prompts.judge_task(self.profile["roles"]["judge"]["promptVersion"]))
                 out, err, _ = self.model_call(stage, "judge", JUDGE_AGENT, 0, req)
                 if err is not None:
                     if err["code"] in REPLAY_CODES:
