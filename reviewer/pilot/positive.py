@@ -6,7 +6,13 @@ See orchestration/handoffs/S1-12-interface.md.
     python3 -m reviewer.pilot.positive --mode plan --source-baseline BASELINE.json --out OUT --auth AUTH
 
 The expected issue lives only in tests. Live is root's, after independent review: it needs --confirm-live, an existing
-durable state dir, --baseline-micros and the one trusted key loader. Replay needs a trace and its external digest."""
+durable state dir, --baseline-micros and the one trusted key loader. Replay needs a trace and its external digest.
+
+Optional private control (DOGFOOD-CONTROL-HOST-01): --control-dir DIR (holding exactly base/ and head/), --control-id,
+--control-repo and --control-pins PINS, all four together, replace the checked-in fixture as the two snapshots. PINS is an
+operator-held control-pins@1 document OUTSIDE the checkout and the control: {"schema", "caseId", "repo", "base": {path:
+sha256}, "head": {path: sha256}}. It must bind every file of both trees exactly (no extra, missing or changed file, no link,
+no executable); the host source baseline is still checked as before."""
 
 from __future__ import annotations
 
@@ -15,14 +21,16 @@ import copy
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from reviewer.config import ConfigError, EffectiveConfig, resolve_config
-from reviewer.contracts import require
-from reviewer.contracts.canonical import canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
+from reviewer.contracts import ContractInputError, loads_strict, require
+from reviewer.contracts.canonical import GITHUB_REPO, canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
+from reviewer.contracts.schema import is_safe_relpath
 from reviewer.contracts.snapshot import SnapshotError, build_manifest
 from reviewer.gateway import AuthorizationError, DisabledProvider, SpendBook, trusted_authorization
 from reviewer.historical import BridgeError
@@ -50,6 +58,14 @@ QUALITY = ("synthetic mechanics control, model-decided: not recall, not competit
            "midsized-repository cost; a hit or miss is judged outside this tool")
 _DIGEST_RX = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA_RX = re.compile(r"[0-9a-f]{64}")
+CONTROL_PINS_SCHEMA = "control-pins@1"
+CONTROL_LABEL = ("private synthetic control, operator-supplied and self-authored: not historical, not independent "
+                 "evidence, no recall or quality rate; any expected result is held outside both trees and every request")
+_ID_RX = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+MAX_PINS_BYTES = 4 << 20
+MAX_CONTROL_FILES = 20_000
+MAX_CONTROL_FILE_BYTES = 8 << 20
+MAX_CONTROL_DEPTH = 32
 
 
 class PositiveError(Exception):
@@ -70,6 +86,10 @@ class PositiveOptions:
     replay_trace: str | None = None
     trace_digest: str | None = None
     config: str | None = None
+    control_dir: str | None = None       # the four control options are all given or all absent
+    control_id: str | None = None
+    control_repo: str | None = None
+    control_pins: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,7 +98,8 @@ class Prepared:
     base: SnapshotInput
     head: SnapshotInput
     source: dict            # {"scopeDigest", "fileCount", "baselineCapturedAt"}
-    fixture: Path
+    fixture: Path           # the snapshot parent: the checked-in fixture, or the real path of the control
+    control: dict | None = None     # {"pinsDigest", "fileCounts"} only when a control was selected
 
 
 def check_options(o: PositiveOptions) -> None:
@@ -110,6 +131,143 @@ def check_options(o: PositiveOptions) -> None:
             raise PositiveError("--replay-trace/--trace-digest are only for replay")
         if not o.auth:
             raise PositiveError(f"{o.mode} needs --auth")
+    check_control_options(o)
+
+
+# ------------------------------------------------------------------ optional private control
+
+def _real(p) -> Path:
+    return Path(os.path.realpath(os.path.abspath(p)))
+
+
+def _overlap(a: Path, b: Path) -> bool:
+    return a == b or a in b.parents or b in a.parents
+
+
+def _control_roots(o: PositiveOptions) -> tuple:
+    """Untrusted content the trust boundaries (config, auth, env, state, output, trace) must stay out of."""
+    return (o.control_dir, o.control_pins) if o.control_dir is not None else ()
+
+
+def check_control_options(o: PositiveOptions) -> None:
+    """Syntax and path overlaps only (no file content is read): refused before any config, auth, state, key or output."""
+    given = (o.control_dir, o.control_id, o.control_repo, o.control_pins)
+    if all(v is None for v in given):
+        return
+    if not all(isinstance(v, str) and v for v in given):
+        raise PositiveError("--control-dir, --control-id, --control-repo and --control-pins are needed together")
+    if not _ID_RX.fullmatch(o.control_id) or not GITHUB_REPO.fullmatch(o.control_repo) \
+            or o.control_repo != o.control_repo.lower():
+        raise PositiveError("--control-id and --control-repo must be lowercase slugs (id, owner/name)")
+    if o.control_id == CASE_ID or o.control_repo == CASE_REPO:
+        raise PositiveError("--control-id/--control-repo may not reuse the checked-in fixture's identity")
+    if os.path.islink(os.path.abspath(o.control_dir)):
+        raise PositiveError("the control directory may not be a link")
+    ctl, repo, pins = _real(o.control_dir), _real(REPO), _real(o.control_pins)
+    if _overlap(ctl, repo):
+        raise PositiveError("the control must lie outside the checkout")
+    if _overlap(pins, repo):
+        raise PositiveError("the control pins must be held outside the checkout")
+    if pins == _real(o.source_baseline):
+        raise PositiveError("the control pins and the source baseline must be separate files")
+    for name, path in (("source baseline", o.source_baseline), ("control pins", o.control_pins), ("output", o.out_dir),
+                       ("authorization", o.auth), ("state", o.state_dir), ("env file", o.env_file),
+                       ("replay trace", o.replay_trace), ("config", o.config)):
+        if path and _overlap(ctl, _real(path)):
+            raise PositiveError(f"the {name} path overlaps the control")
+
+
+def _read_pins(o: PositiveOptions) -> dict:
+    try:
+        fd = os.open(os.path.abspath(o.control_pins), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise PositiveError("control pins are absent, unreadable or a link") from None
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise PositiveError("control pins are not a regular file")
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_PINS_BYTES + 1)
+    if len(data) > MAX_PINS_BYTES:
+        raise PositiveError("control pins are too large")
+    try:
+        doc = loads_strict(data)
+    except ContractInputError:
+        raise PositiveError("control pins are not strict JSON (malformed or a duplicate key)") from None
+    if not isinstance(doc, dict) or set(doc) != {"schema", "caseId", "repo", "base", "head"} \
+            or doc["schema"] != CONTROL_PINS_SCHEMA:
+        raise PositiveError(f"control pins are not exactly a {CONTROL_PINS_SCHEMA} document")
+    if doc["caseId"] != o.control_id or doc["repo"] != o.control_repo:
+        raise PositiveError("control pins bind a different case id or repo than the options")
+    for side in ("base", "head"):
+        files = doc[side]
+        if not isinstance(files, dict) or not 0 < len(files) <= MAX_CONTROL_FILES or not all(
+                isinstance(k, str) and is_safe_relpath(k) and isinstance(v, str) and _SHA_RX.fullmatch(v)
+                for k, v in files.items()):
+            raise PositiveError(f"control pins list a malformed or empty {side} tree")
+    return doc
+
+
+def _hash_regular(path: str) -> str:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError:
+        raise PositiveError("a control file is unreadable or a link") from None
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_CONTROL_FILE_BYTES:
+            raise PositiveError("a control file is not regular or exceeds the size cap")
+        data = f.read(MAX_CONTROL_FILE_BYTES + 1)
+    if len(data) > MAX_CONTROL_FILE_BYTES:
+        raise PositiveError("a control file grew past the size cap")
+    return sha256_hex(data)
+
+
+def _control_tree(root: Path, side: str, pinned: dict) -> dict:
+    """Hash every pinned file under `root`; unpinned files are listed (value None) and never read. Links, special files
+    and executables are refused."""
+    have = {}
+
+    def visit(d: str, prefix: str, depth: int) -> None:
+        if depth > MAX_CONTROL_DEPTH:
+            raise PositiveError(f"control {side} nests too deeply")
+        try:
+            entries = sorted(os.scandir(d), key=lambda e: e.name)
+        except OSError:
+            raise PositiveError(f"control {side} is unreadable") from None
+        for e in entries:
+            rel = prefix + e.name
+            if e.is_symlink():
+                raise PositiveError(f"control {side}/{rel!a} is a symlink")
+            if e.is_dir(follow_symlinks=False):
+                visit(e.path, rel + "/", depth + 1)
+                continue
+            mode = e.stat(follow_symlinks=False).st_mode
+            if not stat.S_ISREG(mode) or mode & 0o111 or not is_safe_relpath(rel):
+                raise PositiveError(f"control {side}/{rel!a} is not a plain non-executable file")
+            if len(have) >= MAX_CONTROL_FILES:
+                raise PositiveError(f"control {side} has too many files")
+            have[rel] = _hash_regular(e.path) if rel in pinned else None
+    visit(str(root), "", 0)
+    return have
+
+
+def load_control(o: PositiveOptions) -> tuple:
+    """(pins document, real control path) once EVERY file of both trees equals its pin. Nothing else is accepted."""
+    check_control_options(o)
+    doc = _read_pins(o)
+    ctl = _real(o.control_dir)
+    if not ctl.is_dir() or sorted(os.listdir(ctl)) != ["base", "head"]:
+        raise PositiveError("the control directory must hold exactly base/ and head/")
+    for side in ("base", "head"):
+        if os.path.islink(ctl / side) or not (ctl / side).is_dir():
+            raise PositiveError(f"control {side} is not a plain directory")
+        pinned, have = doc[side], _control_tree(ctl / side, side, doc[side])
+        missing, extra = sorted(pinned.keys() - have.keys()), sorted(k for k, v in have.items() if v is None)
+        changed = sorted(k for k, v in have.items() if v is not None and v != pinned[k])
+        if missing or extra or changed:
+            raise PositiveError(f"control {side} differs from its pins: " + "; ".join(
+                f"{n} {v[:4]}" for n, v in (("unpinned", extra), ("missing", missing), ("changed", changed)) if v))
+    return doc, ctl
 
 
 # ------------------------------------------------------------------ trusted source baseline
@@ -163,28 +321,37 @@ def load_source_baseline(path: str, repo: Path = REPO) -> dict:
 
 def prepare(o: PositiveOptions) -> Prepared:
     source = load_source_baseline(o.source_baseline)             # BEFORE anything of the checkout is trusted
+    pins = None
+    root, case_id, case_repo = FIXTURE, CASE_ID, CASE_REPO
+    if o.control_dir is not None:
+        pins, root = load_control(o)                             # every file of both trees, before a snapshot is built
+        case_id, case_repo = o.control_id, o.control_repo
     snaps = {}
     for side in ("base", "head"):
         try:
-            m = build_manifest(FIXTURE / side)
+            m = build_manifest(root / side)
         except SnapshotError as e:
             raise PositiveError(f"fixture {side} is not a plain snapshot: {str(e)[:200]}") from None
-        snaps[side] = SnapshotInput(FIXTURE / side, m)
+        if pins is not None and {e["path"]: (e["type"], e["sha256"]) for e in m["entries"]} != {
+                k: ("file", v) for k, v in pins[side].items()}:
+            raise PositiveError(f"control {side} changed while it was being pinned")
+        snaps[side] = SnapshotInput(root / side, m)
     ids = {s: snaps[s].manifest["snapshotId"] for s in snaps}
     if ids["base"] == ids["head"]:
         raise PositiveError("fixture base and head are identical")
     case = require("CaseInput", {
-        "schema": "case-input@1", "id": CASE_ID, "repo": CASE_REPO, "synthetic": True,
+        "schema": "case-input@1", "id": case_id, "repo": case_repo, "synthetic": True,
         "base": {"snapshotId": ids["base"], "root": "base"}, "head": {"snapshotId": ids["head"], "root": "head"},
         "pr": {"title": "", "body": ""}})
-    return Prepared(case, snaps["base"], snaps["head"], source, FIXTURE)
+    control = pins and {"pinsDigest": digest(pins), "fileCounts": {s: len(pins[s]) for s in ("base", "head")}}
+    return Prepared(case, snaps["base"], snaps["head"], source, root, control)
 
 
 def effective_config(o: PositiveOptions, cfg: EffectiveConfig | None = None) -> EffectiveConfig:
     """Resolved (and validated) before the fixture, output, state, key or any model action."""
     if cfg is not None:
         return cfg
-    return resolve_config(o.config, forbidden_roots=(FIXTURE, o.out_dir, o.source_baseline))
+    return resolve_config(o.config, forbidden_roots=(FIXTURE, o.out_dir, o.source_baseline, *_control_roots(o)))
 
 
 def _profile_parts(cfg: EffectiveConfig | None = None):
@@ -194,10 +361,13 @@ def _profile_parts(cfg: EffectiveConfig | None = None):
 
 
 def config_identity(prep: Prepared, profile: dict, plan: dict, policy) -> dict:
-    return {"schema": CONFIG_SCHEMA, "caseId": CASE_ID, "sourceScopeDigest": prep.source["scopeDigest"],
-            "snapshotIds": {"base": prep.case["base"]["snapshotId"], "head": prep.case["head"]["snapshotId"]},
-            "profile": digest(profile), "plan": digest(plan), "retrievalPolicy": policy.digest,
-            "prTextSupplied": False}
+    ident = {"schema": CONFIG_SCHEMA, "caseId": prep.case["id"], "sourceScopeDigest": prep.source["scopeDigest"],
+             "snapshotIds": {"base": prep.case["base"]["snapshotId"], "head": prep.case["head"]["snapshotId"]},
+             "profile": digest(profile), "plan": digest(plan), "retrievalPolicy": policy.digest,
+             "prTextSupplied": False}
+    if prep.control:                    # absent by default: the checked-in fixture's identity is unchanged
+        ident["control"] = {"pinsDigest": prep.control["pinsDigest"], "caseId": prep.case["id"], "repo": prep.case["repo"]}
+    return ident
 
 
 def eval_run_id(o: PositiveOptions, cfg: dict) -> str:
@@ -215,7 +385,7 @@ def provider_scope(evr: str, prep: Prepared) -> str:
 
 def build_spec(o, prep: Prepared, backend, runs: Path, profile, plan, policy) -> ReviewSpec:
     cfg = config_identity(prep, profile, plan, policy)
-    host = HostConfig(out_root=runs, eval=EvalIdentity(eval_run_id(o, cfg), CASE_ID, 0), config_identity=cfg,
+    host = HostConfig(out_root=runs, eval=EvalIdentity(eval_run_id(o, cfg), prep.case["id"], 0), config_identity=cfg,
                       forbidden_roots=(prep.fixture,), wall_clock=utc_now, retrieval=policy)
     return ReviewSpec(case=copy.deepcopy(prep.case), base=SnapshotInput(prep.base.root, copy.deepcopy(prep.base.manifest)),
                       head=SnapshotInput(prep.head.root, copy.deepcopy(prep.head.manifest)), profile=profile,
@@ -223,19 +393,22 @@ def build_spec(o, prep: Prepared, backend, runs: Path, profile, plan, policy) ->
 
 
 def header(prep: Prepared) -> dict:
-    return {"case": CASE_ID, "repo": CASE_REPO, "synthetic": True, "sourceBaseline": prep.source,
-            "snapshotIds": {"base": prep.case["base"]["snapshotId"], "head": prep.case["head"]["snapshotId"]},
-            "prText": "OMITTED: the reviewer sees no PR title or body",
-            "outcome": "model-decided: this tool never scripts, scores or retries the result", "quality": QUALITY}
+    rep = {"case": prep.case["id"], "repo": prep.case["repo"], "synthetic": True, "sourceBaseline": prep.source,
+           "snapshotIds": {"base": prep.case["base"]["snapshotId"], "head": prep.case["head"]["snapshotId"]},
+           "prText": "OMITTED: the reviewer sees no PR title or body",
+           "outcome": "model-decided: this tool never scripts, scores or retries the result", "quality": QUALITY}
+    if prep.control:
+        rep["control"] = {"label": CONTROL_LABEL, **prep.control}
+    return rep
 
 
 # ------------------------------------------------------------------ output
 
 def check_out(o: PositiveOptions) -> Path:
-    forbidden = [REPO / "reviewer", REPO / "fixtures", REPO / "tests", o.source_baseline]
+    forbidden = [REPO / "reviewer", REPO / "fixtures", REPO / "tests", o.source_baseline, *_control_roots(o)]
     forbidden += [p for p in (o.auth, o.state_dir, o.env_file, o.replay_trace) if p]
     try:
-        return _check_out(o.out_dir, FIXTURE, forbidden)
+        return _check_out(o.out_dir, Path(o.control_dir) if o.control_dir is not None else FIXTURE, forbidden)
     except BridgeError as e:
         raise PositiveError(str(e)[:200]) from None
 
@@ -246,7 +419,7 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
     cfg = effective_config(o, cfg)
     check_out(o)
     profile, plan, policy = _profile_parts(cfg)
-    handle = trusted_authorization(o.auth, forbidden_roots=[REPO, Path(os.path.realpath(o.out_dir))])
+    handle = trusted_authorization(o.auth, forbidden_roots=[REPO, Path(os.path.realpath(o.out_dir)), *_control_roots(o)])
     scratch = tempfile.TemporaryDirectory(prefix="pilot-positive-plan-")
     transport = CapturingTransport()
     problem = result = None
@@ -321,7 +494,7 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
     cfg = effective_config(o, cfg)
     out = check_out(o)
     profile, plan, policy = _profile_parts(cfg)
-    handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out])
+    handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out, *_control_roots(o)])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
                                   o.baseline_micros if o.book_baseline_micros is None else o.book_baseline_micros)
@@ -339,7 +512,7 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
         raise PositiveError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
     runs = make_out(out)
     try:
-        key = key_loader(o.env_file, forbidden_roots=[REPO / "reviewer", REPO / "fixtures", out])
+        key = key_loader(o.env_file, forbidden_roots=[REPO / "reviewer", REPO / "fixtures", out, *_control_roots(o)])
         provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
                                       transport=transport, run_scope=provider_scope(evr, prep))
         backend = RecordBackend(handle, book, _providers(provider), utc_now)
@@ -426,6 +599,8 @@ def render(rep: dict) -> str:
     L = [f"mode: {rep['mode']}   status: {rep['status']}   ok: {rep['ok']}", f"case: {rep['case']} ({rep['repo']})",
          f"  source baseline: {rep['sourceBaseline']['fileCount']} files scope {rep['sourceBaseline']['scopeDigest']}",
          f"  {rep['quality']}"]
+    if rep.get("control"):
+        L.append(f"  control: {rep['control']['label']} (pins {rep['control']['pinsDigest']})")
     L.append(f"  review models: { {r: v['model'] for r, v in rep['reviewModels']['roles'].items()} } "
              f"(config {rep['reviewModels']['source']} {rep['reviewModels']['digest']})")
     if rep["mode"] == "plan":
@@ -470,6 +645,10 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--confirm-live", action="store_true", help="required with --mode live")
     ap.add_argument("--replay-trace", help="recorded trace.jsonl (replay)")
     ap.add_argument("--trace-digest", help="operator-held sha256:<64 hex> of the trace (replay)")
+    ap.add_argument("--control-dir", help="private control: directory holding exactly base/ and head/ (needs the three below)")
+    ap.add_argument("--control-id", help="private control: neutral lowercase case id")
+    ap.add_argument("--control-repo", help="private control: neutral lowercase owner/name")
+    ap.add_argument("--control-pins", help="private control: external control-pins@1 binding every file of both trees")
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
     return ap
@@ -481,7 +660,9 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
     o = PositiveOptions(mode=a.mode, source_baseline=a.source_baseline, out_dir=a.out, auth=a.auth,
                         state_dir=a.state_dir, env_file=a.env, baseline_micros=a.baseline_micros,
                         book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
-                        replay_trace=a.replay_trace, trace_digest=a.trace_digest, config=a.config)
+                        replay_trace=a.replay_trace, trace_digest=a.trace_digest, config=a.config,
+                        control_dir=a.control_dir, control_id=a.control_id, control_repo=a.control_repo,
+                        control_pins=a.control_pins)
     try:
         rep = run_positive(o, transport=transport, key_loader=key_loader, runner=runner)
     except (PositiveError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
