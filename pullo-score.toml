@@ -1,0 +1,33 @@
+# Pullo score configuration (schema pullo-score-config@1). Read ONLY from the path given to load_score_config.
+# No environment or CLI override. Sampling and effort are OMITTED for every compared tool (null/absent = omit, never sent).
+# Prices are not configured here; the host supplies a pinned catalog price. Retries, repairs and fallbacks are 0 and not configurable.
+schema = "pullo-score-config@1"
+model = "anthropic/claude-opus-5.5"
+
+[sampling]
+policy = "omit"
+
+[limits]
+max_candidates_per_tool_case = 200
+max_pairs_per_tool_case = 2000
+max_calls_per_score_run = 2002
+skip_dedup_below = 2
+min_extract_chars = 20
+
+[caps.extract]
+max_output_tokens = 8000
+timeout_sec = 120
+[caps.dedup]
+max_output_tokens = 4000
+timeout_sec = 120
+[caps.pair]
+max_output_tokens = 256
+timeout_sec = 60
+
+[prompts]
+extract_version = "bench.extract@v2"
+extract_sha256 = "4f260c3ea8be0414cadfa7073345eda7735bafd9db1008c6fac70947c8c40899"
+dedup_version = "bench.dedup@v2"
+dedup_sha256 = "9c94b0c03cab34dc5425034cc57169eca853fd38a07bb3b9acd06d9664e9dbe9"
+pair_version = "bench.pair@v2"
+pair_sha256 = "7afb457a8a790a8952b5ffd1264e5e3baea764b775756c32ad673cac2df0aef2"
