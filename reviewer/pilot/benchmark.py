@@ -38,6 +38,7 @@ from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_US
 from reviewer.runtime.openrouter import OpenRouterProvider
 from reviewer.runtime.turn_canary import Refused, open_state
 
+from .ancestry import AncestryError, check_endpoints, verify_chain
 from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gateway_costs, ledger_costs, utc_now
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
@@ -63,6 +64,7 @@ ADMISSION_KEYS = {"schema", "originalUrl", "resolvedRepo", "asOfBase", "asOfHead
                   "admittedBy", "admittedAt", "decisionRef"}
 DECISION_TRUE = ("mappingAgainstPinnedSourceVerified", "importByteIdentityReverified", "rawCommitObjectsHashVerified",
                  "originalHeadSoleParentIsBase")
+ANCESTRY_TRUE = DECISION_TRUE[:3] + ("mergeBaseAncestryVerified",)   # new mode: replaces the legacy sole-parent flag
 DECISION_GO = ("GO for cutoff eligibility of this case only", "GO")      # exact values; never a prefix match
 BASELINE_KEYS = {"schema", "caseUrl", "proofSha256", "admissionDigest", "decisionSha256", "importPinsDigest",
                  "changedPaths", "reviewConfigDigest", "authorizationSha256"}
@@ -329,9 +331,17 @@ def check_decision(url: str, proof_sha: str, d: dict, proof: dict) -> None:
         raise BenchmarkLaunchError("root decision is for a different case URL")
     if d.get("proofSha256") != proof_sha:
         raise BenchmarkLaunchError("root decision does not pin this exact proof file")
-    for k in DECISION_TRUE:
+    new_mode = "mergeBaseAncestryVerified" in d or "ancestryProof" in d
+    if new_mode and "originalHeadSoleParentIsBase" in d:
+        raise BenchmarkLaunchError("root decision mixes the legacy sole-parent flag with the ancestry proof")
+    for k in (ANCESTRY_TRUE if new_mode else DECISION_TRUE):
         if d.get(k) is not True:
             raise BenchmarkLaunchError(f"root decision does not confirm {k}")
+    if new_mode:
+        try:
+            verify_chain(d.get("ancestryProof"), proof["asOfHead"], proof["mergeBase"])
+        except AncestryError as e:
+            raise BenchmarkLaunchError(f"root decision {e}") from None
     paid = d.get("newPaidCalls")
     if type(paid) is not int or paid != 0:
         raise BenchmarkLaunchError("root decision newPaidCalls must be the integer 0")
@@ -457,7 +467,13 @@ def ingest(o: BenchmarkOptions, cfg: EffectiveConfig) -> BenchIngested:
             raise BenchmarkLaunchError(f"{side} import pins file changed while it was being read")
         if digest(ip) != bl["importPinsDigest"][side]:
             raise BenchmarkLaunchError(f"launch baseline importPinsDigest.{side} differs from the supplied import pins")
-    if head.record.get("parents") != [proof["mergeBase"]]:
+    if "ancestryProof" in dec:                       # new mode (validated in check_decision); legacy stays sole-parent
+        try:
+            check_endpoints(verify_chain(dec["ancestryProof"], proof["asOfHead"], proof["mergeBase"]),
+                            head.record, base.record)
+        except AncestryError as e:
+            raise BenchmarkLaunchError(f"root decision {e}") from None
+    elif head.record.get("parents") != [proof["mergeBase"]]:
         raise BenchmarkLaunchError("the head commit's sole parent is not the proof's merge base")
     if base.snapshot_id == head.snapshot_id or base.record["treeOid"] == head.record["treeOid"]:
         raise BenchmarkLaunchError("base and head imports are the same content: not a reviewable change")
