@@ -11,7 +11,7 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
                                        JUDGE_FACT_WORDING_PROMPT, VERIFIER_CONTEXT_CHECK_PROMPT)
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
 
-from .profile import MODEL, ProfileError, live_plan, live_profile
+from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile
 
 PROFILE_ID = "pilot-repository"
 MAX_TOOL_CALLS = 160            # run-wide tool calls (matches RetrievalPolicy.run_tool_calls)
@@ -41,8 +41,11 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
     return profile
 
 
-def repository_plan(profile: dict) -> dict:
-    plan = live_plan(profile)
+def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
+    """`live_stage_timing` (explicit, default off = the legacy Plan) sets the versioned live stage ceilings and
+    host-stop recording together; no repository data selects either."""
+    plan = live_plan(profile, **({"stage_ceilings_sec": LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True}
+                                 if live_stage_timing else {}))
     plan["budget"] = dict(plan["budget"], maxToolCalls=MAX_TOOL_CALLS, maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
     plan["reasons"] = ["pilot-repository: fixed standard Plan, retries/repairs off, complete pinned repository imports"]
     return plan

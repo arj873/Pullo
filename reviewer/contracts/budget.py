@@ -230,8 +230,23 @@ def deadline_state(budget: dict, elapsed_sec: float) -> str:
     return "ok"
 
 
-def stage_deadline_exceeded(stage: str, stage_elapsed_sec: float) -> bool:
-    ceiling = STAGE_CEILING_SEC[stage]
+HOST_STOP_RECORDING_V1 = "host-stop@1"  # experimental: stop position = (stage, scope, afterSeq); adjacent gates at one seq collide
+HOST_STOP_RECORDING_V2 = "host-stop@2"  # adds a per-stage gateOrdinal, unique across EVERY Engine.gate check
+HOST_STOP_RECORDING_VERSIONS = (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2)
+HOST_STOP_RECORDING = HOST_STOP_RECORDING_V2   # Plan budget `hostStopRecording`: Engine.gate stops are trace events (latest)
+
+
+def stage_ceiling(stage: str, budget: dict | None = None) -> int | None:
+    """Effective ceiling of a stage: the Plan budget's `stageCeilingsSec` entry, else the legacy table value.
+    A budget without the key (every core and legacy Plan) keeps the table exactly."""
+    configured = (budget or {}).get("stageCeilingsSec")
+    if configured is not None and stage in configured:
+        return configured[stage]
+    return STAGE_CEILING_SEC[stage]
+
+
+def stage_deadline_exceeded(stage: str, stage_elapsed_sec: float, budget: dict | None = None) -> bool:
+    ceiling = stage_ceiling(stage, budget)
     return ceiling is not None and stage_elapsed_sec >= ceiling
 
 

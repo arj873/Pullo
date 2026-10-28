@@ -61,6 +61,8 @@ class PilotOptions:
     output_caps: dict = field(default_factory=dict)
     wall_clock_sec: int = WALL_CLOCK_SEC
     soft_deadline_sec: int = SOFT_DEADLINE_SEC
+    stage_ceilings_sec: dict | None = None      # explicit versioned stage ceilings; None = legacy table
+    record_host_stops: bool = False             # record Engine.gate stops (host.stop) for faithful strict replay
     replay_trace: str | None = None
     trace_digest: str | None = None
     keep_going: bool = False
@@ -348,7 +350,8 @@ def run_cases(o: PilotOptions, *, transport=None, key_loader=load_openrouter_key
     paths = check_options(o)
     cfg = reconcile_legacy_model(resolve_config(o.config, forbidden_roots=(paths.corpus, paths.out)), o.model)
     profile = live_profile(output_caps=o.output_caps, models=cfg.models)
-    plan = live_plan(profile, wall_clock_sec=o.wall_clock_sec, soft_deadline_sec=o.soft_deadline_sec)
+    plan = live_plan(profile, wall_clock_sec=o.wall_clock_sec, soft_deadline_sec=o.soft_deadline_sec,
+                     stage_ceilings_sec=o.stage_ceilings_sec, host_stop_recording=o.record_host_stops)
     baseline = load_baseline(o.pins_baseline) if o.pins_baseline else None
     pre = []
     for case in o.cases:                       # cheap checks for EVERY case before any spend

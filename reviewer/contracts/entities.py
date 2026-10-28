@@ -17,8 +17,10 @@ from .redaction import json_contains_protected
 from .schema import (REGISTRY, Arr, Bool, Const, Enum, Int, Invariant, Issue, Json, Map, Nullable,
                      Num, Obj, RelPath, Scalar, Str, Union, define, validate)
 from .severity import RANK, STRENGTHS, TRUSTED_TOOL_STATUSES
+from .budget import HOST_STOP_RECORDING_VERSIONS
 from .stages import (ACCESS_POLICY, ERROR_CODES, INCOMPLETE_REASONS, LIVE_MODES, OFFLINE_MODES,
-                     REPLAYABLE_FROM, RUN_MODES, RUN_STATUSES, STAGE_STATUSES, STAGES, TRIGGERS)
+                     REPLAYABLE_FROM, RUN_MODES, RUN_STATUSES, STAGE_CEILING_SEC, STAGE_STATUSES, STAGES,
+                     TRIGGERS)
 
 # ---------------------------------------------------------------- primitives
 
@@ -874,13 +876,33 @@ def _budget_ok(d):
         yield ".maxToolCallsPerAgent", "exceeds run total"
 
 
+_SYNC_STAGES = tuple(st for st, sec in STAGE_CEILING_SEC.items() if sec is not None)
+
+
+def _ceilings_ok(d):
+    ceil = d.get("stageCeilingsSec")
+    if ceil is not None:
+        if not ceil:
+            yield ".stageCeilingsSec", "must name at least one stage (omit the key for the legacy ceilings)"
+        for st, sec in ceil.items():
+            if sec > d["wallClockSec"]:
+                yield f".stageCeilingsSec.{st}", "exceeds the hard run deadline (wallClockSec)"
+
+
 Budget = define("Budget", Obj(
     required={"maxUsdMicros": Int(1, 10**9), "maxToolCalls": Int(0, 10_000),
               "maxToolCallsPerAgent": Int(0, 10_000),
               "maxToolOutputTokensPerAgent": Int(0, 10**8),
               "wallClockSec": Int(1, 86_400), "softDeadlineSec": Int(1, 86_400),
               "verifyReserveBp": Int(0, 10000), "maxRetriesPerCall": Int(0, 3)},
-    invariants=[Invariant("budget-order", "soft <= hard deadline; per-agent <= total", _budget_ok)],
+    optional={"stageCeilingsSec": Obj(required={}, optional={st: Int(1, 86_400) for st in _SYNC_STAGES},
+                                      description="Optional per-stage ceilings in seconds (synchronous stages "
+                                                  "only; LEARN is async). A listed stage replaces its legacy "
+                                                  "table ceiling, an unlisted one keeps it; absent = legacy."),
+              "hostStopRecording": Enum(*HOST_STOP_RECORDING_VERSIONS)},
+    invariants=[Invariant("budget-order", "soft <= hard deadline; per-agent <= total", _budget_ok),
+                Invariant("stage-ceilings", "stageCeilingsSec is non-empty and each ceiling <= wallClockSec",
+                          _ceilings_ok)],
     description="Hard caps (run ceiling <= $1000). Admission rules in budget.py; calls that "
                 "would exceed are refused. Effective retries = min(maxRetriesPerCall, role "
                 "caps.maxRetries); repairs <= 1; each is a new admission.",
@@ -1229,6 +1251,15 @@ def _review_cost_event_ok(d):
         yield ".record.kind", "a review trace carries no score cost"
 
 
+HOST_STOP_SCOPES = ("tool", "retrieval", "new-agent", "model")
+HOST_STOP_CODES = ("cancelled", "hard-deadline", "stage-deadline", "soft-deadline")
+
+
+def _host_stop_ok(d):
+    if d["afterSeq"] != d["seq"] - 1:
+        yield ".afterSeq", "must equal seq - 1"
+
+
 TraceEvent = define("TraceEvent", Union("type", {
     "run.start": _event("run.start", {"run": ReviewRun}),
     "stage.start": _event("stage.start", {"stage": Stage}),
@@ -1254,6 +1285,13 @@ TraceEvent = define("TraceEvent", Union("type", {
     "cost": _event("cost", {"record": CostRecord},
                    invariants=[Invariant("review-cost-kind", "a review trace carries no score cost (kind=score "
                                          "belongs to the score family)", _review_cost_event_ok)]),
+    "host.stop": _event("host.stop", {
+        "stage": Stage, "scope": Enum(*HOST_STOP_SCOPES), "code": Enum(*HOST_STOP_CODES),
+        "afterSeq": Int(0, 10**9)},
+        {"gateOrdinal": Int(1, 10**9)},
+        [Invariant("stop-position", "afterSeq is the seq of the event immediately before the "
+                              "decision; gateOrdinal (host-stop@2) is the 1-based count of this stage's gate checks "
+                              "including this one", _host_stop_ok)]),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
     "error": _event("error", {"error": TypedError}),

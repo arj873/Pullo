@@ -97,6 +97,38 @@ def ex(name):
     return loads_strict((EXAMPLES / f"{name}.json").read_bytes())
 
 
+# ---- LIVE-DEADLINE-04 (+HOST-POSITION-01: host-stop@2 enum + optional gateOrdinal repinned below): root-declared deliberate shared-schema extension (NOT a claim the old defs are byte-identical).
+# Exactly these deltas are subtracted before comparing Budget/TraceEvent with the ORIGINAL legacy pins below, which are
+# kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
+# TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
+LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
+LIVE_TRACEEVENT_DIGEST = "sha256:7cd136dbd446caa159a1b120798073ffae98e490c2c861ff5f39c724c5aeb80b"
+LIVE_HOST_STOP_DIGEST = "sha256:f4b6bf08491c8f2fda91c1c075fb9d3ca1c9cb0e9228731106606a319f55965f"
+
+
+def budget_minus_live(b):
+    b = copy.deepcopy(b)
+    for k in ("stageCeilingsSec", "hostStopRecording"):
+        assert k in b["properties"] and k not in b["required"], k
+        del b["properties"][k]
+    inv = [i for i in b["x-invariants"] if i.startswith("stage-ceilings:")]
+    assert len(inv) == 1, inv
+    b["x-invariants"] = [i for i in b["x-invariants"] if i not in inv]
+    return b
+
+
+def traceevent_minus_live(te):
+    te = copy.deepcopy(te)
+    hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == "host.stop"]
+    assert len(hits) == 1, hits
+    del te["oneOf"][hits[0]]
+    return te
+
+
+def host_stop_variant(te):
+    return next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "host.stop")
+
+
 def costrecord_minus_delta(cr):
     """CostRecord def with the one intended delta (kind's appended "score") removed."""
     cr = copy.deepcopy(cr)
@@ -108,7 +140,7 @@ def costrecord_minus_delta(cr):
 def traceevent_minus_delta(te):
     """TraceEvent def with the one intended delta (the cost variant's leading review-cost-kind invariant) removed;
     fails if the entry is missing, misplaced or appears in any other variant."""
-    te = copy.deepcopy(te)
+    te = traceevent_minus_live(te)      # LIVE-DEADLINE-04 deliberate host.stop variant, subtracted first
     hits = [(i, j) for i, v in enumerate(te["oneOf"]) for j, s in enumerate(v.get("x-invariants", []))
             if s.startswith("review-cost-kind:")]
     assert len(hits) == 1, hits
@@ -227,9 +259,17 @@ class Base(unittest.TestCase):
 # ============================================================ L1 / L2: compatibility against the frozen baseline
 class L1L2Compatibility(Base):
     def test_every_baseline_def_except_the_two_declared_changed_defs_is_byte_identical(self):
-        got = [[n, C.digest(REGISTRY[n].to_json())] for n in OLD_DEF_NAMES - CHANGED_DEFS]
+        got = [[n, C.digest(budget_minus_live(REGISTRY[n].to_json()) if n == "Budget" else REGISTRY[n].to_json())]
+               for n in OLD_DEF_NAMES - CHANGED_DEFS]
         self.assertEqual(len(got), 39)
         self.assertEqual(combined(got), OLD_DEFS_COMBINED)
+
+    def test_live_stage_budget_and_host_stop_shapes_are_pinned_independently(self):
+        # LIVE-DEADLINE-04: the new shapes are asserted on their own, so the normalization excuses nothing else.
+        self.assertEqual(C.digest(REGISTRY["Budget"].to_json()), LIVE_BUDGET_DIGEST)
+        te = REGISTRY["TraceEvent"].to_json()
+        self.assertEqual(C.digest(te), LIVE_TRACEEVENT_DIGEST)
+        self.assertEqual(C.digest(host_stop_variant(te)), LIVE_HOST_STOP_DIGEST)
 
     def test_CostRecord_changes_only_by_appending_score_to_kind(self):
         cr = REGISTRY["CostRecord"].to_json()
@@ -253,8 +293,11 @@ class L1L2Compatibility(Base):
         bundle = loads_strict((ROOT / "reviewer/contracts/schemas/contracts.schema.json").read_bytes())
         self.assertEqual(bundle["$id"], "reviewer-contracts-s0a-contracts@7")
         self.assertEqual(set(bundle["$defs"]), OLD_DEF_NAMES | NEW_DEF_NAMES)
-        got = [[n, C.digest(bundle["$defs"][n])] for n in OLD_DEF_NAMES - CHANGED_DEFS]
+        got = [[n, C.digest(budget_minus_live(bundle["$defs"][n]) if n == "Budget" else bundle["$defs"][n])]
+               for n in OLD_DEF_NAMES - CHANGED_DEFS]
         self.assertEqual(combined(got), OLD_DEFS_COMBINED)
+        for n in ("Budget", "TraceEvent", "CostRecord"):                    # and the current registry, exactly
+            self.assertEqual(C.digest(bundle["$defs"][n]), C.digest(REGISTRY[n].to_json()), n)
         self.assertEqual(C.digest(costrecord_minus_delta(bundle["$defs"]["CostRecord"])), COSTRECORD_BASELINE)
         self.assertEqual(C.digest(traceevent_minus_delta(bundle["$defs"]["TraceEvent"])), TRACEEVENT_BASELINE)
 

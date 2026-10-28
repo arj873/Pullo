@@ -35,6 +35,10 @@ def _parser() -> argparse.ArgumentParser:
         ap.add_argument(f"--{r}-max-output-tokens", type=int, default=v, help=f"1..{MAX_OUTPUT_CAP} (default {v})")
     ap.add_argument("--wall-clock-sec", type=int, default=WALL_CLOCK_SEC)
     ap.add_argument("--soft-deadline-sec", type=int, default=SOFT_DEADLINE_SEC)
+    ap.add_argument("--stage-ceiling", action="append", metavar="STAGE=SEC",
+                    help="explicit per-stage ceiling in seconds (repeatable); absent = the legacy stage table")
+    ap.add_argument("--record-host-stops", action="store_true",
+                    help="record deadline/cancel stops (host.stop) so strict replay reproduces them")
     ap.add_argument("--keep-going", action="store_true", help="continue to the next case after a non-completed case")
     ap.add_argument("--json", action="store_true", help="print the full report as JSON")
     return ap
@@ -88,10 +92,17 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
         ap.error("--live and --replay-trace are mutually exclusive")
     mode = "live" if a.live else "replay" if a.replay_trace else "plan"
     caps = {r: getattr(a, f"{r}_max_output_tokens") for r in OUTPUT_CAPS}
+    ceilings = None
+    if a.stage_ceiling:
+        try:
+            ceilings = {k: int(v) for k, v in (x.split("=", 1) for x in a.stage_ceiling)}
+        except ValueError:
+            ap.error("--stage-ceiling must be STAGE=SECONDS")
     o = PilotOptions(corpus_root=a.corpus_root, pins_dir=a.pins_dir, out_dir=a.out, cases=tuple(a.case), mode=mode,
                      auth=a.auth, state_dir=a.state_dir, env_file=a.env, pins_baseline=a.pins_baseline,
                      repeat=a.repeat, model=a.model, config=a.config, output_caps=caps, wall_clock_sec=a.wall_clock_sec,
-                     soft_deadline_sec=a.soft_deadline_sec, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
+                     soft_deadline_sec=a.soft_deadline_sec, stage_ceilings_sec=ceilings,
+                     record_host_stops=a.record_host_stops, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
                      keep_going=a.keep_going)
     try:
         rep = run_cases(o, transport=transport, key_loader=key_loader)

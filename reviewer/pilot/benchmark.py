@@ -114,6 +114,7 @@ class BenchmarkOptions:
     repeat: int = 0
     config: str | None = None
     experiment: str = "baseline"      # opt-in prompt arm; the default is the unchanged baseline
+    live_stage_timing: bool = False   # opt-in: versioned live stage ceilings + host-stop recording (binds the plan)
 
 
 @dataclass(frozen=True)
@@ -508,7 +509,8 @@ def effective_config(o: BenchmarkOptions, cfg: EffectiveConfig | None = None) ->
 
 def _profile_parts(o: BenchmarkOptions, cfg: EffectiveConfig):
     profile = repository_profile(o.retrieval, cfg.models, o.experiment)
-    return profile, repository_plan(profile), repository_policy(o.retrieval, o.experiment)
+    return (profile, repository_plan(profile, live_stage_timing=o.live_stage_timing),
+            repository_policy(o.retrieval, o.experiment))
 
 
 def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retrieval: bool, cfg: EffectiveConfig,
@@ -862,6 +864,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--retrieval", choices=("on", "off"), default="on", help="Turn retrieval roles (ablation switch)")
     ap.add_argument("--experiment", choices=prompts.EXPERIMENTS, default=prompts.EXPERIMENT_BASELINE,
                     help="opt-in prompt arm (default: baseline). Needs --retrieval on; binds the run identity")
+    ap.add_argument("--live-stage-timing", action="store_true",
+                    help="opt-in: stage ceilings INVESTIGATE 300/VERIFY 300/JUDGE 200 + host-stop recording (binds the plan)")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
@@ -877,7 +881,8 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                          auth=a.auth, state_dir=a.state_dir, env_file=a.env, baseline_micros=a.baseline_micros,
                          book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
                          replay_trace=a.replay_trace, trace_digest=a.trace_digest, retrieval=a.retrieval == "on",
-                         repeat=a.repeat, config=a.config, experiment=a.experiment)
+                         repeat=a.repeat, config=a.config, experiment=a.experiment,
+                         live_stage_timing=a.live_stage_timing)
     try:
         rep = run_benchmark(o, transport=transport, key_loader=key_loader, runner=runner)
     except (BenchmarkLaunchError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:

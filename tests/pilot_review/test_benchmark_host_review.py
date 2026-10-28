@@ -48,7 +48,10 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # A DIFFERENT worker independently reviewed and gated that new version (SOURCE GO) before this pin was moved to it; the author did
 # not approve its own feature. The previous gate's full test is archived unchanged outside this tree, its outcome not weakened.
 # Only benchmark.py's accepted hash changed; ancestry.py and the author/independent ancestry tests are pinned alongside it.
-GATED = {"reviewer/pilot/benchmark.py": "4fe30e9429b42f03b9c5f0cda9283088166772b17d8174d04995a9574c1c729f",
+# LIVE-DEADLINE-04: benchmark.py candidate pin moved to the LIVE-DEADLINE-02 opt-in live-stage-timing extension
+# (--live-stage-timing). This is an intentional extension that still awaits the independent LIVE-DEADLINE-03 gate; it is
+# NOT already accepted. The previous pin 4fe30e94... is retained in orchestration/archive (before-LIVE-DEADLINE04).
+GATED = {"reviewer/pilot/benchmark.py": "4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807",
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
