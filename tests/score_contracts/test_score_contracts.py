@@ -99,6 +99,38 @@ def ex(name):
     return json.loads((EXAMPLES / f"{name}.json").read_text())
 
 
+# ---- LIVE-DEADLINE-04: root-declared deliberate shared-schema extension (NOT a claim the old defs are byte-identical).
+# Exactly these deltas are subtracted before comparing Budget/TraceEvent with the ORIGINAL legacy pins below, which are
+# kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
+# TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
+LIVE_BUDGET_DIGEST = "sha256:fe71eafb39b874b0f494ac9689fe9321d8467474ae30a1531c36d160ece8c2d0"
+LIVE_TRACEEVENT_DIGEST = "sha256:8f2129965ec019fa4a03c02de8243f6f8cdecb1de742741d6aaef6a4f4249d04"
+LIVE_HOST_STOP_DIGEST = "sha256:26bb396078d98f0f46966f047c18dded2c8bd8164b73a1ff4dfaac9221a3116d"
+
+
+def budget_minus_live(b):
+    b = copy.deepcopy(b)
+    for k in ("stageCeilingsSec", "hostStopRecording"):
+        assert k in b["properties"] and k not in b["required"], k
+        del b["properties"][k]
+    inv = [i for i in b["x-invariants"] if i.startswith("stage-ceilings:")]
+    assert len(inv) == 1, inv
+    b["x-invariants"] = [i for i in b["x-invariants"] if i not in inv]
+    return b
+
+
+def traceevent_minus_live(te):
+    te = copy.deepcopy(te)
+    hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == "host.stop"]
+    assert len(hits) == 1, hits
+    del te["oneOf"][hits[0]]
+    return te
+
+
+def host_stop_variant(te):
+    return next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "host.stop")
+
+
 def dig(schema_json):
     return C.digest(schema_json)
 
@@ -208,9 +240,16 @@ class Compatibility(Base):
             if name in self.CHANGED_LEGACY_DEFS:
                 continue
             with self.subTest(name):
-                self.assertEqual(dig(REGISTRY[name].to_json()), want)
+                cur = REGISTRY[name].to_json()
+                self.assertEqual(dig(budget_minus_live(cur) if name == "Budget" else cur), want)
         changed = sorted(n for n, want in BASELINE_DEF_DIGESTS.items() if dig(REGISTRY[n].to_json()) != want)
-        self.assertEqual(changed, sorted(self.CHANGED_LEGACY_DEFS))
+        self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget")))   # + LIVE-DEADLINE-04 Budget delta
+
+    def test_live_stage_budget_and_host_stop_shapes_are_pinned_independently(self):
+        self.assertEqual(dig(REGISTRY["Budget"].to_json()), LIVE_BUDGET_DIGEST)
+        te = REGISTRY["TraceEvent"].to_json()
+        self.assertEqual(dig(te), LIVE_TRACEEVENT_DIGEST)
+        self.assertEqual(dig(host_stop_variant(te)), LIVE_HOST_STOP_DIGEST)
 
     def test_TraceEvent_differs_only_by_the_cost_variant_invariant(self):
         te = copy.deepcopy(REGISTRY["TraceEvent"].to_json())
@@ -218,7 +257,7 @@ class Compatibility(Base):
         inv = variants["cost"]["x-invariants"]
         self.assertEqual([i.split(":")[0] for i in inv], ["review-cost-kind", "no-secrets"])
         variants["cost"]["x-invariants"] = [i for i in inv if not i.startswith("review-cost-kind")]
-        self.assertEqual(dig(te), BASELINE_DEF_DIGESTS["TraceEvent"])       # field shapes and every other variant untouched
+        self.assertEqual(dig(traceevent_minus_live(te)), BASELINE_DEF_DIGESTS["TraceEvent"])       # field shapes and every other variant untouched
 
     def test_CostRecord_differs_only_by_the_score_kind(self):
         cr = copy.deepcopy(REGISTRY["CostRecord"].to_json())
@@ -248,7 +287,9 @@ class Compatibility(Base):
         self.assertEqual(sorted(bundle["$defs"]), list(ENTITY_NAMES))
         for name, want in BASELINE_DEF_DIGESTS.items():
             if name not in self.CHANGED_LEGACY_DEFS:
-                self.assertEqual(dig(bundle["$defs"][name]), want, name)
+                got = bundle["$defs"][name]
+                self.assertEqual(dig(budget_minus_live(got) if name == "Budget" else got), want, name)
+                self.assertEqual(dig(got), dig(REGISTRY[name].to_json()), name)       # and the current registry
             else:
                 self.assertEqual(dig(bundle["$defs"][name]), dig(REGISTRY[name].to_json()), name)
         self.assertEqual(export_bundle("x")["$defs"].keys(), bundle["$defs"].keys())

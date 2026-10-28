@@ -231,20 +231,48 @@ class Engine:
         return next((e for e in self.recorder.events if e["type"] == "model.call" and e["callId"] == call_id), None)
 
     # ------------------------------------------------------------------ gating
-    def gate(self, stage: str, stage_t0: float, *, new_agent: bool = False):
+    def gate(self, stage: str, stage_t0: float, *, new_agent: bool = False, scope: str = "tool"):
         """None when work may start, else (incomplete reason, TypedError). Checked before every tool and
-        model call; never hidden behind a retry."""
-        if self.host.cancel is not None and self.host.cancel():
+        model call; never hidden behind a retry. With budget.hostStopRecording a stop is a `host.stop` trace
+        event, and strict replay takes the decision from the recording at the same position (never the clock);
+        cancellation is still honored."""
+        scope = "new-agent" if new_agent else scope
+        recording = self.budget.get("hostStopRecording") is not None
+        if recording and self.orig is not None:
+            stop = self._recorded_stop(stage, scope)
+            if stop is None and self.host.cancel is not None and self.host.cancel():
+                stop = "cancelled"
+        else:
+            stop = self._clock_stop(stage, stage_t0, new_agent)
+        if stop is None:
+            return None
+        if recording:
+            self.recorder.append("host.stop", stage=stage, scope=scope, code=stop,
+                                 afterSeq=len(self.recorder.events) - 1)
+        if stop == "cancelled":
             return "cancelled", typed_error("cancelled", "run cancelled by the host", stage=stage)
-        elapsed = max(0.0, self.clock() - self.t0)
-        state = deadline_state(self.budget, elapsed)
-        if state == "hard":
-            return "deadline", typed_error("deadline-exceeded", "hard run deadline reached", stage=stage)
-        if stage_deadline_exceeded(stage, max(0.0, self.clock() - stage_t0)):
-            return "deadline", typed_error("deadline-exceeded", f"{stage} stage ceiling reached", stage=stage)
-        if state == "soft" and new_agent:
+        if stop == "soft-deadline":
             return "soft-deadline", typed_error("deadline-exceeded", "soft deadline: no new agent starts", stage=stage)
+        msg = "hard run deadline reached" if stop == "hard-deadline" else f"{stage} stage ceiling reached"
+        return "deadline", typed_error("deadline-exceeded", msg, stage=stage)
+
+    def _clock_stop(self, stage: str, stage_t0: float, new_agent: bool) -> str | None:
+        if self.host.cancel is not None and self.host.cancel():
+            return "cancelled"
+        state = deadline_state(self.budget, max(0.0, self.clock() - self.t0))
+        if state == "hard":
+            return "hard-deadline"
+        if stage_deadline_exceeded(stage, max(0.0, self.clock() - stage_t0), self.budget):
+            return "stage-deadline"
+        if state == "soft" and new_agent:
+            return "soft-deadline"
         return None
+
+    def _recorded_stop(self, stage: str, scope: str) -> str | None:
+        """Replay: the stop code the recording holds at exactly this position (stage, scope, last event seq)."""
+        at = len(self.recorder.events) - 1
+        return next((e["code"] for e in self.orig.get(stage, ())
+                     if e["type"] == "host.stop" and e["afterSeq"] == at and e["scope"] == scope), None)
 
     def next_ordinal(self, stage: str, role: str, agent: str) -> int:
         """Fresh monotonic ordinal of a retrieval hop for (stage, role, agent); never reused in a run."""
@@ -286,7 +314,7 @@ class Engine:
                    for x in e["result"]["evidence"])
         if used > self.budget["maxToolOutputTokensPerAgent"] * 3:      # ~3 chars per token, conservative
             return None, "tool-calls-exhausted"
-        g = self.gate(session.stage, stage_t0)
+        g = self.gate(session.stage, stage_t0, scope="tool")
         if g is not None:
             return None, g[0]
         call = session.call(tool, args)
@@ -339,6 +367,9 @@ class Engine:
         if error is not None and status == "failed":
             self.set_fatal(stage, error)
         host_stopped = self.fatal is not None and self.fatal["error"]["code"] in ("cancelled", "deadline-exceeded")
+        if host_stopped and self.orig is not None and self.budget.get("hostStopRecording") is not None and any(
+                e["type"] == "host.stop" for e in (*self.orig[stage], *r.events[start:])):
+            host_stopped = False        # a recorded stop is reproduced and compared like any other event
         if self.orig is not None and not self.replay_broken and not host_stopped:   # a host stop is not a divergence
             want = self.orig[stage][:-2]                               # everything before stage.end/checkpoint
             diff = first_difference(want, r.events[start:])
@@ -732,7 +763,7 @@ class Engine:
         else:
             req = prompts.verifier_request(self.profile, self.profile_ref, self.case, hyp, items, omitted + notes,
                                            coverage=self.coverage_doc())
-            g = self.gate(stage, t0)                  # the last tool call may have crossed a deadline / cancel
+            g = self.gate(stage, t0, scope="model")  # the last tool call may have crossed a deadline / cancel
             if g is not None:
                 return self._verify_failed(hid, g[1], [], inc)
             out, err, attempts = self.model_call(stage, "verifier", VERIFIER_AGENT, n, req)
@@ -937,7 +968,7 @@ class Engine:
         judged = top + [(f, c) for f, c in over if any(f["id"] in g for g in in_play)]
         wording, proposed = {}, []
         if judged:
-            g = self.gate(stage, t0)
+            g = self.gate(stage, t0, scope="model")
             if g is not None:
                 inc.append(self._inc(stage, g[0], "deterministic wording used"))
                 if g[0] == "cancelled":

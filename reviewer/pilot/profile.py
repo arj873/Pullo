@@ -8,7 +8,8 @@ tool limits are NOT set here: the pipeline defaults apply."""
 from __future__ import annotations
 
 from reviewer.config import ReviewModels
-from reviewer.contracts.budget import STANDARD_S0A_BUDGET
+from reviewer.contracts import validate
+from reviewer.contracts.budget import HOST_STOP_RECORDING, STANDARD_S0A_BUDGET
 from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS, gateway_price
 
 MODEL = "anthropic/claude-sonnet-5.5"
@@ -18,6 +19,9 @@ OUTPUT_CAPS = {"investigator": 16_000, "verifier": 6_000, "judge": 8_000}
 TIMEOUTS = {"investigator": 300, "verifier": 150, "judge": 200}
 MAX_OUTPUT_CAP = 100_000
 WALL_CLOCK_SEC, SOFT_DEADLINE_SEC = 1_200, 900     # live latency: the synthetic 360/240 would cut real runs short
+# Explicit live stage ceilings (seconds) for repository live reviews: headroom over the role-call caps (investigator
+# 300, verifier 150, judge 200) for multi-hop retrieval. Not derived from findings or gold; other stages stay legacy.
+LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200}
 _OUT = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput", "judge": "JudgeOutput"}
 _PV = {"investigator": "investigator.generalist@v1", "verifier": "verifier.refute@v1", "judge": "judge.wording@v1"}
 
@@ -54,9 +58,20 @@ def live_profile(model: str | None = None, output_caps: dict | None = None, time
             "roles": {r: role(r) for r in _OUT}}
 
 
-def live_plan(profile: dict, *, wall_clock_sec: int = WALL_CLOCK_SEC, soft_deadline_sec: int = SOFT_DEADLINE_SEC) -> dict:
+def live_plan(profile: dict, *, wall_clock_sec: int = WALL_CLOCK_SEC, soft_deadline_sec: int = SOFT_DEADLINE_SEC,
+              stage_ceilings_sec: dict | None = None, host_stop_recording: bool = False) -> dict:
+    """Absent `stage_ceilings_sec`/`host_stop_recording` (the default) leaves the Plan byte-identical to before: the
+    legacy stage table applies and Engine.gate stops are not recorded. Both are trusted host options only."""
     budget = dict(STANDARD_S0A_BUDGET, maxUsdMicros=RUN_CEILING_USD_MICROS, maxRetriesPerCall=0,
                   wallClockSec=wall_clock_sec, softDeadlineSec=soft_deadline_sec)
+    if stage_ceilings_sec is not None:
+        budget["stageCeilingsSec"] = dict(stage_ceilings_sec)
+    if host_stop_recording:
+        budget["hostStopRecording"] = HOST_STOP_RECORDING
+    if stage_ceilings_sec is not None or host_stop_recording:
+        issues = validate("Budget", budget)
+        if issues:
+            raise ProfileError(f"invalid stage timing: {issues[0]}")
     return {"version": 1, "tier": "standard", "specialists": ["generalist"], "budget": budget,
             "modelProfile": f"{profile['id']}@{profile['version']}", "triage": "fixed-rule@1",
             "reasons": ["pilot: fixed standard Plan, retries/repairs off pending gateway D3/D4"]}

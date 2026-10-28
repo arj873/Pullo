@@ -29,7 +29,7 @@ class RunGuard:
         if deadline_state(self.budget, max(0.0, now - self.t0)) == "hard":
             return self._refuse(ctx, GuardRefusal("deadline-exceeded", "hard run deadline reached"))
         st = self.stage_t0.get(ctx.stage)
-        if st is not None and stage_deadline_exceeded(ctx.stage, max(0.0, now - st)):
+        if st is not None and stage_deadline_exceeded(ctx.stage, max(0.0, now - st), self.budget):
             return self._refuse(ctx, GuardRefusal("deadline-exceeded", f"{ctx.stage} stage ceiling reached"))
         return None
 

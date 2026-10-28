@@ -4,6 +4,11 @@
       "additionalProperties": false,
       "description": "Hard caps (run ceiling <= $1000). Admission rules in budget.py; calls that would exceed are refused. Effective retries = min(maxRetriesPerCall, role caps.maxRetries); repairs <= 1; each is a new admission.",
       "properties": {
+        "hostStopRecording": {
+          "enum": [
+            "host-stop@1"
+          ]
+        },
         "maxRetriesPerCall": {
           "maximum": 3,
           "minimum": 0,
@@ -34,6 +39,49 @@
           "minimum": 1,
           "type": "integer"
         },
+        "stageCeilingsSec": {
+          "additionalProperties": false,
+          "description": "Optional per-stage ceilings in seconds (synchronous stages only; LEARN is async). A listed stage replaces its legacy table ceiling, an unlisted one keeps it; absent = legacy.",
+          "properties": {
+            "INGEST": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "INVESTIGATE": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "JUDGE": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "PREPARE": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "PUBLISH": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "TRIAGE": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "VERIFY": {
+              "maximum": 86400,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
         "verifyReserveBp": {
           "maximum": 10000,
           "minimum": 0,
@@ -57,7 +105,8 @@
       ],
       "type": "object",
       "x-invariants": [
-        "budget-order: soft <= hard deadline; per-agent <= total"
+        "budget-order: soft <= hard deadline; per-agent <= total",
+        "stage-ceilings: stageCeilingsSec is non-empty and each ceiling <= wallClockSec"
       ]
     },
     "CaseInput": {
@@ -5128,6 +5177,78 @@
           "type": "object",
           "x-invariants": [
             "review-cost-kind: a review trace carries no score cost (kind=score belongs to the score family)",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "afterSeq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "code": {
+              "enum": [
+                "cancelled",
+                "hard-deadline",
+                "stage-deadline",
+                "soft-deadline"
+              ]
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "scope": {
+              "enum": [
+                "tool",
+                "retrieval",
+                "new-agent",
+                "model"
+              ]
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INGEST",
+                "PREPARE",
+                "TRIAGE",
+                "INVESTIGATE",
+                "VERIFY",
+                "JUDGE",
+                "PUBLISH",
+                "LEARN"
+              ]
+            },
+            "type": {
+              "const": "host.stop"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "scope",
+            "code",
+            "afterSeq"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "stop-position: afterSeq is the seq of the event immediately before the decision",
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },
