@@ -17,7 +17,7 @@ from .redaction import json_contains_protected
 from .schema import (REGISTRY, Arr, Bool, Const, Enum, Int, Invariant, Issue, Json, Map, Nullable,
                      Num, Obj, RelPath, Scalar, Str, Union, define, validate)
 from .severity import RANK, STRENGTHS, TRUSTED_TOOL_STATUSES
-from .budget import HOST_STOP_RECORDING
+from .budget import HOST_STOP_RECORDING_VERSIONS
 from .stages import (ACCESS_POLICY, ERROR_CODES, INCOMPLETE_REASONS, LIVE_MODES, OFFLINE_MODES,
                      REPLAYABLE_FROM, RUN_MODES, RUN_STATUSES, STAGE_CEILING_SEC, STAGE_STATUSES, STAGES,
                      TRIGGERS)
@@ -899,7 +899,7 @@ Budget = define("Budget", Obj(
                                       description="Optional per-stage ceilings in seconds (synchronous stages "
                                                   "only; LEARN is async). A listed stage replaces its legacy "
                                                   "table ceiling, an unlisted one keeps it; absent = legacy."),
-              "hostStopRecording": Enum(HOST_STOP_RECORDING)},
+              "hostStopRecording": Enum(*HOST_STOP_RECORDING_VERSIONS)},
     invariants=[Invariant("budget-order", "soft <= hard deadline; per-agent <= total", _budget_ok),
                 Invariant("stage-ceilings", "stageCeilingsSec is non-empty and each ceiling <= wallClockSec",
                           _ceilings_ok)],
@@ -1288,8 +1288,10 @@ TraceEvent = define("TraceEvent", Union("type", {
     "host.stop": _event("host.stop", {
         "stage": Stage, "scope": Enum(*HOST_STOP_SCOPES), "code": Enum(*HOST_STOP_CODES),
         "afterSeq": Int(0, 10**9)},
-        invariants=[Invariant("stop-position", "afterSeq is the seq of the event immediately before the "
-                              "decision", _host_stop_ok)]),
+        {"gateOrdinal": Int(1, 10**9)},
+        [Invariant("stop-position", "afterSeq is the seq of the event immediately before the "
+                              "decision; gateOrdinal (host-stop@2) is the 1-based count of this stage's gate checks "
+                              "including this one", _host_stop_ok)]),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
     "error": _event("error", {"error": TypedError}),

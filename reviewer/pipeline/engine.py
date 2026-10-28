@@ -21,7 +21,7 @@ import json
 
 from reviewer.contracts import (check_finding_provenance, citable_tool_calls, is_turn_schema, require, terminal_payload,
                                 validate)
-from reviewer.contracts.budget import deadline_state, stage_deadline_exceeded
+from reviewer.contracts.budget import HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state, stage_deadline_exceeded
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
@@ -150,6 +150,7 @@ class Engine:
         self.policy = identity.retrieval_policy(spec)           # None unless a role returns the Turn envelope
         self.guard = guard
         self._ordinals: dict[tuple, int] = {}
+        self._gate_n: dict[str, int] = {}      # per-STAGE count of gate checks (host-stop@2 position); reset per stage run
         self.run, self.rd, self.recorder, self.gw = run, rd, recorder, gateway
         self.pv = spec.plan["version"]
         self.base_id, self.head_id = self.case["base"]["snapshotId"], self.case["head"]["snapshotId"]
@@ -169,6 +170,7 @@ class Engine:
         if self.guard is not None:
             self.guard.t0 = self.t0
         self.orig = orig                      # replay: {stage: recorded events}
+        self._check_recorded_stops()
         self.expected_unconsumed = prior_model_calls
         self.artifacts: dict[str, dict] = {}
         self.digests: dict[str, str] = {}
@@ -237,9 +239,12 @@ class Engine:
         event, and strict replay takes the decision from the recording at the same position (never the clock);
         cancellation is still honored."""
         scope = "new-agent" if new_agent else scope
-        recording = self.budget.get("hostStopRecording") is not None
+        policy = self.budget.get("hostStopRecording")
+        recording = policy is not None
+        n = self._gate_n[stage] = self._gate_n.get(stage, 0) + 1     # EVERY check counts, stop or not, event or not
+        ordinal = n if policy == HOST_STOP_RECORDING_V2 else None
         if recording and self.orig is not None:
-            stop = self._recorded_stop(stage, scope)
+            stop = self._recorded_stop(stage, scope, ordinal)
             if stop is None and self.host.cancel is not None and self.host.cancel():
                 stop = "cancelled"
         else:
@@ -247,8 +252,9 @@ class Engine:
         if stop is None:
             return None
         if recording:
+            extra = {} if ordinal is None else {"gateOrdinal": ordinal}
             self.recorder.append("host.stop", stage=stage, scope=scope, code=stop,
-                                 afterSeq=len(self.recorder.events) - 1)
+                                 afterSeq=len(self.recorder.events) - 1, **extra)
         if stop == "cancelled":
             return "cancelled", typed_error("cancelled", "run cancelled by the host", stage=stage)
         if stop == "soft-deadline":
@@ -268,11 +274,35 @@ class Engine:
             return "soft-deadline"
         return None
 
-    def _recorded_stop(self, stage: str, scope: str) -> str | None:
-        """Replay: the stop code the recording holds at exactly this position (stage, scope, last event seq)."""
+    def _recorded_stop(self, stage: str, scope: str, ordinal: int | None = None) -> str | None:
+        """Replay: the stop code the recording holds at exactly this position (stage, scope, last event seq, and for
+        host-stop@2 the stage's gate ordinal). host-stop@1 recordings keep their coarse (stage, scope, afterSeq)
+        position: two adjacent gates at one seq cannot be told apart (documented limitation, not silently upgraded)."""
         at = len(self.recorder.events) - 1
         return next((e["code"] for e in self.orig.get(stage, ())
-                     if e["type"] == "host.stop" and e["afterSeq"] == at and e["scope"] == scope), None)
+                     if e["type"] == "host.stop" and e["afterSeq"] == at and e["scope"] == scope
+                     and (ordinal is None or e.get("gateOrdinal") == ordinal)), None)
+
+    def _check_recorded_stops(self) -> None:
+        """Strict replay refuses an incoherent recording BEFORE any gate runs (so before any live access): host stops
+        without a policy, a v1 policy with ordinals, or a v2 stop whose gateOrdinal is missing, not an int >= 1, or not
+        strictly increasing within its stage."""
+        if self.orig is None:
+            return
+        policy = self.budget.get("hostStopRecording")
+        for stage, events in self.orig.items():
+            last = 0
+            for e in events:
+                if e["type"] != "host.stop":
+                    continue
+                o = e.get("gateOrdinal")
+                bad = (policy is None and "the Plan has no hostStopRecording policy"
+                       or policy == HOST_STOP_RECORDING_V1 and "gateOrdinal" in e and "host-stop@1 carries no gateOrdinal"
+                       or policy == HOST_STOP_RECORDING_V2 and (isinstance(o, bool) or not isinstance(o, int) or o < 1
+                                                                or o <= last) and "missing, invalid or non-increasing gateOrdinal")
+                if bad:
+                    raise PipelineError("replay-recording", f"{stage}: host.stop incoherent with the Plan: {bad}")
+                last = o or last
 
     def next_ordinal(self, stage: str, role: str, agent: str) -> int:
         """Fresh monotonic ordinal of a retrieval hop for (stage, role, agent); never reused in a run."""
@@ -353,6 +383,7 @@ class Engine:
         r = self.recorder
         r.append("stage.start", stage=stage)
         start = len(r.events) - 1
+        self._gate_n[stage] = 0
         t0 = self.clock()
         if self.guard is not None:
             self.guard.stage_t0[stage] = t0
