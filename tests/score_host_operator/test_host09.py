@@ -2,6 +2,8 @@
 reconcile holds the canonical shared scorer lock. FAKE evidence/auth/state/transport only; no actual canary or reconcile."""
 from __future__ import annotations
 
+import contextlib
+import datetime as _dt
 import fcntl
 import json
 import os
@@ -10,6 +12,24 @@ import stat
 from reviewer import score_host as H
 from reviewer import score_host_cli as C
 from tests.score_host_operator.test_operator import EVR, NOW, Fixture, sha256_hex
+
+
+@contextlib.contextmanager
+def fixed_clock(iso=NOW):
+    """Scoped deterministic clock: datetime.datetime.now() returns the fixture instant (fake catalog is valid at NOW) and is
+    restored on exit. The subclass keeps every other datetime method/type intact; only now() is pinned."""
+    fixed = _dt.datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
+    real = _dt.datetime
+
+    class FixedDatetime(real):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is None else fixed.astimezone(tz)
+    _dt.datetime = FixedDatetime
+    try:
+        yield
+    finally:
+        _dt.datetime = real
 
 
 class Canary(Fixture):
@@ -39,7 +59,8 @@ class Canary(Fixture):
         return (self.state / "runtime-ledger.jsonl").read_text().splitlines()
 
     def test_evidence_is_derived_from_actual_calls_and_admits_a_campaign(self):
-        rc, rep, _ = self.canary()
+        with fixed_clock():                                            # receipt observedAt/expiresAt come from the fixture clock, not wallclock
+            rc, rep, _ = self.canary()
         ev = next((self.tmp / "out").glob("*.canary-evidence.json"))
         self.assertEqual(stat.S_IMODE(ev.stat().st_mode), 0o600)
         doc = json.loads(ev.read_text())
@@ -63,14 +84,8 @@ class Canary(Fixture):
         p = self.tmp / "op" / "campaign.json"
         p.write_text(json.dumps(base))
         os.chmod(p, 0o600)
-        import reviewer.score_baseline as BL
-        old = BL._ts
-        try:
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            rc, rep, _ = self.op("live", "--confirm-live", "--eval-run-id", "evr_5555555555555555", base=p, now=now)
-        finally:
-            BL._ts = old
+        with fixed_clock():
+            rc, rep, _ = self.op("live", "--confirm-live", "--eval-run-id", "evr_5555555555555555", base=p, now=NOW)
         self.assertEqual(rc, 0, rep)
 
     def test_failed_or_invalid_probe_stops_and_writes_no_evidence(self):
