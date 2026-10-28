@@ -44,8 +44,16 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # The exact public source/test bytes this gate reviewed (ticket BENCH-REVIEW-03-review, re-gate of the BENCH-REVIEW-02 fixes). A
 # later edit must be re-gated, not inherited. The interface document's acceptance pin is kept in private orchestration evidence,
 # not in this public test.
-GATED = {"reviewer/pilot/benchmark.py": "e9b18ffad67026bfc7b8803960e50a4835d5f2f190339f8902edec552ae393a6",
-         "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748"}
+# 2026-10-27 source-pin migration (BENCH-ANCESTRY-02-review): benchmark.py changed by BENCH-ANCESTRY-01 (generic ancestry proof).
+# A DIFFERENT worker independently reviewed and gated that new version (SOURCE GO) before this pin was moved to it; the author did
+# not approve its own feature. The previous gate's full test is archived unchanged outside this tree, its outcome not weakened.
+# Only benchmark.py's accepted hash changed; ancestry.py and the author/independent ancestry tests are pinned alongside it.
+GATED = {"reviewer/pilot/benchmark.py": "4fe30e9429b42f03b9c5f0cda9283088166772b17d8174d04995a9574c1c729f",
+         "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
+         "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
+         "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
+         "tests/benchmark_ancestry_review/test_ancestry_review.py":
+             "a8dd6ba279e3cf547b2bbdf6ee50cb540ad04865d18ff092192ab1f4b1e814f3"}
 
 SONNET = "anthropic/claude-sonnet-5.5"
 OPUS = "anthropic/claude-opus-5.5"
