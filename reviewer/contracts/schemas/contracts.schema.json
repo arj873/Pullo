@@ -6,7 +6,8 @@
       "properties": {
         "hostStopRecording": {
           "enum": [
-            "host-stop@1"
+            "host-stop@1",
+            "host-stop@2"
           ]
         },
         "maxRetriesPerCall": {
@@ -5200,6 +5201,11 @@
                 "soft-deadline"
               ]
             },
+            "gateOrdinal": {
+              "maximum": 1000000000,
+              "minimum": 1,
+              "type": "integer"
+            },
             "runId": {
               "pattern": "^(?:run_[0-9a-f]{16})$",
               "type": "string"
@@ -5248,7 +5254,7 @@
           ],
           "type": "object",
           "x-invariants": [
-            "stop-position: afterSeq is the seq of the event immediately before the decision",
+            "stop-position: afterSeq is the seq of the event immediately before the decision; gateOrdinal (host-stop@2) is the 1-based count of this stage's gate checks including this one",
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },

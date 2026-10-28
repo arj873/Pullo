@@ -230,7 +230,10 @@ def deadline_state(budget: dict, elapsed_sec: float) -> str:
     return "ok"
 
 
-HOST_STOP_RECORDING = "host-stop@1"     # Plan budget `hostStopRecording`: Engine.gate stops are trace events
+HOST_STOP_RECORDING_V1 = "host-stop@1"  # experimental: stop position = (stage, scope, afterSeq); adjacent gates at one seq collide
+HOST_STOP_RECORDING_V2 = "host-stop@2"  # adds a per-stage gateOrdinal, unique across EVERY Engine.gate check
+HOST_STOP_RECORDING_VERSIONS = (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2)
+HOST_STOP_RECORDING = HOST_STOP_RECORDING_V2   # Plan budget `hostStopRecording`: Engine.gate stops are trace events (latest)
 
 
 def stage_ceiling(stage: str, budget: dict | None = None) -> int | None:

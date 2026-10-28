@@ -97,13 +97,13 @@ def ex(name):
     return loads_strict((EXAMPLES / f"{name}.json").read_bytes())
 
 
-# ---- LIVE-DEADLINE-04: root-declared deliberate shared-schema extension (NOT a claim the old defs are byte-identical).
+# ---- LIVE-DEADLINE-04 (+HOST-POSITION-01: host-stop@2 enum + optional gateOrdinal repinned below): root-declared deliberate shared-schema extension (NOT a claim the old defs are byte-identical).
 # Exactly these deltas are subtracted before comparing Budget/TraceEvent with the ORIGINAL legacy pins below, which are
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
-LIVE_BUDGET_DIGEST = "sha256:fe71eafb39b874b0f494ac9689fe9321d8467474ae30a1531c36d160ece8c2d0"
-LIVE_TRACEEVENT_DIGEST = "sha256:8f2129965ec019fa4a03c02de8243f6f8cdecb1de742741d6aaef6a4f4249d04"
-LIVE_HOST_STOP_DIGEST = "sha256:26bb396078d98f0f46966f047c18dded2c8bd8164b73a1ff4dfaac9221a3116d"
+LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
+LIVE_TRACEEVENT_DIGEST = "sha256:7cd136dbd446caa159a1b120798073ffae98e490c2c861ff5f39c724c5aeb80b"
+LIVE_HOST_STOP_DIGEST = "sha256:f4b6bf08491c8f2fda91c1c075fb9d3ca1c9cb0e9228731106606a319f55965f"
 
 
 def budget_minus_live(b):
