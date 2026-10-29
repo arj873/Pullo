@@ -1,0 +1,14 @@
+{
+  "candidates": [
+    {
+      "endSegment": 3,
+      "sourceCommentId": "c001",
+      "startSegment": 1
+    },
+    {
+      "endSegment": 2,
+      "sourceCommentId": "c002",
+      "startSegment": 2
+    }
+  ]
+}

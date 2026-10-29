@@ -79,7 +79,7 @@ def _request(cfg, profile_ref: str, kind: str, data: dict) -> dict:
     # Params carry ONLY the output cap (equal to the trusted profile role): no temperature/top_p/top_k/effort, no null.
     return {"provider": "anthropic", "model": "anthropic/claude-opus-5.5", "profile": profile_ref, "role": P.ROLE_OF[kind],
             "promptVersion": P.VERSIONS[kind],
-            "outputSchema": {"extract": "ScoreExtraction", "dedup": "ScoreDedup", "pair": "ScorePair"}[kind],
+            "outputSchema": {"extract": "ScoreExtractionSegments", "dedup": "ScoreDedup", "pair": "ScorePair"}[kind],
             "params": {"maxOutputTokens": cfg.max_output[kind]}, "messages": P.messages(kind, data), "tools": []}
 
 
@@ -95,17 +95,27 @@ class Extraction:
 
 
 def parse_extraction(output, m: Mapping, cfg):
-    """-> (status, candidates). Whitespace-only text is valid; empty/non-str text, unknown source id, extra keys invalid."""
+    """bench.extract@v3 (ScoreExtractionSegments) -> (status, candidates). The model returns references, never text: each
+    candidate is {sourceCommentId, startSegment, endSegment}, an inclusive 1-based range of P.segments(comment text), and
+    its text is rebuilt HERE as the exact joined segments (an exact substring of the trusted comment; never trimmed).
+    Non-int or bool numbers, start < 1, end > segment count, start > end, an unknown or non-str id and extra/missing keys
+    are `extraction-invalid`; more than max_candidates is `oversize`. Candidate ids and `src` are as before, so
+    dedup/pair/metrics are unchanged."""
     if not isinstance(output, dict) or set(output) != {"candidates"} or not isinstance(output["candidates"], list):
         return "extraction-invalid", ()
     if len(output["candidates"]) > cfg.max_candidates:
         return "oversize", ()
+    segs = {cid: P.segments(text) for cid, text in m.comment_texts}
     out = []
     for n, c in enumerate(output["candidates"], 1):
-        if (not isinstance(c, dict) or set(c) != {"sourceCommentId", "text"} or not isinstance(c["text"], str) or not c["text"]
-                or not isinstance(c["sourceCommentId"], str) or c["sourceCommentId"] not in m.comment_ids):
+        if (not isinstance(c, dict) or set(c) != {"sourceCommentId", "startSegment", "endSegment"}
+                or not isinstance(c["sourceCommentId"], str) or c["sourceCommentId"] not in m.comment_ids
+                or c["sourceCommentId"] not in segs or type(c["startSegment"]) is not int or type(c["endSegment"]) is not int):
             return "extraction-invalid", ()
-        out.append({"id": f"k{n:04d}", "text": c["text"], "src": m.comment_ids[c["sourceCommentId"]]})
+        s, e, parts = c["startSegment"], c["endSegment"], segs[c["sourceCommentId"]]
+        if not 1 <= s <= e <= len(parts):
+            return "extraction-invalid", ()
+        out.append({"id": f"k{n:04d}", "text": "".join(parts[s - 1:e]), "src": m.comment_ids[c["sourceCommentId"]]})
     return "ok", tuple(out)
 
 

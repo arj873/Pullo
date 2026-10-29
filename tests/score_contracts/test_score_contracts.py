@@ -29,7 +29,8 @@ from reviewer.contracts.stages import ERROR_CODES, STAGE_CEILING_SEC, STAGES  # 
 
 EXAMPLES = ROOT / "reviewer" / "contracts" / "examples"
 NEW_DEFS = frozenset({"ScoreStage", "ScoreRole", "ScoreExtraction", "ScoreDedup", "ScorePair", "ScoreProfile",
-                      "ScoreRequest", "ScoreRun", "ScoreTraceEvent"})
+                      "ScoreRequest", "ScoreRun", "ScoreTraceEvent",
+                      "ScoreExtractionSegments"})                   # bench.extract@v3 by-reference extractor output (additive)
 SENTINEL = "SENTINEL_MODEL_TEXT_91c2"
 
 BASELINE_DEF_DIGESTS = {
@@ -367,13 +368,14 @@ class Compatibility(Base):
 # ============================================================ outputs, profile, request
 class Outputs(Base):
     def test_examples_are_valid(self):
-        for n, ent in (("ScoreExtraction.example", "ScoreExtraction"), ("ScoreDedup.example", "ScoreDedup"),
+        for n, ent in (("ScoreExtraction.example", "ScoreExtraction"), ("ScoreExtractionSegments.example", "ScoreExtractionSegments"),
+                       ("ScoreDedup.example", "ScoreDedup"),
                        ("ScorePair.example", "ScorePair")):
             self.assertValid(ent, ex(n))
 
     def test_outputs_are_closed_strict_projectable_objects_with_no_free_text_fields(self):
         bundle = export_bundle("t")["$defs"]
-        for name in ("ScoreExtraction", "ScoreDedup", "ScorePair"):
+        for name in ("ScoreExtraction", "ScoreExtractionSegments", "ScoreDedup", "ScorePair"):
             node = bundle[name]
             self.assertEqual(node["additionalProperties"], False)
             self.assertEqual(sorted(node["required"]), sorted(node["properties"]))      # every key required
@@ -401,6 +403,27 @@ class Outputs(Base):
                           "too many": {"candidates": [c] * 1001}}.items():
             with self.subTest(name):
                 self.assertInvalid("ScoreExtraction", doc)
+
+    def test_extraction_segments_v3_shape(self):
+        """bench.extract@v3: references only (id + inclusive 1-based segment range); the extractor role asks for this shape.
+        Order and the upper bound are local producer checks (extraction-invalid), not contract rules."""
+        self.assertEqual(SCORE_ROLE_SCHEMA["extractor"], "ScoreExtractionSegments")
+        self.assertEqual(sorted(export_bundle("t")["$defs"]["ScoreExtractionSegments"]["properties"]["candidates"]["items"]["properties"]),
+                         ["endSegment", "sourceCommentId", "startSegment"])
+        c = {"sourceCommentId": "c1", "startSegment": 1, "endSegment": 3}
+        for doc in ({"candidates": []}, {"candidates": [c]}, {"candidates": [c, c]},
+                    {"candidates": [{**c, "startSegment": 3, "endSegment": 2}]}):          # reversed: valid shape, refused locally
+            self.assertValid("ScoreExtractionSegments", doc)
+        for name, doc in {"zero start": {"candidates": [{**c, "startSegment": 0}]}, "zero end": {"candidates": [{**c, "endSegment": 0}]},
+                          "negative": {"candidates": [{**c, "startSegment": -1}]}, "bool start": {"candidates": [{**c, "startSegment": True}]},
+                          "bool end": {"candidates": [{**c, "endSegment": True}]}, "float end": {"candidates": [{**c, "endSegment": 3.0}]},
+                          "string start": {"candidates": [{**c, "startSegment": "1"}]}, "null end": {"candidates": [{**c, "endSegment": None}]},
+                          "text key": {"candidates": [{**c, "text": "x"}]}, "char offsets": {"candidates": [{"sourceCommentId": "c1", "start": 0, "end": 1}]},
+                          "missing end": {"candidates": [{"sourceCommentId": "c1", "startSegment": 1}]},
+                          "empty id": {"candidates": [{**c, "sourceCommentId": ""}]}, "extra top": {"candidates": [], "notes": "x"},
+                          "too many": {"candidates": [c] * 1001}}.items():
+            with self.subTest(name):
+                self.assertInvalid("ScoreExtractionSegments", doc)
 
     def test_dedup_boundaries(self):
         self.assertValid("ScoreDedup", {"groups": []})

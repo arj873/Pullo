@@ -2987,7 +2987,7 @@
     },
     "ScoreExtraction": {
       "additionalProperties": false,
-      "description": "Candidate findings extracted from one tool's review. text is required data and is kept exactly as supplied, including whitespace-only non-empty strings.",
+      "description": "LEGACY copy shape (bench.extract@v1/v2); not legal for any score role. Candidate findings extracted from one tool's review. text is required data and is kept exactly as supplied, including whitespace-only non-empty strings.",
       "properties": {
         "candidates": {
           "items": {
@@ -3007,6 +3007,46 @@
             "required": [
               "sourceCommentId",
               "text"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "ScoreExtractionSegments": {
+      "additionalProperties": false,
+      "description": "Candidate findings of one tool's review BY REFERENCE (bench.extract@v3): each names a source comment id and the inclusive 1-based range startSegment..endSegment of that comment's numbered segments. No model-written text. Order (start <= end), the upper bound (<= segment count) and the id lookup are local producer checks against the trusted segmentation, so they classify as extraction-invalid.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "endSegment": {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "sourceCommentId": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "startSegment": {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sourceCommentId",
+              "startSegment",
+              "endSegment"
             ],
             "type": "object"
           },
@@ -3212,7 +3252,7 @@
                   ]
                 },
                 "outputSchema": {
-                  "const": "ScoreExtraction"
+                  "const": "ScoreExtractionSegments"
                 },
                 "params": {},
                 "price": {
@@ -3457,7 +3497,7 @@
         },
         "outputSchema": {
           "enum": [
-            "ScoreExtraction",
+            "ScoreExtractionSegments",
             "ScoreDedup",
             "ScorePair"
           ]

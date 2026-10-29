@@ -109,6 +109,13 @@ nice -n 19 python3 -B -m unittest tests.benchmark_review.test_s107a_recheck.Publ
 
 `PublicRecipe` runs the demo and its normal/refusal controls with no network, provider, key or state access. The severity vocabulary test states its oracle in the test file and needs no private receipt.
 
+## Common-judge extraction versions
+
+The common judge (`allpairs.py`, `score_prompts.py`, `pullo-score.toml`) extracts with `bench.extract@v3`. The host splits each comment into numbered segments (`score_prompts.segments`). The model answers only `{sourceCommentId, startSegment, endSegment}` in the `ScoreExtractionSegments` schema, and code joins those exact segments into the candidate text. The model never copies comment text. That copying is what `bench.extract@v2` (`ScoreExtraction`) did, and the provider's output filter stopped it on long comments.
+
+- v2-era score traces, canaries and witnesses are verified only with the frozen judge export built from `69b676c8`. Current main no longer accepts `ScoreExtraction` for the extractor role.
+- v2 and v3 documents (`judge.extractionPrompt`) must never be mixed in one comparison. Every arm of a comparison is scored by one judge version.
+
 ## Not here
 
 A live producer (extraction, deduplication or matching with a model) and its accounting, a scoring canary or campaign, historical-eligibility admission from the CLI, raw golden or competitor data, and any quality or cost claim. `phaseb.py` only defines request and schema text and makes no call.

@@ -382,7 +382,7 @@ class Script(unittest.TestCase):
 
 class Diagnostics(Base):
     def test_sentinel_stays_in_trusted_trace_only(self):
-        out = {"candidates": [{"sourceCommentId": "c1", "text": H.SENTINEL}]}
+        out = {"candidates": [{"sourceCommentId": H.SENTINEL, "startSegment": 1, "endSegment": 1}]}      # v3: the id is the only model-written string
         sc = H.script([("extractor", 0, "response", H.response("extractor", output=out))])
         gw, rec, _, _ = H.live(self.tmp, sc)
         res = gw.call("EXTRACT", "extractor", "s1", 0, H.request("extractor"))
@@ -392,7 +392,7 @@ class Diagnostics(Base):
         self.assertEqual(res.output, out)
         # a damaged trace reports codes, not model text
         evs = copy.deepcopy(rec.events)
-        evs[1]["response"]["output"]["candidates"][0]["text"] = H.SENTINEL
+        evs[1]["response"]["output"]["candidates"][0]["sourceCommentId"] = H.SENTINEL + "x"
         evs[1]["requestHash"] = "sha256:" + "0" * 64
         with self.assertRaises(TraceError) as cm:
             load_trace(evs)

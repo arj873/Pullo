@@ -143,8 +143,9 @@ class CaptureTransport:
     def _default(body):
         name = body["response_format"]["json_schema"]["name"]
         data = json.loads(body["messages"][-1]["content"])
-        if name == "ScoreExtraction":
-            return {"candidates": [{"sourceCommentId": c["id"], "text": c["text"]} for c in data["comments"]]}
+        if name == "ScoreExtractionSegments":          # one whole-comment range per non-empty comment (bench.extract@v3)
+            return {"candidates": [{"sourceCommentId": c["id"], "startSegment": 1, "endSegment": len(c["segments"])}
+                                   for c in data["comments"] if c["segments"]]}
         if name == "ScoreDedup":
             return {"groups": [[c["index"]] for c in data["candidates"]]}
         return {"match": False, "confidence": 0.5}
@@ -152,7 +153,7 @@ class CaptureTransport:
 
 def schema_sha256() -> str:
     return hashlib.sha256(canonical({n: schemas.provider_schema(n, "anthropic")
-                                     for n in ("ScoreExtraction", "ScoreDedup", "ScorePair")})).hexdigest()
+                                     for n in schemas.SCORE_SCHEMA_NAMES})).hexdigest()
 
 
 def acquire_lock(path) -> int:

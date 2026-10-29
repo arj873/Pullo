@@ -28,7 +28,7 @@ class CanaryCatalog(Fixture):
     def test_valid_fake_catalog_admits_exactly_three_probes_without_canary_receipt(self):
         rc, rep, _ = self.run_canary(self.canary_base())
         self.assertEqual(rc, 0, rep)
-        self.assertEqual([x["response_format"]["json_schema"]["name"] for x in self.cap.bodies], ["ScoreExtraction", "ScoreDedup", "ScorePair"])
+        self.assertEqual([x["response_format"]["json_schema"]["name"] for x in self.cap.bodies], ["ScoreExtractionSegments", "ScoreDedup", "ScorePair"])
         self.assertEqual((rep["canaryOk"], rep["probeCalls"]), (True, {"extractor": 1, "deduper": 1, "matcher": 1}))
 
     def test_missing_catalog_proof_refused(self):
