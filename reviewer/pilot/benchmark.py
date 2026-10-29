@@ -45,7 +45,8 @@ from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTr
 from .profile import ProfileError
 from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
                         open_terra_state, plan_providers, scrub_of, worst_case)
-from .repository_profile import check_experiment, repository_plan, repository_policy, repository_profile
+from .repository_profile import (DEFAULT_IMPACT_VERSION, IMPACT_VERSIONS, check_experiment, repository_plan,
+                                 repository_policy, repository_profile)
 
 MODES = ("plan", "live", "replay")
 CONFIG_SCHEMA = "pilot-benchmark-config@1"
@@ -117,6 +118,7 @@ class BenchmarkOptions:
     config: str | None = None
     experiment: str = "baseline"      # opt-in prompt arm; the default is the unchanged baseline
     live_stage_timing: bool = False   # opt-in: versioned live stage ceilings + host-stop recording (binds the plan)
+    impact_version: int | None = None  # investigator impact@vN (None = the profile default, today 2); binds via profile
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,12 @@ def check_options(o: BenchmarkOptions) -> None:
         check_experiment(o.experiment, o.retrieval)
     except (ProfileError, TypeError) as e:
         raise BenchmarkLaunchError(str(e)[:200]) from None
+    if o.impact_version is not None:                       # likewise refused before key/state/output
+        if type(o.impact_version) is not int or o.impact_version not in IMPACT_VERSIONS:
+            raise BenchmarkLaunchError(f"impact_version must be one of {sorted(IMPACT_VERSIONS)} "
+                                       "(or unset for the profile default)")
+        if not o.retrieval:
+            raise BenchmarkLaunchError("impact_version needs the retrieval profile (--retrieval on)")
     for name in ("case_url", "cutoff_proof", "admission", "decision", "launch_baseline", "store", "base_import_pins",
                  "head_import_pins", "out_dir"):
         if not isinstance(getattr(o, name), str) or not getattr(o, name):
@@ -509,10 +517,25 @@ def effective_config(o: BenchmarkOptions, cfg: EffectiveConfig | None = None) ->
     return resolve_config(o.config, forbidden_roots=tuple(_input_paths(o)))
 
 
+def selected_impact_version(o: BenchmarkOptions) -> int:
+    """The investigator impact version the profile builders receive: unset means the profile default."""
+    return DEFAULT_IMPACT_VERSION if o.impact_version is None else o.impact_version
+
+
+def investigator_report(profile: dict, plan: dict) -> dict:
+    """The investigator the run's profile and Plan bind (read from them, never from the selector)."""
+    inv = profile["roles"]["investigator"]["promptVersion"]
+    return {"impactVersion": next((v for v, p in IMPACT_VERSIONS.items() if p == inv), None), "promptVersion": inv,
+            "specialists": list(plan.get("specialists", ()))}
+
+
 def _profile_parts(o: BenchmarkOptions, cfg: EffectiveConfig):
-    profile = repository_profile(o.retrieval, cfg.models, o.experiment)
+    """The selected impact version reaches the identity only through the profile (investigator promptVersion), the
+    Plan (specialists for impact@v3) and the policy digest; unset and the default value build the same bytes."""
+    v = selected_impact_version(o)
+    profile = repository_profile(o.retrieval, cfg.models, o.experiment, impact_version=v)
     return (profile, repository_plan(profile, live_stage_timing=o.live_stage_timing),
-            repository_policy(o.retrieval, o.experiment))
+            repository_policy(o.retrieval, o.experiment, impact_version=v))
 
 
 def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retrieval: bool, cfg: EffectiveConfig,
@@ -668,6 +691,7 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
             "plan": {"models": cfg.report()["roles"], "retrieval": o.retrieval,
                      "retrievalPolicy": None if policy is None else policy.to_doc(),
                      "profile": f"{profile['id']}@{profile['version']}", "profileDigest": digest(profile),
+                     "investigator": investigator_report(profile, plan),
                      "configIdentityDigest": digest(config_identity(ing, profile, plan, policy, o.retrieval, cfg,
                                                                     o.experiment)),
                      "firstRequestNote": "the first request is the investigator's and is identical in every arm; the "
@@ -841,6 +865,7 @@ def render(rep: dict) -> str:
         p = rep["plan"]
         L += [f"  plan: retrieval={p['retrieval']} ceiling ${p['runCeilingUsdMicros'] / 1e6:.2f} "
               f"worst-case first request ${(p['worstCaseAdmissionUsdMicros'] or 0) / 1e6:.6f}",
+              f"  investigator: {p['investigator']['promptVersion']} specialists: {p['investigator']['specialists']}",
               f"  captured requests: {p['capturedCount']}  pipeline: {p['pipeline']}"]
         if p["firstRequest"]:
             f = p["firstRequest"]
@@ -886,6 +911,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="opt-in prompt arm (default: baseline). Needs --retrieval on; binds the run identity")
     ap.add_argument("--live-stage-timing", action="store_true",
                     help="opt-in: stage ceilings INVESTIGATE 300/VERIFY 300/JUDGE 200 + host-stop recording (binds the plan)")
+    ap.add_argument("--impact-version", type=int, choices=sorted(IMPACT_VERSIONS), default=None,
+                    help=f"investigator impact@vN (default: the profile default, v{DEFAULT_IMPACT_VERSION}); "
+                    "3 = specialist investigators. Needs --retrieval on; binds the profile, Plan and policy")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
@@ -902,7 +930,7 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                          book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
                          replay_trace=a.replay_trace, trace_digest=a.trace_digest, retrieval=a.retrieval == "on",
                          repeat=a.repeat, config=a.config, experiment=a.experiment,
-                         live_stage_timing=a.live_stage_timing)
+                         live_stage_timing=a.live_stage_timing, impact_version=a.impact_version)
     try:
         rep = run_benchmark(o, transport=transport, key_loader=key_loader, runner=runner)
     except (BenchmarkLaunchError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:
