@@ -139,9 +139,15 @@ class Acknowledge(AckBase):
         self.lg.admit("rej", 5000, model=OPUS, **S)
         self.lg.finish("rej", outcome="rejected-before-processing", generationId="gen-rej", errorKind="http-400")
         self.lg.admit("orphan", 5000, model=OPUS, **S)
+        self.lg.admit("est", 5000, model=OPUS, **S)                   # estimated (zero-unverifiable), not unknown
+        self.lg.finish("est", outcome="processed", generationId="gen-est", routerCostUsdMicros=0)
+        self.lg.admit("flo", 5000, model=OPUS, **S)                   # estimated (suspect-floored-to-token-priced)
+        self.lg.finish("flo", outcome="processed", generationId="gen-flo", routerCostUsdMicros=1, tokenPricedUsdMicros=900)
+        self.assertEqual(self.lg.totals("scoring")["estimatedUsdMicros"], 5000 + 900)
         before = self.sha()
         cases = [("nope", "gen-cf"), ("cf", "gen-wrong"), ("cf", ""), ("k", "gen-k"), ("rec", "gen-rec"),
-                 ("rev", "gen-rev"), ("rej", "gen-rej"), ("orphan", "gen-orphan")]
+                 ("rev", "gen-rev"), ("rej", "gen-rej"), ("orphan", "gen-orphan"), ("est", "gen-est"),
+                 ("flo", "gen-flo")]
         for ck, gid in cases:
             with self.subTest(ck=ck, gid=gid), self.assertRaises(ValueError):
                 self.lg.acknowledge(ck, gid, evidence=EV, apply=True)
@@ -166,14 +172,25 @@ class Acknowledge(AckBase):
         self.assertEqual(res["impliedCallUsdMicros"], WORST)
         self.assertEqual(self.rows()[-1]["note"], "key delta includes this call")
 
-    def test_double_acknowledge_is_idempotent(self):
+    def test_double_acknowledge_is_idempotent_and_different_evidence_is_refused(self):
         self.filtered()
-        self.assertTrue(self.lg.acknowledge("cf", "gen-cf", evidence=EV, apply=True)["appended"])
+        self.assertTrue(self.lg.acknowledge("cf", "gen-cf", evidence={**EV, "note": "n"}, apply=True)["appended"])
         before = self.sha()
-        again = self.lg.acknowledge("cf", "gen-cf", evidence={**EV, "note": "different"}, apply=True)
+        again = self.lg.acknowledge("cf", "gen-cf", evidence={**EV, "note": "n"}, apply=True)
         self.assertEqual((again["appended"], again["alreadyAcknowledged"], again["holdAfter"]), (False, True, None))
         self.assertEqual(again["before"], again["after"])
+        for ev in ({**EV, "note": "different"}, EV, {**EV, "sumOtherOfficialMicros": 99_999, "note": "n"}):
+            for apply in (False, True):
+                with self.subTest(ev=ev, apply=apply), self.assertRaises(ValueError):
+                    self.lg.acknowledge("cf", "gen-cf", evidence=ev, apply=apply)
         self.assertEqual(self.sha(), before)
+
+    def test_missing_ledger_is_never_created(self):
+        self.assertFalse(self.ledger_path.exists())
+        for apply in (False, True):
+            with self.subTest(apply=apply), self.assertRaises(ValueError):
+                self.lg.acknowledge("cf", "gen-cf", evidence=EV, apply=apply)
+        self.assertFalse(self.ledger_path.exists())
 
     def test_reconcile_still_resolves_an_acknowledged_call(self):
         self.filtered()
@@ -230,8 +247,44 @@ class AcknowledgeCli(AckBase):
         bad = self.tmp / "bad.json"
         bad.write_text("not json")
         self.assertEqual(self.run_cli("--ledger", str(self.ledger_path), "--evidence", str(bad), "--apply")[0], 1)
+        big = self.tmp / "big.json"
+        big.write_text(json.dumps({"generationId": "gen-cf", "evidence": EV, "pad": "x" * (1 << 20)}))
+        self.assertEqual(self.run_cli("--ledger", str(self.ledger_path), "--evidence", str(big), "--apply")[0], 1)
+        link = self.tmp / "link.json"
+        link.symlink_to(self.write_ev())
+        self.assertEqual(self.run_cli("--ledger", str(self.ledger_path), "--evidence", str(link), "--apply")[0], 1)
         self.assertEqual(self.sha(), before)
+        with self.ledger_path.open("a") as f:                           # malformed ledger shape -> one fixed code
+            f.write("[]\n")
+        rc, rep = self.run_cli("--ledger", str(self.ledger_path), "--evidence", self.write_ev(), "--apply")
+        self.assertEqual((rc, rep), (1, {"ok": False, "error": "malformed-input"}))
         missing = self.op / "missing.jsonl"
         with self.assertRaises(SystemExit):
             ACK.main(["--ledger", str(missing), "--evidence", self.write_ev()], out=io.StringIO())
         self.assertFalse(missing.exists())
+
+
+class ForgedRows(AckBase):
+    """note()/finish() can never write a row of another type (which would bypass acknowledge/reconcile checks)."""
+
+    def test_note_only_writes_note_rows(self):
+        self.filtered()
+        before = self.sha()
+        for t in ("acknowledge", "reconcile", "intent", "result", ""):
+            with self.subTest(t=t), self.assertRaises(ValueError):
+                self.lg.note(type=t, callKey="cf", generationId="gen-cf")
+        self.assertEqual(self.sha(), before)
+        self.assertIsNotNone(self.lg.scoring_startup_hold())
+        self.lg.note(type="note", keyRemainingUsd="1")                  # the provider's own key-status shape
+        self.lg.note(keyRemainingUsd="1")
+        self.assertEqual([r["type"] for r in self.rows()[-2:]], ["note", "note"])
+
+    def test_finish_cannot_set_type_or_call_key(self):
+        self.lg.admit("r1", 1000, model=SONNET)
+        self.lg.admit("r2", 1000, model=SONNET)
+        before = self.sha()
+        with self.assertRaises(ValueError):
+            self.lg.finish("r1", type="acknowledge", outcome="processed", generationId="g")
+        with self.assertRaises(ValueError):
+            self.lg.finish("r1", callKey="r2", outcome="processed", generationId="g")
+        self.assertEqual(self.sha(), before)

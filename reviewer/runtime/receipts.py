@@ -288,6 +288,8 @@ class RuntimeLedger:
         bad = set(fields) - SAFE_KEYS
         if bad:
             raise ValueError(f"unsafe receipt fields: {sorted(bad)}")
+        if "type" in fields or "callKey" in fields:     # a result row's type and call key are never caller-chosen
+            raise ValueError("finish() fields cannot set the row type or call key")
         row, _ = redact_json({"type": "result", "at": self._clock(), "callKey": call_key, **fields})
 
         def f(rows):
@@ -305,6 +307,8 @@ class RuntimeLedger:
         bad = set(fields) - SAFE_KEYS - {"keyLimitUsd", "keyUsageUsd", "keyRemainingUsd"}
         if bad:
             raise ValueError(f"unsafe receipt fields: {sorted(bad)}")
+        if fields.get("type", "note") != "note":         # a note can never forge an intent/result/reconcile/acknowledge row
+            raise ValueError("note() can only append a row of type 'note'")
         self._txn(lambda rows: (None, [{"type": "note", "at": self._clock(), **fields}]))
 
     def reconcile(self, call_key: str, generation: dict, *, key_status: dict | None = None, apply: bool = True) -> dict:
@@ -384,12 +388,16 @@ class RuntimeLedger:
         cap and the review reserve are exactly as before (`before == after` in the result). Evidence is an audit
         record and a consistency gate only; it never lowers a charge (key usage/remaining is not proof of $0).
 
-        Refuses (ValueError) unless: the call's last result row carries `generation_id`; the call is a scoring
-        intent; its cost is unresolved (unknown or estimated, not overlaid by a reconcile row); and the evidence is
+        Refuses (ValueError) unless: the ledger exists (never created); the call's last result row carries
+        `generation_id`; the call is a scoring intent; its cost basis is `unknown-worst-case` (no cost facts at all,
+        not overlaid by a reconcile row; estimated bases are refused); and the evidence is
         consistent: keyRemainingBefore - keyRemainingAfter - sumOtherOfficial (the implied charge of this call) lies
-        within [0, the amount the ledger counts for it]. An idempotent repeat (already acknowledged) appends nothing.
+        within [0, the amount the ledger counts for it]. A repeat with the same evidence appends nothing; a repeat
+        with different evidence is refused.
         apply=False only previews. Returns {"appended", "alreadyAcknowledged", "before", "after", "scoringBefore",
         "scoringAfter", "holdBefore", "holdAfter", "countedUsdMicros", "countedBasis", "impliedCallUsdMicros"}."""
+        if not os.path.lexists(self.path):              # never creates a ledger, not even in preview
+            raise ValueError("ledger does not exist; refusing to create a new book")
         if not isinstance(call_key, str) or not call_key:
             raise ValueError("call key must be a non-empty string")
         if not isinstance(generation_id, str) or not generation_id or len(generation_id) > 200:
@@ -413,12 +421,18 @@ class RuntimeLedger:
                 raise ValueError("not a scoring call; only the scoring startup hold can be acknowledged")
             before, sb, hb = self._tally(rows), self._tally(rows, "scoring"), self._hold(rows)
             if (call_key, generation_id) in self._acknowledged(rows):
+                prior = [r for r in rows if r["type"] == "acknowledge" and r.get("callKey") == call_key
+                         and r.get("generationId") == generation_id][-1]
+                if any(prior.get(k) != row.get(k) for k in ACK_EVIDENCE_FIELDS):
+                    raise ValueError("call is already acknowledged with different evidence; nothing appended")
                 return {"appended": False, "alreadyAcknowledged": True, "before": before, "after": before,
                         "scoringBefore": sb, "scoringAfter": sb, "holdBefore": hb, "holdAfter": hb}, []
             unresolved = self._unresolved_scoring(rows)
             if call_key not in unresolved:
                 raise ValueError("call cost is resolved (known, reconciled or not processed); nothing to acknowledge")
             _r, counted, basis = unresolved[call_key]
+            if basis != "unknown-worst-case":            # only a call with no cost facts at all; estimates stay held
+                raise ValueError("only an unknown-worst-case call can be acknowledged")
             if implied < 0 or implied > counted:
                 raise ValueError("evidence is inconsistent: implied charge is outside [0, counted charge]")
             full = {**row, "countedUsdMicros": counted, "countedBasis": basis}     # audit only; never read as cost

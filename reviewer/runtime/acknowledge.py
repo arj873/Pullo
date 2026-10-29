@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from .catalog import TRIAL_TOTAL_USD_MICROS
 from .receipts import RuntimeLedger
 from .reconcile import find_call_key
+from ..score_baseline import read_regular
+
+MAX_EVIDENCE_BYTES = 1 << 20
 
 
 def main(argv=None, *, out=sys.stdout) -> int:
@@ -32,7 +36,7 @@ def main(argv=None, *, out=sys.stdout) -> int:
         ap.error("ledger does not exist; refusing to create a new book")
     ledger = RuntimeLedger(a.ledger, TRIAL_TOTAL_USD_MICROS)
     try:
-        doc = json.loads(Path(a.evidence).read_text())
+        doc = json.loads(read_regular(os.path.abspath(a.evidence), limit=MAX_EVIDENCE_BYTES).decode("utf-8"))
         if not isinstance(doc, dict) or set(doc) - {"generationId", "callKey", "evidence"}:
             raise ValueError("evidence file must be an object with generationId, evidence and optional callKey")
         gid = doc.get("generationId")
@@ -42,8 +46,11 @@ def main(argv=None, *, out=sys.stdout) -> int:
         if "callKey" in doc and doc["callKey"] != ck:
             raise ValueError("evidence callKey does not match the ledger call with that generation id")
         res = ledger.acknowledge(ck, gid, evidence=doc.get("evidence"), apply=a.apply)
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError) as e:             # incl. BaselineError, JSON and UTF-8 decode errors
         out.write(json.dumps({"ok": False, "error": str(e)}) + "\n")
+        return 1
+    except (KeyError, TypeError, AttributeError):  # a malformed ledger/evidence shape: one fixed code, no content echoed
+        out.write(json.dumps({"ok": False, "error": "malformed-input"}) + "\n")
         return 1
     out.write(json.dumps({"ok": True, "callKey": ck, "generationId": gid, "applied": res["appended"], **res},
                          indent=1, sort_keys=True) + "\n")
