@@ -25,15 +25,23 @@ same category and start line within 3 of an earlier lane's kept one is merged in
 
 Near-duplicate cap (NEAR_DUP_RULE, v5 only). It collapses only TRUE near-duplicates: the same claim told again at the
 same spot. After the merge, two kept hypotheses (any lanes) are near-duplicates when they have the same head path and
-category, their location ranges [line, endLine] overlap, and their claim texts are similar (word-set Jaccard >=
-NEAR_DUP_SIMILARITY over lower-case words of 3+ letters). Distinct defects on adjacent lines (a mapping block with a
-wrong field on lines 10, 11 and 12) do not overlap and are never collapsed. Groups anchor at the first hypothesis in
+category, their location ranges [line, endLine] overlap, their claim texts are similar (word-set Jaccard >=
+NEAR_DUP_SIMILARITY over lower-case words of 3+ letters) AND their claims name exactly the same distinctive tokens
+(backticked spans, dotted names, identifiers with an inner capital or underscore, all-caps names and anything with a
+digit): "copies user.orgId into dto.userId" and "copies user.teamId into dto.userId" over one block range are two
+defects, never collapsed. Distinct defects on adjacent lines (a mapping block with a wrong field on lines 10, 11 and
+12) do not overlap and are never collapsed either. Groups anchor at the first hypothesis in
 line order, then INVESTIGATE order; a group keeps NEAR_DUP_CAP (the best evidenced: distinct cited paths, then cited
 items, then a stated mechanism, then reach, then suspected severity; ties in INVESTIGATE order); the others are
 recorded in the INVESTIGATE payload `collapses` (collapsedIds best first). Fallback: when no kept member of a group
 yields a finding, VERIFY verifies the best collapsed member (within the cap), as the merge rule retries a duplicate;
-every other collapsed member is dropped as `merged` with this rule, without a verifier call. The v1-v4 merge behaviour
-is untouched.
+every other collapsed member is dropped as `merged` with this rule, without a verifier call. The collapse fallback runs
+BEFORE the merge retry, so a collapsed member that is also a merge keptId and was verified without a finding still hands
+VERIFY its own first merged duplicate; one that was never verified (its group's kept member was confirmed) is a
+duplicate of a confirmed claim, and its own duplicates are dropped as merged. A defect confirmed twice (through a merge
+retry and through the collapse fallback) is not merged automatically: JUDGE deduplicates an identical claim and anchor
+deterministically and otherwise nominates findings with the same issue key (path, category, impact, location, code
+citations) as a duplicate-candidate group, which the judge may merge. The v1-v4 merge behaviour is untouched.
 
 VERIFY (VERIFY_RULE). Each lane's candidates are ordered by value first (suspectedSeverity P0 before P1 before P2,
 then the stated confidence, highest first, then output order), then taken round-robin across the five lanes, so a
@@ -77,10 +85,10 @@ BUDGET_TEXT = ("K lanes in V5_AGENTS order; lane i: tool calls < pool*(i+1)//K w
                "JUDGE reserve")
 NEAR_DUP_TEXT = ("after the merge, kept hypotheses with the same head path and category whose location ranges overlap "
                  "the group anchor's (first in line order, then INVESTIGATE order) and whose claim word sets have "
-                 "Jaccard >= NEAR_DUP_SIMILARITY form a group; keep the NEAR_DUP_CAP best evidenced (distinct cited "
+                 "Jaccard >= NEAR_DUP_SIMILARITY and whose distinctive (code-like) tokens are identical form a group; keep the NEAR_DUP_CAP best evidenced (distinct cited "
                  "paths, cited items, mechanism, reach, severity; ties: INVESTIGATE order); the rest -> collapses "
-                 "(best first); VERIFY verifies the best collapsed member when no kept member yields a finding, and "
-                 "drops the others as merged")
+                 "(best first); VERIFY verifies the best collapsed member when no kept member yields a finding (before the "
+                 "merge retry), and drops the others as merged")
 VERIFY_TEXT = ("lanes ordered by suspectedSeverity, confidence, output order; round-robin across the lanes; cap min(MAX_VERIFY_CANDIDATES_V5, 20 + VERIFY_CANDIDATES_PER_LANE*(K-3)); "
                "a new verifier session every sweeps.VERIFY_SESSION_CANDIDATES verified candidates")
 
@@ -115,7 +123,19 @@ def claim_words(text: str) -> frozenset:
     return frozenset(_re.findall(r"[a-z0-9_]{3,}", text.lower()))
 
 
+_DISTINCT = _re.compile(r"`[^`]+`|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+|\b\w*\d\w*\b|\b[a-z]+[A-Z]\w*\b"
+                        r"|\b[A-Z][a-z0-9]*[A-Z]\w*\b|\b\w+_\w+\b|\b[A-Z]{2,}\b")
+
+
+def distinctive(text: str) -> frozenset:
+    """Code-like tokens of a claim: backticked spans, dotted names, camelCase/PascalCase/snake_case identifiers,
+    all-caps names and anything with a digit (case-sensitive)."""
+    return frozenset(m.group(0) for m in _DISTINCT.finditer(text))
+
+
 def similar(a: dict, b: dict) -> bool:
+    if distinctive(a["claim"]) != distinctive(b["claim"]):
+        return False                     # different identifiers, fields or numbers: different defects
     wa, wb = claim_words(a["claim"]), claim_words(b["claim"])
     return bool(wa | wb) and len(wa & wb) / len(wa | wb) >= NEAR_DUP_SIMILARITY
 

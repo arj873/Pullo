@@ -1394,7 +1394,10 @@ class Engine:
             # v3: a kept hypothesis that yielded no finding hands VERIFY its first merged duplicate (within the cap);
             # every other duplicate is dropped as merged, without a verifier call
             index = {hid: n for n, hid, _ in cands}
-            for g in sorted(merges, key=lambda g: index.get(g["keptId"], len(index))):
+            # impact@v5: the near-duplicate fallback first, so a collapsed merge keptId verified without a finding
+            # still hands VERIFY its own first merged duplicate below (lanes.NEAR_DUP_RULE)
+            halted = self.five and self._verify_collapsed(index, hyps, outcome, attempt, over_cap, drops, lambda: stop)
+            for g in sorted(merges if not halted else (), key=lambda g: index.get(g["keptId"], len(index))):
                 dups = [m for m in g["mergedIds"] if m in hyps and m in index]
                 retry = bool(dups) and outcome.get(g["keptId"]) is False and stop is None
                 if retry and not over_cap(dups[0]):
@@ -1408,8 +1411,6 @@ class Engine:
                                   "detail": f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
                                             f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
                                             "earlier specialist's is kept)"})
-            if self.five and not (self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed"):
-                self._verify_collapsed(index, hyps, outcome, attempt, over_cap, drops, lambda: stop)
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
         for sess in sessions.values():
@@ -1418,9 +1419,10 @@ class Engine:
         status = "partial" if inc else "completed"
         return status, {"findings": findings, "verifications": records, "drops": drops}, None, inc
 
-    def _verify_collapsed(self, index, hyps, outcome, attempt, over_cap, drops, stopped) -> None:
+    def _verify_collapsed(self, index, hyps, outcome, attempt, over_cap, drops, stopped) -> bool:
         """impact@v5 (lanes.NEAR_DUP_RULE): a near-duplicate group none of whose kept members yielded a finding hands
-        VERIFY its best collapsed member (within the cap); every other collapsed member is dropped as merged."""
+        VERIFY its best collapsed member (within the cap); every other collapsed member is dropped as merged.
+        -> True when a verifier attempt failed the stage (nothing further runs)."""
         for g in sorted(self.artifacts["INVESTIGATE"]["payload"].get("collapses", ()),
                         key=lambda g: min(index.get(k, len(index)) for k in g["keptIds"])):
             rest = [m for m in g["collapsedIds"] if m in hyps and m in index]
@@ -1428,7 +1430,7 @@ class Engine:
             retry = bool(rest) and all(v is False for v in verified) and stopped() is None
             if retry and not over_cap(rest[0]):
                 if attempt(index[rest[0]], rest[0]):
-                    return
+                    return True
                 rest = rest[1:]
             elif retry:
                 rest = rest[1:]                          # over-cap already recorded its drop
@@ -1437,6 +1439,7 @@ class Engine:
                               "detail": f"near-duplicate of {', '.join(g['keptIds'])} ({lanes.NEAR_DUP_RULE}: same "
                                         "head path, category and overlapping lines, similar claim; the best evidenced "
                                         "is verified and this one only if that yields no finding)"[:2000]})
+        return False
 
     def verify_one(self, session, n, hyp, t0, family):
         """-> (VerificationRecord, Finding|None, DropRecord|None, [incomplete])."""
