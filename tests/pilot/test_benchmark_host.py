@@ -442,16 +442,17 @@ class LiveTests(Base):
     def test_full_run_reuses_the_reviewed_path_and_the_plan_is_the_first_request(self):
         plan = self.plan()
         rep, model = self.live()
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 5))
+        # SPECIALISTS-01: three specialists ask then answer, then the verifier and the judge
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
         self.assertEqual([b["response_format"]["json_schema"]["name"] for b in model.bodies],
-                         ["InvestigatorTurn", "InvestigatorTurn", "VerifierTurn", "VerifierTurn", "JudgeOutput"])
+                         ["InvestigatorTurn"] * 6 + ["VerifierTurn", "VerifierTurn", "JudgeOutput"])
         self.assertTrue(all(b["model"] == MODEL and "tools" not in b and b["provider"]["allow_fallbacks"] is False
                             for b in model.bodies))
         self.assertEqual(plan["plan"]["firstRequest"]["bodySha256"], hashlib.sha256(model.requests[0].body).hexdigest())
         self.assertEqual(self.loads, [str(self.w.env)])
         rt = rep["costs"]["runtime"]
-        self.assertEqual(rt["ledgerCalls"]["thisCase"], 5)
-        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], BASELINE + 5 * 4200)
+        self.assertEqual(rt["ledgerCalls"]["thisCase"], 9)
+        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], BASELINE + 9 * 4200)
         self.assertIn("NOT a provider bill", rep["costs"]["gateway"]["note"])
         self.assertEqual(rep["origin"]["kind"], "benchmark-development-case")
         out = Path(self.w.out)

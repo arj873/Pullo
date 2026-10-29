@@ -24,6 +24,7 @@ from reviewer.runtime.openrouter import HttpResponse
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pilot.test_repository import USAGE, entries
 from tests.pipeline.helpers import tcid
+from tests.specialist_lanes import lanes
 
 REPO = P.REPO
 BASELINE = 70_576
@@ -111,7 +112,7 @@ class Model:
         if self.fail_with is not None:
             return self.fail_with
         self.bodies.append(json.loads(http_req.body))
-        content = self.script[len(self.requests) - 1]
+        content = lanes(self).next(self.bodies[-1])
         d = {"id": f"gen-{len(self.requests)}", "model": SONNET, "provider": "Anthropic",
              "choices": [{"index": 0, "finish_reason": "stop",
                           "message": {"role": "assistant", "content": json.dumps(content)}}], "usage": USAGE}
@@ -332,7 +333,7 @@ class PlanTests(Rig):
         self.assertEqual(f["schemaName"], "InvestigatorTurn")
         self.assertEqual(f["model"], SONNET)
         self.assertFalse(f["toolsInBody"])
-        self.assertEqual(p["capturedCount"], 1)
+        self.assertEqual(p["capturedCount"], 3)          # SPECIALISTS-01: each specialist's first request
         self.assertLessEqual(p["worstCaseAdmissionUsdMicros"], RUN_CEILING_USD_MICROS)
         self.assertEqual(p["toolBudget"], {"maxToolCalls": 160, "maxToolCallsPerAgent": 60})
         self.assertEqual((p["retries"], p["repairs"], p["providerCalls"], p["networkCalls"], p["keyRead"]),
@@ -390,9 +391,10 @@ class LiveTests(Rig):
 
     def test_positive_control_five_calls_actual_turns_provenance_and_judge_output(self):
         rep, model = self.live()
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 5))
+        # SPECIALISTS-01: three specialists ask then answer (the same hypothesis; two are merged), verifier, judge
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
         self.assertEqual([b["response_format"]["json_schema"]["name"] for b in model.bodies],
-                         ["InvestigatorTurn", "InvestigatorTurn", "VerifierTurn", "VerifierTurn", "JudgeOutput"])
+                         ["InvestigatorTurn"] * 6 + ["VerifierTurn", "VerifierTurn", "JudgeOutput"])
         self.assertEqual(rep["counts"]["findings"], 1)
         self.assertEqual(rep["counts"]["comments"], 1)
         self.assertEqual(rep["counts"]["verifications"], 1)
@@ -403,7 +405,7 @@ class LiveTests(Rig):
         events = self.trace_events(rep)
         asked = [e for e in events if e.get("type") == "tool.call" and "requestedBy" in e]
         self.assertEqual(sorted((e["args"]["path"], e["stage"]) for e in asked),
-                         sorted([(DEF_PATH, "INVESTIGATE"), (CALLER_PATH, "INVESTIGATE"), (DEF_PATH, "VERIFY")]))
+                         sorted([(DEF_PATH, "INVESTIGATE"), (CALLER_PATH, "INVESTIGATE")] * 3 + [(DEF_PATH, "VERIFY")]))
         self.assertTrue(all(e["tool"] == "read_file" and e["result"]["status"] == "ok" for e in asked))
         self.assertIn(model.read_id, [e["toolCallId"] for e in asked])      # the verifier's cited id is the executed read
         ver = (Path(rep["paths"]["runDir"]) / "artifacts" / "05-VERIFY.v1.json").read_text()
@@ -411,7 +413,7 @@ class LiveTests(Rig):
         self.assertIn(BUG_TEXT.strip(), ver)
         chains = rep["retrieval"]["summary"]["chains"]
         self.assertEqual([(c["role"], c["hops"], c["requestedToolCalls"], c["final"]) for c in chains],
-                         [("investigator", 2, 2, True), ("verifier", 2, 1, True)])
+                         [("investigator", 2, 2, True)] * 3 + [("verifier", 2, 1, True)])
         self.assertEqual((rep["retrieval"]["summary"]["unreadRequests"], rep["retrieval"]["guardRefusals"]), (0, []))
         judge = json.loads((Path(rep["paths"]["runDir"]) / "artifacts" / "06-JUDGE.v1.json").read_text())
         self.assertIn("Leases never expire", json.dumps(judge))
@@ -427,14 +429,16 @@ class LiveTests(Rig):
     def test_refuted_control_makes_no_finding_and_no_comment(self):
         rep, model = self.live(self.model("refuted"))
         self.assertEqual((rep["status"], rep["ok"]), ("completed", True))
-        self.assertEqual((rep["counts"]["findings"], rep["counts"]["comments"], rep["counts"]["drops"]), (0, 0, 1))
-        self.assertEqual(len(model.requests), 4)                        # judge never called: nothing to word
+        # SPECIALISTS-01: + the two merged duplicates of the later specialists
+        self.assertEqual((rep["counts"]["findings"], rep["counts"]["comments"], rep["counts"]["drops"]), (0, 0, 3))
+        self.assertEqual(len(model.requests), 8)                        # judge never called: nothing to word
 
     def test_a_miss_is_reported_as_is_with_exactly_one_call_and_no_retry_or_repeat(self):
         rep, model = self.live(self.model("miss"))
         self.assertEqual((rep["status"], rep["counts"]["hypotheses"], rep["counts"]["comments"]), ("completed", 0, 0))
-        # one draft call + the one exploration-floor continuation (EXPLORE-FLOOR); no retry, no repeat
-        self.assertEqual(len(model.requests), 2)
+        # per specialist: one draft call + the one exploration-floor continuation (EXPLORE-FLOOR, SPECIALISTS-01);
+        # no retry, no repeat
+        self.assertEqual(len(model.requests), 6)
         self.assertIn("explorationFloor", json.loads(json.loads(model.requests[1].body)["messages"][1]["content"]))
         committed = RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()["committedUsdMicros"]
         again = self.model("miss")
@@ -456,7 +460,7 @@ class LiveTests(Rig):
     def test_ledger_gets_five_accountable_rows_and_state_is_not_widened(self):
         rep, _ = self.live()
         t = RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()
-        self.assertEqual(t["committedUsdMicros"] - BASELINE, 5 * 4200)       # five accountable calls, nothing more
+        self.assertEqual(t["committedUsdMicros"] - BASELINE, 9 * 4200)       # nine accountable calls, nothing more
         self.assertEqual(t["capUsdMicros"], 50_000_000)                       # the same aggregate, not widened
         self.assertEqual(rep["costs"]["spendBook"]["inflight"], 0)
         self.assertEqual(rep["costs"]["spendBook"]["limit"], 50_000_000)
@@ -509,7 +513,7 @@ class ReplayTests(Rig):
         self.assertEqual((rr["status"], rr["ok"]), ("completed", True))
         self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["newSpendUsdMicros"], rr["replay"]["consumedZeroLive"]),
                          (0, 0, True))
-        self.assertEqual(rr["replay"]["replayedCalls"], 5)
+        self.assertEqual(rr["replay"]["replayedCalls"], 9)
         self.assertEqual(rr["providerCalls"], 0)
         self.assertEqual(rr["counts"], rep["counts"])
         strip = lambda p: json.loads(re.sub(r'"run_[0-9a-f]{16}"', '"RUN"', Path(p).read_text()))
@@ -667,7 +671,7 @@ class ControlPlanLiveReplayTests(ControlRig):
         self.assertIn("no recall or quality rate", rep["control"]["label"])
         p = rep["plan"]
         self.assertEqual((p["capturedCount"], p["firstRequest"]["schemaName"], p["firstRequest"]["model"]),
-                         (1, "InvestigatorTurn", SONNET))
+                         (3, "InvestigatorTurn", SONNET))         # SPECIALISTS-01: one per specialist
         self.assertEqual((p["retries"], p["repairs"], p["providerCalls"], p["networkCalls"], p["keyRead"]), (0, 0, 0, 0, False))
         self.assertEqual(p["toolBudget"], {"maxToolCalls": 160, "maxToolCallsPerAgent": 60})
         self.assertEqual(p["outputCaps"], {"investigator": 16000, "verifier": 6000, "judge": 8000})
@@ -694,10 +698,10 @@ class ControlPlanLiveReplayTests(ControlRig):
         rep, model = self.live(self.hop_model())
         self.assertEqual(hashlib.sha256(model.requests[0].body).hexdigest(), a["bodySha256"])
         self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"], rep["case"], rep["repo"]),
-                         ("completed", True, 2, CTL_ID, CTL_REPO))
+                         ("completed", True, 6, CTL_ID, CTL_REPO))        # SPECIALISTS-01: 3 x (ask, final)
         events = [json.loads(x) for x in Path(rep["paths"]["trace"]).read_text().splitlines()]
         reads = [e for e in events if e.get("type") == "tool.call" and "requestedBy" in e]
-        self.assertEqual([(e["args"]["path"], e["result"]["status"]) for e in reads], [("app/store.py", "ok")])
+        self.assertEqual([(e["args"]["path"], e["result"]["status"]) for e in reads], [("app/store.py", "ok")] * 3)
         self.assertEqual(rep["retrieval"]["summary"]["unreadRequests"], 0)
 
     def test_strict_replay_is_zero_cost_and_a_different_control_cannot_replay_the_trace(self):
@@ -707,7 +711,7 @@ class ControlPlanLiveReplayTests(ControlRig):
                  trace_digest=rep["traceDigest"]["value"])
         rr = P.run_positive(self.options(**d), key_loader=self.boom)
         self.assertEqual((rr["status"], rr["ok"], rr["providerCalls"], rr["case"]), ("completed", True, 0, CTL_ID))
-        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["replayedCalls"], rr["replay"]["newSpendUsdMicros"]), (0, 2, 0))
+        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["replayedCalls"], rr["replay"]["newSpendUsdMicros"]), (0, 6, 0))
         self.assertEqual(rr["control"], rep["control"])
         self.assertEqual(self.state_bytes(), before)
         self.reset(head={**CTL_HEAD, "app/store.py": "def total(xs):\n    return sum(xs) + 1\n"})
@@ -720,7 +724,7 @@ class ControlPlanLiveReplayTests(ControlRig):
     def test_a_ledger_run_adds_only_the_control_calls_and_does_not_widen_state(self):
         rep, _ = self.live(self.hop_model())
         t = RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()
-        self.assertEqual((t["committedUsdMicros"] - BASELINE, t["capUsdMicros"]), (2 * 4200, 50_000_000))
+        self.assertEqual((t["committedUsdMicros"] - BASELINE, t["capUsdMicros"]), (6 * 4200, 50_000_000))
         self.assertEqual(rep["costs"]["spendBook"]["limit"], 50_000_000)
 
 

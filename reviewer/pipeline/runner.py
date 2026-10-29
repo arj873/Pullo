@@ -64,8 +64,11 @@ def validate_spec(spec: ReviewSpec) -> None:
     if (plan["version"], plan["tier"], plan["triage"]) != (1, "standard", "fixed-rule@1") \
             or prof["tier"] != "standard" or prof["triage"] != "fixed-rule@1":
         raise PipelineError("invalid-input", "first slice runs only the fixed standard Plan v1 (fixed-rule@1)")
-    if plan["specialists"] != ["generalist"]:
-        raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
+    if plan["specialists"] != identity.plan_specialists(spec):
+        if identity.plan_specialists(spec) == ["generalist"]:
+            raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
+        raise PipelineError("invalid-input", "investigator.impact@v3 needs Plan.specialists "
+                            f"{identity.plan_specialists(spec)} (the specialist investigators, in run order)")
     host = spec.host
     if not (isinstance(host.attempt, int) and not isinstance(host.attempt, bool) and 1 <= host.attempt <= 1000):
         raise PipelineError("invalid-input", "attempt must be an integer >= 1")

@@ -40,6 +40,7 @@ from reviewer.repoimport.fsio import force_remove  # noqa: E402
 from reviewer.repoimport.remote import local_fixture_remote  # noqa: E402
 from reviewer.runtime import RuntimeLedger, Secret  # noqa: E402
 from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E402
+from tests.specialist_lanes import lanes  # noqa: E402
 
 # The exact public source/test bytes this gate reviewed (ticket BENCH-REVIEW-03-review, re-gate of the BENCH-REVIEW-02 fixes). A
 # later edit must be re-gated, not inherited. The interface document's acceptance pin is kept in private orchestration evidence,
@@ -53,7 +54,8 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # NOT already accepted. The previous pin 4fe30e94... is retained in orchestration/archive (before-LIVE-DEADLINE04).
 GATED = {"reviewer/pilot/benchmark.py": "4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807",
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
-         "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
+         # SPECIALISTS-01 repin: only the default-run call counts changed (investigator.impact@v3); needs root re-gate
+         "tests/pilot/test_benchmark_host.py": "84d2214aa1b2f810032fc63c6fef94b97c18640461cc66086bdc0e5f94717281",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
          "tests/benchmark_ancestry_review/test_ancestry_review.py":
              "a8dd6ba279e3cf547b2bbdf6ee50cb540ad04865d18ff092192ab1f4b1e814f3"}
@@ -289,7 +291,7 @@ class Wire:
     def __call__(self, req):
         self.requests.append(req)
         self.bodies.append(json.loads(req.body))
-        step = self.steps[min(len(self.requests), len(self.steps)) - 1]
+        step = lanes(self, "steps", clamp=True).next(self.bodies[-1])
         if isinstance(step, BaseException):
             raise step
         if isinstance(step, HttpResponse):
@@ -302,7 +304,8 @@ class Wire:
 def happy(head_id):
     """Investigator -> verifier -> judge for one real defect in lib/calc.py (line 2 of the head file). EXPLORE-FLOOR:
     the pilot default investigator.impact@v2 treats the hop-0 answer as a draft; the second (same) final answers the
-    one exploration-floor continuation, so a happy run is 4 provider calls."""
+    one exploration-floor continuation. SPECIALISTS-01: under investigator.impact@v3 each of the three specialists
+    does the same (tests.specialist_lanes), so a happy run is 3 x 2 + verifier + judge = 8 provider calls."""
     claim, line = "rate0 divides by zero for every truthy input", 2
     cite = {"kind": "code", "path": "lib/calc.py", "lines": [line, line], "commit": head_id,
             "excerpt": "    return v // 0 if v else 2"}
@@ -847,13 +850,13 @@ class Live(Base):
         plan, bodies = self.plan_bodies(p)
         wire = Wire(*happy(p.imports["head"].snapshot_id))
         rep = self.live(p, wire)
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 4))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 8))
         self.assertEqual(bytes(wire.requests[0].body), bodies[0])
         self.assertTrue(all(b["model"] == SONNET and b["provider"]["allow_fallbacks"] is False and "tools" not in b
                             for b in wire.bodies))
         self.assertEqual(rep["costs"]["runtime"]["capUsdMicros"], 50_000_000)
-        self.assertEqual(rep["costs"]["runtime"]["cumulative"]["accountable"]["usdMicros"], COMMITTED + 4 * PER_CALL)
-        self.assertEqual(p.ledger()["committedUsdMicros"], COMMITTED + 4 * PER_CALL)
+        self.assertEqual(rep["costs"]["runtime"]["cumulative"]["accountable"]["usdMicros"], COMMITTED + 8 * PER_CALL)
+        self.assertEqual(p.ledger()["committedUsdMicros"], COMMITTED + 8 * PER_CALL)
         self.assertEqual(self.keys, [str(p.env)])
         files = [f for f in Path(p.out).rglob("*") if f.is_file()]
         self.assertTrue(files and all(KEY not in f.read_text(errors="ignore") for f in files))
@@ -906,7 +909,7 @@ class Live(Base):
         nxt = Wire(*happy(p.imports["head"].snapshot_id))
         rep = B.run_benchmark(p.live_options(out_dir=str(self.tmp / "o3"), baseline_micros=led, book_baseline_micros=book,
                                              repeat=1), transport=nxt, key_loader=self.loader)
-        self.assertEqual((rep["status"], len(nxt.requests)), ("completed", 4))
+        self.assertEqual((rep["status"], len(nxt.requests)), ("completed", 8))
         self.assertNotEqual(rep["runId"], first["runId"])
 
     def test_CONTROL_auth_that_widens_caps_or_models_is_refused_and_the_aggregate_boundary_holds(self):
@@ -1088,7 +1091,7 @@ class Replay(Base):
             rep = self.replay()
         self.assertEqual((rep["status"], rep["ok"]), ("completed", True))
         self.assertEqual((rep["replay"]["liveCalls"], rep["replay"]["newSpendUsdMicros"], rep["replay"]["replayedCalls"]),
-                         (0, 0, 4))
+                         (0, 0, 8))
         for n in ("trusted_authorization", "open_state", "OpenRouterProvider", "SpendBook", "RuntimeLedger"):
             self.assertEqual(s[n].call_count, 0, n)
         self.assertEqual(seen.under(self.p.state) + seen.under(self.p.env) + seen.under(self.p.auth), [])

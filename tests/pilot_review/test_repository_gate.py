@@ -563,7 +563,7 @@ class Live(Base):
         intents = [r for r in rows if r["type"] == "intent" and not r["callKey"].startswith("prior|")]
         results = [r for r in rows if r["type"] == "result" and not r["callKey"].startswith("prior|")]
         ev = load_trace(rep["paths"]["trace"]).events
-        self.assertEqual((n, len(intents), len(results), rep["providerCalls"]), (5, 5, 5, 5))
+        self.assertEqual((n, len(intents), len(results), rep["providerCalls"]), (9, 9, 9, 9))   # SPECIALISTS-01
         self.assertEqual(len([e for e in ev if e["type"] == "model.call"]), n)
         self.assertEqual(len([e for e in ev if e["type"] == "cost"]), n)
         self.assertEqual(rep["costs"]["gateway"]["liveCalls"], n)
@@ -591,7 +591,7 @@ class Live(Base):
         self.assertEqual((eff["runToolCalls"], eff["agentToolCalls"]), (160, 60))
         self.assertEqual(receipt["profile"]["ref"], "pilot-repository@1")
         self.assertEqual(receipt["mode"], "live")
-        self.assertEqual(receipt["cost"]["liveCalls"], 5)
+        self.assertEqual(receipt["cost"]["liveCalls"], 9)             # SPECIALISTS-01: 6 investigator calls
 
     def test_CONTROL_a_second_live_run_of_the_same_inputs_is_refused_by_the_ledger_without_any_provider_contact(self):
         w = self.world()
@@ -616,11 +616,14 @@ class Live(Base):
                 w = self.world("w-" + name.replace(" ", "-").replace(",", ""))
                 wire = Wire(step)
                 rep = self.live(w, wire)
-                self.assertEqual(len(wire.requests), 1, name)
+                # SPECIALISTS-01: an HTTP failure has an unknown outcome and starts no further specialist; a processed
+                # but unusable answer fails only its specialist, so each of the three makes its one attempt; no retry
+                n = 1 if name in ("500", "429") else 3
+                self.assertEqual(len(wire.requests), n, name)
                 self.assertFalse(rep["ok"])
                 self.assertNotEqual(rep["status"], "completed")
                 intents = [r for r in w.ledger_rows() if r["type"] == "intent" and not r["callKey"].startswith("prior|")]
-                self.assertEqual(len(intents), 1, name)
+                self.assertEqual(len(intents), n, name)
                 self.assertTrue((w.out / "report.json").is_file())
                 self.assertEqual(w.book_totals()["inflight"], 0, name)
 
@@ -687,7 +690,7 @@ class Live(Base):
         self.assertEqual(len(list((runs / "artifacts").glob("*.json"))), 8)
         ev = load_trace(rep["paths"]["trace"]).events
         calls = [e for e in ev if e["type"] == "model.call"]
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 9)
         self.assertTrue(all(c["response"] and c["requestHash"] for c in calls))
         for p in out.rglob("*"):
             self.assertTrue(os.path.realpath(p).startswith(os.path.realpath(out) + os.sep) or p == out)
@@ -727,7 +730,7 @@ class Replay(Base):
                     mock.patch.object(R, "trusted_authorization", side_effect=AssertionError("auth opened")):
                 rr = R.run_repository(self.ropts(w, trace, pin, self.tmp / "replay-out"), key_loader=self.boom)
         self.assertEqual((rr["status"], rr["ok"]), ("completed", True))
-        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["newSpendUsdMicros"], rr["replay"]["replayedCalls"]), (0, 0, 5))
+        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["newSpendUsdMicros"], rr["replay"]["replayedCalls"]), (0, 0, 9))
         receipt = json.loads(Path(rr["paths"]["receipt"]).read_text())
         self.assertEqual(receipt["gateway"]["unconsumedRecordedCalls"], 0)           # every recorded call was consumed
         self.assertEqual(w.state_bytes(), state_before)

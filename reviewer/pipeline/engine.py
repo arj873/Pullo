@@ -21,7 +21,8 @@ import json
 
 from reviewer.contracts import (check_finding_provenance, citable_tool_calls, is_turn_schema, require, terminal_payload,
                                 validate)
-from reviewer.contracts.budget import HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state, stage_deadline_exceeded
+from reviewer.contracts.budget import (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state,
+                                      investigation_limit, stage_deadline_exceeded)
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
@@ -31,7 +32,7 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, TOOLS, Limits, Tool
                             omissions_from_records)
 
 from . import coverage as cov_mod
-from . import identity, impactcov, judging, prompts, render, repocov, retrieval, snaps
+from . import identity, impactcov, judging, prompts, render, repocov, retrieval, snaps, specialists
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -43,8 +44,19 @@ CONTEXT_CHARS = 100_000        # model-visible context budget per request (deter
 VERIFY_WINDOW = 20             # lines of head context around a candidate location
 
 REPLAY_CODES = ("replay-miss", "replay-mismatch")
+# investigator.impact@v3: a specialist failure with one of these would repeat for every later specialist (no live calls,
+# no resolved model, a router answering with another model or a malformed provider envelope), so none is started. The
+# same holds for any failure whose provider outcome is unknown (charged at its worst case; the provider's state is
+# unclear), so one bad contact is never multiplied by the number of specialists.
+V3_SYSTEMIC_CODES = ("live-calls-disabled", "model-unresolved", "contract-violation")
+
 AGENT_FAIL_CODES = ("provider-timeout", "provider-error", "schema-invalid", "repair-exhausted",
                     "contract-violation", "internal", "model-unresolved", "live-calls-disabled")
+
+
+def v3_stops_later_specialists(err: dict) -> bool:
+    detail = err.get("detail")
+    return err["code"] in V3_SYSTEMIC_CODES or (isinstance(detail, dict) and detail.get("providerOutcome") == "unknown")
 
 
 def empty_payload(stage: str, run: dict, plan: dict, base_id: str, head_id: str) -> dict:
@@ -106,7 +118,8 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
     cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc))
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
-                          coverage=cdoc, retrieval=retrieval_run, impact=impact)
+                          coverage=cdoc, retrieval=retrieval_run, impact=impact,
+                          specialists=inv if "merges" in (inv := artifacts["INVESTIGATE"]["payload"]) else None)
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -151,6 +164,10 @@ class Engine:
         self.profile, self.plan, self.budget = spec.profile, spec.plan, spec.plan["budget"]
         self.policy = identity.retrieval_policy(spec)           # None unless a role returns the Turn envelope
         self.impact = identity.impact_mode(spec)                # impact map + find_references + impact prompts
+        # investigator.impact@v3: specialist investigator agent ids in run order (None: the one generalist agent)
+        self.specialists = self.policy.specialists if self.impact else None
+        self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
+        self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
         self.guard = guard
         self._ordinals: dict[tuple, int] = {}
         self._gate_n: dict[str, int] = {}      # per-STAGE count of gate checks (host-stop@2 position); reset per stage run
@@ -327,8 +344,12 @@ class Engine:
             detail={"kind": "snapshot-tamper"}))
 
     def agent_limit(self) -> int:
-        """Tool calls one agent session may make: host limit and plan per-agent budget (not the run remainder)."""
-        return min(identity.tool_limits(self.spec).max_calls, self.budget["maxToolCallsPerAgent"])
+        """Tool calls one agent session may make: host limit and plan per-agent budget (not the run remainder).
+        A v3 specialist is further held to its share of the investigator tool-call pool (specialists.BUDGET_RULE)."""
+        cap = min(identity.tool_limits(self.spec).max_calls, self.budget["maxToolCallsPerAgent"])
+        if self._tool_share is not None:
+            cap = min(cap, self._tool_share)
+        return cap
 
     def limits_for(self) -> Limits:
         used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
@@ -364,6 +385,14 @@ class Engine:
         output fails that schema is a typed schema-invalid failure (the gateway only repairs
         status=invalid-output answers, so there is no second attempt to make)."""
         schema = request["outputSchema"]
+        if self._spend_ceiling is not None and stage == "INVESTIGATE" and role == "investigator":
+            spent = self.stage_spend(stage)
+            if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
+                err = typed_error("budget-exhausted", f"specialist {agent} reached its INVESTIGATE spend share",
+                                  stage=stage, detail={"scope": "specialist-share", "rule": specialists.BUDGET_RULE,
+                                                       "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
+                self.recorder.append("error", error=err)
+                return None, err, []
         try:
             res = self.gw.call(stage, role, agent, ordinal, request, repair=prompts.repair_builder(request, schema))
         except SettlementError as e:
@@ -380,6 +409,12 @@ class Engine:
             self.recorder.append("error", error=err)
             return None, err, res.attempts
         return res.output, None, res.attempts
+
+    def stage_spend(self, stage: str) -> int:
+        """USD micros of every logged cost record of `stage` (the reservation when the charge is unknown)."""
+        return sum(r["usdMicros"] if r["usdMicros"] is not None else r["reservedUsdMicros"]
+                   for e in self.recorder.events if e["type"] == "cost"
+                   for r in (e["record"],) if r.get("stage") == stage)
 
     # ------------------------------------------------------------------ stage driver
     def run_stage(self, stage: str, fn) -> None:
@@ -608,13 +643,12 @@ class Engine:
         stage = "INVESTIGATE"
         if self.fatal:
             return self.skipped(stage)
+        if self.specialists is not None:
+            return self._investigate_v3(stage, t0)
         g = self.gate(stage, t0, new_agent=True)
         if g is not None:
             return self._agent_failed(g[1], reason=g[0])
-        items = prompts.context_items(self.recorder.events, "PREPARE")
-        if self.impact:         # the impact map goes first so the request context budget never drops it
-            items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
-        ctx, notes = self.bounded_context(items)
+        ctx, notes = self._investigate_context()
         floor_inc: list = []                    # impact@v2 exploration floor fell back to the draft (else empty)
         if self.turn_role("investigator"):
             ctx, notes = self._cap_host_results(ctx, notes)
@@ -631,20 +665,33 @@ class Engine:
             if err is not None:
                 return self._agent_failed(err)
             source = next(a.call_id for a in reversed(attempts) if a.outcome == "ok")
+        hyps = self._hypotheses(SPECIALIST, out, source)
+        return ("partial" if floor_inc else "completed"), {
+            "hypotheses": hyps, "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST, "status": "completed"}]}, \
+            None, floor_inc
+
+    def _investigate_context(self) -> tuple[list, list]:
+        items = prompts.context_items(self.recorder.events, "PREPARE")
+        if self.impact:         # the impact map goes first so the request context budget never drops it
+            items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
+        return self.bounded_context(items)
+
+    def _hypotheses(self, agent: str, out: dict, source: str) -> list[dict]:
+        """The agent's final InvestigatorOutput -> the Hypothesis documents whose citations and location resolve."""
         tools = self.citable(source)
         family = self.profile["roles"]["investigator"]["family"]
         changed = self.changed_head_paths()
         hyps = []
         for n, d in enumerate(out["hypotheses"]):
-            hid = hypothesis_id(SPECIALIST, n, d["claim"], d["location"]["path"], d["location"]["line"])
-            ev, problems = materialize_evidence(d["evidence"], tools, f"investigator:{SPECIALIST}", self.resolver)
+            hid = hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"])
+            ev, problems = materialize_evidence(d["evidence"], tools, f"investigator:{agent}", self.resolver)
             if not problems and not snaps.location_ok(self.spec.head.root, self.spec.head.manifest, d["location"]):
                 problems = ["location does not exist in the pinned head snapshot"]
             if not problems and changed is not None and d["location"]["path"] not in changed:
                 problems = ["location is in a file this change did not modify"]
             if problems or not ev:
                 continue
-            h = {"id": hid, "runId": self.run["id"], "specialist": SPECIALIST, "claim": d["claim"],
+            h = {"id": hid, "runId": self.run["id"], "specialist": agent, "claim": d["claim"],
                  "category": d["category"], "suspectedSeverity": d["suspectedSeverity"], "impact": d["impact"],
                  "location": d["location"], "evidence": ev, "modelFamily": family, "sourceCallId": source}
             for k in ("mechanism", "reach", "confidence"):
@@ -653,9 +700,7 @@ class Engine:
             if validate("Hypothesis", h):
                 continue
             hyps.append(h)
-        return ("partial" if floor_inc else "completed"), {
-            "hypotheses": hyps, "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST, "status": "completed"}]}, \
-            None, floor_inc
+        return hyps
 
     def _cap_host_results(self, ctx: list, notes: list) -> tuple[list, list]:
         """A request lists at most MAX_HOST_RESULTS host-prepared results; the rest are named as omitted."""
@@ -665,21 +710,23 @@ class Engine:
             ctx = ctx[:retrieval.MAX_HOST_RESULTS]
         return ctx, notes
 
-    def _investigator_chain(self, stage, t0, ctx, notes):
+    def _investigator_chain(self, stage, t0, ctx, notes, agent: str = SPECIALIST, task: str | None = None):
         """-> (ChainEnd, [incomplete]). The incomplete list is empty except when the impact@v2 exploration floor fell
-        back to the draft answer."""
+        back to the draft answer. `agent`/`task` name a v3 specialist and its lens task (default: the generalist and
+        the policy's investigator task)."""
         events = self.tool_calls()
         host = [events[c["toolCallId"]] for c in ctx]
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
-                                       task=prompts.investigator_task(self.policy.investigator_prompt))
+                                       task=task if task is not None
+                                       else prompts.investigator_task(self.policy.investigator_prompt))
         if self.coverage_doc() is None:
             doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
                                "context below is bounded and may be truncated or omitted.")
-        session = self.new_session(stage, SPECIALIST)
+        session = self.new_session(stage, agent)
         unrendered = self.unrendered_ids(ctx, host)
 
         def chain(turns):
-            return retrieval.Chain(self, stage=stage, role="investigator", agent=SPECIALIST, session=session, t0=t0,
+            return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
                                    turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
 
         def build(d):
@@ -691,9 +738,9 @@ class Engine:
         end = first.run(build(doc))
         if not self.policy.exploration_floor or end.payload is None or first.history:
             return end, []
-        return self._exploration_floor(stage, first, end, chain, build, doc)
+        return self._exploration_floor(stage, first, end, chain, build, doc, agent)
 
-    def _exploration_floor(self, stage, first, draft_end, chain, build, doc):
+    def _exploration_floor(self, stage, first, draft_end, chain, build, doc, agent: str = SPECIALIST):
         """investigator.impact@v2: the agent gave a final answer on its first hop without requesting any context.
         That answer is a DRAFT. When at least two turns, a tool call and context budget remain, the host sends its one
         fixed continuation (prompts.EXPLORATION_FLOOR_CONTINUATION with the draft) as a new chain of the same agent,
@@ -705,7 +752,7 @@ class Engine:
         cancellation or a spend-book failure (needs reconciliation) fails the agent exactly as impact@v1 would.
         Every decision is a `retrieval.floor` trace event, so the floor is auditable and replays deterministically."""
         draft_id = draft_end.final_call
-        rec = dict(stage=stage, agentId=SPECIALIST, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
+        rec = dict(stage=stage, agentId=agent, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
         turns_left = self.policy.investigator_turns - draft_end.hops
         skip = ("turns" if turns_left < 2 else "tool-calls" if first.tools_exhausted or first._allowed() == 0
                 else "context-chars" if first.context_exhausted else None)
@@ -732,7 +779,8 @@ class Engine:
                      else "budget" if code == "budget-exhausted" else None)
             if limit is not None:                # a real run limit, not just a missing second answer
                 n = len(draft_end.payload["hypotheses"])
-                inc = [self._inc(stage, limit, f"the exploration-floor continuation was stopped ({code}); the "
+                who = "" if agent == SPECIALIST else f"specialist {agent}: "
+                inc = [self._inc(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
                                                f"first-hop draft answer ({n} hypothesis(es)) was used")]
         else:
             self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
@@ -740,13 +788,102 @@ class Engine:
         draft_end.tool_calls = end.tool_calls
         return draft_end, inc
 
+    @staticmethod
+    def _exhausted_detail(end) -> str:
+        return (f"investigator retrieval ended at the {end.exhausted} limit after {end.hops} hop(s) and "
+                f"{end.tool_calls} requested tool call(s) without a final answer; {len(end.unread)} pending "
+                f"request(s) were not run: {unread_note(end.unread)}")
+
     def _investigator_exhausted(self, stage, end):
-        detail = (f"investigator retrieval ended at the {end.exhausted} limit after {end.hops} hop(s) and "
-                  f"{end.tool_calls} requested tool call(s) without a final answer; {len(end.unread)} pending "
-                  f"request(s) were not run: {unread_note(end.unread)}")
-        inc = [self._inc(stage, "tool-calls-exhausted", detail)]
+        inc = [self._inc(stage, "tool-calls-exhausted", self._exhausted_detail(end))]
         payload = {"hypotheses": [], "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST, "status": "failed"}]}
         return "partial", payload, None, inc
+
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v3 specialists
+    def _investigate_v3(self, stage, t0):
+        """investigator.impact@v3: the specialists run one after another in prompts.SPECIALIST_AGENTS order, each a v2
+        investigator chain (own session and ordinals, the exploration floor, the same prefetched context) with its lens
+        task, under its cumulative tool-call and spend ceiling (specialists.BUDGET_RULE). Tolerance:
+
+        * a replay failure, cancellation, an internal error or a spend-book failure (needs reconciliation) fails the
+          stage at once, exactly as impact@v2 fails;
+        * any other end of one specialist without an answer is recorded in `agents` (status + error) and the next
+          specialist runs. Only a real run limit (a deadline or soft-deadline stop, a budget refusal) or an exhausted
+          retrieval counter marks INVESTIGATE incomplete; a provider/schema failure of one specialist does not;
+        * when no specialist gave an answer or was exhausted, the stage fails with the first specialist's error, as
+          the one v2 investigator would.
+
+        The payload lists every hypothesis that resolved (agent order, then output order) and the deterministic
+        `merges` (specialists.MERGE_RULE) that VERIFY applies before any verifier call."""
+        tool_cum = specialists.cumulative(specialists.tool_pool(self.policy, self.budget,
+                                                                identity.tool_limits(self.spec).max_calls))
+        spend_cum = specialists.cumulative(investigation_limit(self.budget))
+        agents, hyps, inc = [], [], []
+        first_err = None                     # (error, reason) of the first specialist that failed or was stopped
+        usable = 0
+        ctx = notes = None
+        for i, agent in enumerate(self.specialists):
+            g = self.gate(stage, t0, new_agent=True)
+            if g is not None:
+                reason, err = g
+                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                if err["code"] == "cancelled":
+                    return self._v3_failed(agents, err, reason)
+                first_err = first_err or (err, reason)
+                inc.append(self._inc_doc(stage, reason, f"specialist {agent} was not started: {err['message']}"))
+                continue
+            if ctx is None:
+                ctx, notes = self._cap_host_results(*self._investigate_context())
+            used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
+            self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), spend_cum[i]
+            try:
+                end, floor_inc = self._investigator_chain(stage, t0, ctx, notes, agent,
+                                                          prompts.investigator_v3_task(agent))
+            finally:
+                self._tool_share = self._spend_ceiling = None
+            inc.extend(floor_inc)
+            if end.error is not None:
+                err, reason = end.error, (end.stop[0] if end.stop else None)
+                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
+                    return self._v3_failed(agents, err, reason)
+                limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
+                if limit is not None:            # a real run limit, not just one specialist's failed call
+                    inc.append(self._inc_doc(stage, limit, f"specialist {agent} ended without an answer "
+                                                           f"({err['code']}: {err['message']})"))
+                first_err = first_err or (err, reason)
+                if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further specialist
+                    for later in self.specialists[i + 1:]:
+                        agents.append({"agentId": later, "specialist": later, "status": "failed", "error": typed_error(
+                            err["code"], f"not started: specialist {agent} failed with {err['code']} (systemic or "
+                            "unknown provider outcome), which must not be repeated by every specialist", stage=stage)})
+                    break
+            elif end.exhausted is not None:
+                agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                         f"specialist {agent}: " + self._exhausted_detail(end)))
+                usable += 1
+            else:
+                agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                hyps.extend(self._hypotheses(agent, end.payload, end.final_call))
+                usable += 1
+            if self.fatal:                       # e.g. a snapshot tamper during this specialist's tool calls
+                break
+        if not usable:
+            return self._v3_failed(agents, *first_err)
+        payload = {"hypotheses": hyps, "agents": agents, "merges": specialists.merge(hyps)}
+        return ("partial" if inc else "completed"), payload, None, inc
+
+    @staticmethod
+    def _inc_doc(stage: str, reason: str, detail: str) -> dict:
+        """An incomplete entry returned with the stage artifact (run_stage notes it on the run)."""
+        return {"stage": stage, "reason": reason, "detail": detail[:2000]}
+
+    def _v3_failed(self, agents: list, err: dict, reason: str | None):
+        """The v3 stage failure: as Engine._agent_failed, with every specialist's status so far."""
+        if reason == "soft-deadline":
+            self.set_fatal("INVESTIGATE", err, reason="soft-deadline")
+        return "failed", {"hypotheses": [], "agents": agents}, err, []
 
     @property
     def coverage_record(self) -> dict | None:
@@ -780,6 +917,8 @@ class Engine:
         """-> ([(original index n, hypothesis id, draft)], {id: Hypothesis}) rebuilt from the logged successful
         investigator call and the INVESTIGATE artifact (so a resumed run needs nothing else)."""
         hyps = {h["id"]: h for h in self.artifacts["INVESTIGATE"]["payload"]["hypotheses"]}
+        if self.specialists is not None:
+            return self._v3_candidates(), hyps
         # the last usable INVESTIGATE answer that carries a role payload (a non-final Turn hop has none); with the
         # impact@v2 exploration floor, the answer its last retrieval.floor decision names (the draft when it was used)
         src = self._floor_source()
@@ -790,12 +929,31 @@ class Engine:
         return [(n, hypothesis_id(SPECIALIST, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
                 for n, d in enumerate(drafts)], hyps
 
-    def _floor_source(self) -> str | None:
+    def _v3_candidates(self) -> list:
+        """investigator.impact@v3: every completed specialist's accepted answer, in agent order then output order, as
+        ([(running index, hypothesis id, draft)]). The running index is unique across specialists."""
+        out = []
+        for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
+            if a["status"] != "completed":
+                continue
+            agent = a["agentId"]
+            src = self._floor_source(agent)
+            drafts = next((p["hypotheses"] for e in reversed(self.recorder.events)
+                           if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
+                           and (src is None or e["callId"] == src)
+                           and (p := terminal_payload(e)) is not None), [])
+            out += [(hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
+                    for n, d in enumerate(drafts)]
+        return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+
+    def _floor_source(self, agent: str | None = None) -> str | None:
         """The investigator call whose answer INVESTIGATE used, per the last `retrieval.floor` decision that settles it
         (skipped/draft: the draft, final: the continuation's final answer). None without such an event (every
-        non-v2 run, and a v2 run whose first answer requested context), so candidates() keeps its rule."""
+        non-v2 run, and a v2 run whose first answer requested context), so candidates() keeps its rule. `agent`
+        (v3) restricts it to that specialist's decisions."""
         ev = next((e for e in reversed(self.recorder.events) if e["type"] == "retrieval.floor"
-                   and e["stage"] == "INVESTIGATE" and e["decision"] != "continue"), None)
+                   and e["stage"] == "INVESTIGATE" and e["decision"] != "continue"
+                   and (agent is None or e["agentId"] == agent)), None)
         if ev is None:
             return None
         return ev["finalCallId"] if ev["decision"] == "final" else ev["draftCallId"]
@@ -809,12 +967,27 @@ class Engine:
         session = self.new_session(stage, VERIFIER_AGENT)
         stop = None                                   # (reason, error) once a global stop applies
         family = self.profile["roles"]["verifier"]["family"]
+        merged_into = ({m: g["keptId"] for g in self.artifacts["INVESTIGATE"]["payload"].get("merges", ())
+                        for m in g["mergedIds"]} if self.specialists is not None else {})
+        kept = 0
         for n, hid, draft in cands:
             if hid not in hyps:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
                               "detail": "investigator citation or location did not resolve against the pinned snapshots, "
                                         "or lies outside the files this change modified"})
                 continue
+            if hid in merged_into:              # v3: a later specialist's duplicate; no verifier call is spent on it
+                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "merged",
+                              "detail": f"duplicate of {merged_into[hid]} ({specialists.MERGE_RULE}: same head path, "
+                                        "overlapping lines and same category; the earlier specialist's is kept)"})
+                continue
+            if self.specialists is not None:
+                kept += 1
+                if kept > specialists.MAX_VERIFY_CANDIDATES:
+                    drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
+                                  "detail": f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist "
+                                            "hypotheses; later ones (agent order, then output order) are not verified"})
+                    continue
             if stop is None:
                 g = self.gate(stage, t0)
                 if g is not None:

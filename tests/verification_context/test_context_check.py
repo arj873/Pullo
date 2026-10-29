@@ -78,6 +78,16 @@ IMPACT_V2_GOLD = {
     "policy": "sha256:d80e2c255d0a6247abe4d739a72566066155069d846e4b707ddb0d34694913f9",
     "benchFirst": "12e1dd884534981660e421fbbbcdce5b5d7ea3f4dfb10aab633b443b619cb915",
 }
+# SPECIALISTS-01: the pilot default investigator is now investigator.impact@v3 (three specialist investigators). The
+# IMPACT_V2_GOLD pins above stay the impact@v2 arm, reproduced by repository_profile/policy(..., impact_version=2); these
+# are the new defaults. The investigator prompt id, its task (the contracts lens comes first) and the Plan's specialists
+# differ; numeric limits, models, verifier and judge are unchanged.
+IMPACT_V3_GOLD = {
+    "profileOn": "sha256:0959087c4958b516e6fb984d611b9535ec46d6325047e54290586d41ec98367a",
+    "policy": "sha256:5913eba11ee09a1ecf782dff5b8efb75d8d9d3ea9879f931802b9e27d779392f",
+    "plan": "sha256:9244e9a26da37d0b807fff9731d4499e843123b3d558b70a89aa5e246bf433d8",
+    "benchFirst": "7b79ed6e702b5d04b6cebf0e1127d7a9ddb4840213ba29cfe894f1a84a0d2928",
+}
 
 UTIL = "def close_stream():\n    return None\n\ndef is_open():\n    return True\n"
 BASE_U, HEAD_U = {**BASE, "src/util.py": UTIL}, {**HEAD, "src/util.py": UTIL}
@@ -151,10 +161,16 @@ class DefaultUnchanged(Base_):
         # IMPACT-01 arm (impact@v1), now selected explicitly: its pins are unchanged
         self.assertEqual(profile_digest(repository_profile(True, ms, impact_version=1)), IMPACT_GOLD["profileOn"])
         self.assertEqual(repository_policy(True, impact_version=1).digest, IMPACT_GOLD["policy"])
-        # EXPLORE-FLOOR default (impact@v2): new pins; the plan and retrieval-off profile are unchanged
-        self.assertEqual(profile_digest(repository_profile(True, ms)), IMPACT_V2_GOLD["profileOn"])
-        self.assertEqual(digest(repository_plan(repository_profile(True, ms))), GOLD["plan"])
-        self.assertEqual(repository_policy(True).digest, IMPACT_V2_GOLD["policy"])
+        # EXPLORE-FLOOR arm (impact@v2), now selected explicitly: its pins and the plan are unchanged
+        self.assertEqual(profile_digest(repository_profile(True, ms, impact_version=2)), IMPACT_V2_GOLD["profileOn"])
+        self.assertEqual(digest(repository_plan(repository_profile(True, ms, impact_version=2))), GOLD["plan"])
+        self.assertEqual(digest(repository_plan(repository_profile(True, ms, impact_version=1))), GOLD["plan"])
+        self.assertEqual(repository_policy(True, impact_version=2).digest, IMPACT_V2_GOLD["policy"])
+        # SPECIALISTS-01 default (impact@v3): new pins; only its plan names the specialists; retrieval-off unchanged
+        self.assertEqual(profile_digest(repository_profile(True, ms)), IMPACT_V3_GOLD["profileOn"])
+        self.assertEqual(digest(repository_plan(repository_profile(True, ms))), IMPACT_V3_GOLD["plan"])
+        self.assertEqual(repository_plan(repository_profile(True, ms))["specialists"], ["contracts", "logic", "safety"])
+        self.assertEqual(repository_policy(True).digest, IMPACT_V3_GOLD["policy"])
         self.assertEqual(profile_digest(repository_profile(False, ms, impact=True)), GOLD["profileOff"])
 
     def test_baseline_run_requests_tasks_comment_and_config_identity_equal_the_pre_change_values(self):
@@ -411,8 +427,9 @@ class Selector(TBH.Base):
     def test_default_plan_equals_the_pre_change_first_request_policy_and_profile(self):
         rep = self.plan()
         p = rep["plan"]
-        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V2_GOLD["benchFirst"])     # EXPLORE-FLOOR default
-        self.assertEqual((p["profile"], digest(p["retrievalPolicy"])), ("pilot-repository@1", IMPACT_V2_GOLD["policy"]))
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V3_GOLD["benchFirst"])     # SPECIALISTS-01 default
+        self.assertEqual((p["profile"], digest(p["retrievalPolicy"])), ("pilot-repository@1", IMPACT_V3_GOLD["policy"]))
+        self.assertEqual(p["profileDigest"], IMPACT_V3_GOLD["profileOn"])
         self.assertEqual(self.plan(retrieval=False)["plan"]["firstRequest"]["bodySha256"], GOLD["benchRetrievalOff"])
         self.assertEqual(rep["experiment"], {"id": "baseline", "verifierPrompt": "verifier.impact@v1",
                                               "judgePrompt": "judge.wording@v1"})
@@ -430,6 +447,21 @@ class Selector(TBH.Base):
         v2 = self.plan()["plan"]
         self.assertNotEqual(v2["configIdentityDigest"], p["configIdentityDigest"])
         self.assertEqual({k: v2[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")},
+                         {k: p[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")})
+
+    def test_impact_v2_selected_explicitly_keeps_the_pre_change_first_request_policy_and_profile(self):
+        """SPECIALISTS-01: the EXPLORE-FLOOR arm stays byte-identical when impact@v2 is selected (impact_version=2)."""
+        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=2)       # noqa: E731
+        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=2)         # noqa: E731
+        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
+            p = self.plan()["plan"]
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V2_GOLD["benchFirst"])
+        self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_V2_GOLD["policy"])
+        self.assertEqual(p["profileDigest"], IMPACT_V2_GOLD["profileOn"])
+        v3 = self.plan()["plan"]
+        self.assertNotEqual(v3["configIdentityDigest"], p["configIdentityDigest"])
+        self.assertNotEqual(v3["firstRequest"]["bodySha256"], p["firstRequest"]["bodySha256"])
+        self.assertEqual({k: v3[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")},
                          {k: p[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")})
 
     def test_plan_reports_the_selected_arm_and_binds_it_without_changing_the_first_request_or_ceiling(self):
@@ -483,12 +515,12 @@ class Selector(TBH.Base):
         rep, _ = self.live(model, experiment="context-check@1")
         self.assertEqual((rep["status"], rep["ok"]), ("completed", True))
         self.assertEqual(rep["experiment"]["id"], "context-check@1")
-        self.assertEqual(rep["providerCalls"], 5)
+        self.assertEqual(rep["providerCalls"], 9)                          # SPECIALISTS-01: 3 x (ask, final) first
         tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
-        self.assertEqual(tasks[0], prompts.INVESTIGATOR_IMPACT_V2_TASK)       # EXPLORE-FLOOR: the pilot default investigator
-        self.assertEqual(tasks[2], prompts.VERIFIER_CONTEXT_CHECK_TASK)
-        self.assertEqual(tasks[3], prompts.VERIFIER_CONTEXT_CHECK_TASK)
-        self.assertEqual(tasks[4], prompts.JUDGE_FACT_TASK)
+        self.assertEqual(tasks[0], prompts.investigator_v3_task("contracts"))  # SPECIALISTS-01: the pilot default
+        self.assertEqual(tasks[6], prompts.VERIFIER_CONTEXT_CHECK_TASK)
+        self.assertEqual(tasks[7], prompts.VERIFIER_CONTEXT_CHECK_TASK)
+        self.assertEqual(tasks[8], prompts.JUDGE_FACT_TASK)
         # strict replay: zero live calls, no key/auth; the same selector is required
         before = self.w.state_bytes()
         trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
@@ -510,7 +542,7 @@ class Selector(TBH.Base):
         rep, _ = self.live(model)
         self.assertEqual(rep["experiment"]["id"], "baseline")
         tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
-        self.assertEqual((tasks[2], tasks[3], tasks[4]),        # IMPACT-01: the baseline arm's verifier is impact mode's
+        self.assertEqual((tasks[6], tasks[7], tasks[8]),        # IMPACT-01: the baseline arm's verifier is impact mode's
                          (prompts.VERIFIER_IMPACT_TASK, prompts.VERIFIER_IMPACT_TASK, prompts.JUDGE_TASK))
 
     def test_identity_carries_the_experiment_only_when_selected(self):
@@ -560,9 +592,9 @@ class ReportPromptLabels(TBH.Base):
 
     def test_plan_routing_and_identity_are_unchanged_by_the_label_fix(self):
         p = self.plan()["plan"]
-        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V2_GOLD["benchFirst"])
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V3_GOLD["benchFirst"])
         self.assertEqual(self.plan(retrieval=False)["plan"]["firstRequest"]["bodySha256"], GOLD["benchRetrievalOff"])
-        self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_V2_GOLD["policy"])
+        self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_V3_GOLD["policy"])
         self.assertNotEqual(self.plan(retrieval=False)["plan"]["configIdentityDigest"], p["configIdentityDigest"])
 
     def test_live_and_replay_reports_name_the_prompts_in_force_with_retrieval_off(self):

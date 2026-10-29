@@ -351,7 +351,7 @@ class LiveTests(Base):
     def test_live_matches_the_plan_and_writes_the_origin_beside_the_report(self):
         plan = O.run_ordinary(self.w.options(), key_loader=self.boom)
         rep, model = self.live()
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 5))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))   # SPECIALISTS-01
         self.assertEqual(plan["plan"]["firstRequest"]["bodySha256"], hashlib.sha256(model.requests[0].body).hexdigest())
         self.assertTrue(all(b["model"] == MODEL and "tools" not in b and b["provider"]["allow_fallbacks"] is False
                             for b in model.bodies))

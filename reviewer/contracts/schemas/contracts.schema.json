@@ -4495,6 +4495,39 @@
               "maxItems": 1000,
               "type": "array"
             },
+            "merges": {
+              "items": {
+                "additionalProperties": false,
+                "description": "investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path, overlapping lines, same category). They stay in `hypotheses`; VERIFY drops them as merged.",
+                "properties": {
+                  "keptId": {
+                    "pattern": "^(?:hyp_[0-9a-f]{16})$",
+                    "type": "string"
+                  },
+                  "mergedIds": {
+                    "items": {
+                      "pattern": "^(?:hyp_[0-9a-f]{16})$",
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "rule": {
+                    "const": "specialist-merge@1"
+                  }
+                },
+                "required": [
+                  "keptId",
+                  "mergedIds",
+                  "rule"
+                ],
+                "type": "object"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
             "stage": {
               "const": "INVESTIGATE"
             }

@@ -26,6 +26,7 @@ from reviewer.runtime.openrouter import HttpResponse
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pilot.test_repository import USAGE, entries
 from tests.pipeline.helpers import tcid
+from tests.specialist_lanes import lanes
 
 REPO = P.REPO
 FIX = REPO / "fixtures" / "retrieval-positive"
@@ -101,7 +102,7 @@ class Model:
     def __call__(self, http_req):
         self.requests.append(http_req)
         self.bodies.append(json.loads(http_req.body))
-        item = self.script[len(self.requests) - 1]
+        item = lanes(self).next(self.bodies[-1])
         if isinstance(item, HttpResponse):
             return item
         d = {"id": f"gen-{len(self.requests)}", "model": SONNET, "provider": "Anthropic",
@@ -379,7 +380,8 @@ class PlanControls(Rig):
             calls.append(spec)
             return P.run_review(spec)
         rep = P.run_positive(self.options(), runner=runner, key_loader=self.boom)
-        self.assertEqual((len(calls), rep["plan"]["capturedCount"]), (1, 1))      # one request attempted, none delivered
+        # SPECIALISTS-01: one first request attempted per specialist, none delivered
+        self.assertEqual((len(calls), rep["plan"]["capturedCount"]), (1, 3))
 
     def test_plan_with_the_wrong_auth_for_this_profile_does_not_plan(self):
         self.write_auth({**AUTH, "models": ["anthropic/claude-haiku-5.5"]})
@@ -396,21 +398,21 @@ class PlanControls(Rig):
 class ModelDecides(Rig):
     def test_positive_chain_uses_ordinary_reads_and_the_verifier_citation_is_the_executed_read(self):
         rep, m = self.live()
-        self.assertEqual((rep["status"], rep["providerCalls"], rep["counts"]["comments"]), ("completed", 5, 1))
+        self.assertEqual((rep["status"], rep["providerCalls"], rep["counts"]["comments"]), ("completed", 9, 1))
         ev = self.events(rep)
         reads = [e for e in ev if e.get("type") == "tool.call" and "requestedBy" in e]
         self.assertTrue(all(e["tool"] == "read_file" and e["result"]["status"] == "ok" for e in reads))
         self.assertEqual(sorted((e["stage"], e["args"]["path"]) for e in reads),
-                         sorted([("INVESTIGATE", DEFN[0]), ("INVESTIGATE", CALLER), ("VERIFY", DEFN[0])]))
+                         sorted([("INVESTIGATE", DEFN[0]), ("INVESTIGATE", CALLER)] * 3 + [("VERIFY", DEFN[0])]))
         self.assertIn(m.read_id, [e["toolCallId"] for e in reads])
         # verifier independence: it is given the claim and the cited evidence, not the investigator's other raw reads
-        vuser = [x["content"] for x in m.bodies[2]["messages"] if x["role"] == "user"][0]
+        vuser = [x["content"] for x in m.bodies[6]["messages"] if x["role"] == "user"][0]    # after 3 x (ask, final)
         self.assertIn(CLAIM, vuser)
         self.assertIn("originalEvidence", vuser)
         self.assertNotIn("run_forever", vuser)                                  # worker.py was read only by the investigator
-        self.assertNotIn("run_forever", "\n".join(x["content"] for x in m.bodies[2]["messages"]))
+        self.assertNotIn("run_forever", "\n".join(x["content"] for x in m.bodies[6]["messages"]))
         # the judge sees findings through the real JudgeOutput schema only
-        self.assertEqual(m.bodies[4]["response_format"]["json_schema"]["name"], "JudgeOutput")
+        self.assertEqual(m.bodies[8]["response_format"]["json_schema"]["name"], "JudgeOutput")
         judge = json.loads((Path(rep["paths"]["runDir"]) / "artifacts" / "06-JUDGE.v1.json").read_text())
         self.assertIn("Leases never expire", json.dumps(judge))
 
@@ -434,13 +436,13 @@ class ModelDecides(Rig):
         m.script = m.script[:3] + [m.verdict("refuted")]
         rep, m = self.live(m)
         self.assertEqual((rep["status"], rep["counts"]["findings"], rep["counts"]["comments"], len(m.requests)),
-                         ("completed", 0, 0, 4))
+                         ("completed", 0, 0, 8))          # SPECIALISTS-01: 3 x (ask, final) + verifier
         self.assertNotIn("JudgeOutput", [b["response_format"]["json_schema"]["name"] for b in m.bodies])
 
     def test_a_miss_and_a_wrong_finding_are_reported_as_the_model_decided_them(self):
         miss = self.model(MISS)
         rep, m = self.live(miss)
-        self.assertEqual((rep["status"], len(m.requests), rep["counts"]["hypotheses"]), ("completed", 2, 0))
+        self.assertEqual((rep["status"], len(m.requests), rep["counts"]["hypotheses"]), ("completed", 6, 0))
         self.assertTrue(rep["ok"])                                           # a miss is not an error, not retried
         rmtree(self.out)
         self.state_reset()
@@ -467,7 +469,9 @@ class ModelDecides(Rig):
                     self.assertFalse(rep["ok"])
                 except PipelineError:
                     pass
-                self.assertEqual(len(m.requests), 1)
+                # SPECIALISTS-01: an HTTP failure has an unknown outcome and starts no further specialist; a processed
+                # but unusable answer fails only its specialist, so each specialist makes its one attempt; no retry
+                self.assertEqual(len(m.requests), 1 if isinstance(bad, HttpResponse) else 3)
 
     def test_every_request_is_the_one_sonnet_route_json_protocol_no_tools_no_fallback(self):
         rep, m = self.live()
@@ -519,11 +523,11 @@ class ModelDecides(Rig):
         rep, m = self.live()
         before_rows = 2          # the seeded prior admit + finish
         rows = self.ledger_rows()
-        self.assertEqual(len(m.requests), 5)
-        self.assertEqual(len(rows) - before_rows, 10)                          # admit + finish per real request
+        self.assertEqual(len(m.requests), 9)                                    # SPECIALISTS-01: 6 investigator calls
+        self.assertEqual(len(rows) - before_rows, 18)                          # admit + finish per real request
         self.assertEqual(rep["costs"]["spendBook"]["inflight"], 0)
         self.assertEqual(RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()["committedUsdMicros"] - BASELINE,
-                         5 * 4200)
+                         9 * 4200)
 
 
 # ===================================================================== durable admission
@@ -544,7 +548,7 @@ class Admission(Rig):
         self.seed(committed=46_000_000)
         m = self.model(MISS)
         rep = P.run_positive(self.live_options(baseline_micros=46_000_000), transport=m, key_loader=self.loader)
-        self.assertEqual(len(m.requests), 2)                # the draft + its one exploration-floor continuation
+        self.assertEqual(len(m.requests), 6)                # per specialist: the draft + its one floor continuation
         self.assertIn(rep["status"], ("completed", "pipeline-refused"))
 
     def test_book_inflight_and_wrong_baselines_refuse(self):
@@ -641,8 +645,8 @@ class PersistenceAndReplay(Rig):
         rep, m = self.live()
         before = self.state_bytes()
         rr = P.run_positive(self.replay_options(rep), key_loader=self.boom, transport=self.boom)
-        self.assertEqual((rr["status"], rr["ok"], rr["providerCalls"]), ("completed", True, 5 - 5))
-        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["newSpendUsdMicros"], rr["replay"]["replayedCalls"]), (0, 0, 5))
+        self.assertEqual((rr["status"], rr["ok"], rr["providerCalls"]), ("completed", True, 0))
+        self.assertEqual((rr["replay"]["liveCalls"], rr["replay"]["newSpendUsdMicros"], rr["replay"]["replayedCalls"]), (0, 0, 9))
         self.assertEqual(rr["counts"], rep["counts"])
         self.assertEqual(self.state_bytes(), before)
         self.assertEqual(self.loads, [str(self.env)])                           # only the live run read the key

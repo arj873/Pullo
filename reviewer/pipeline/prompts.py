@@ -371,8 +371,10 @@ IMPACT_TEMPLATES = {"investigator": INVESTIGATOR_IMPACT_TASK, "verifier": VERIFI
 
 def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMPT) -> dict:
     """Digests of the impact-mode texts the investigator prompt id selects. The default (v1) is the frozen IMPACT-01
-    set, byte for byte; v2 adds the exploration-floor continuation text."""
-    templates = IMPACT_V2_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V2_PROMPT else IMPACT_TEMPLATES
+    set, byte for byte; v2 adds the exploration-floor continuation text; v3 adds the specialist lens texts."""
+    templates = (IMPACT_V2_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V2_PROMPT
+                 else IMPACT_V3_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V3_PROMPT
+                 else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
 
@@ -418,6 +420,62 @@ def exploration_floor_block(draft: dict) -> dict:
     hypotheses (the model's own logged final output, field-filtered; no run, clock or host data)."""
     return {"version": EXPLORATION_FLOOR_VERSION, "instruction": EXPLORATION_FLOOR_CONTINUATION,
             "draftHypotheses": [{k: h[k] for k in _DRAFT_FIELDS if k in h} for h in draft["hypotheses"]]}
+
+
+# ---------------------------------------------------------------- impact mode v3: investigator.impact@v3
+#
+# Specialist investigators. INVESTIGATE runs the agents below one after another, in this order, each with the v2 task,
+# the v2 exploration floor and the same prefetched context. The only model-visible difference between them is one
+# host-authored LENS paragraph appended to the v2 task. Everything else (verifier, tools, impact map, the v1/v2 texts)
+# is unchanged. The lens texts are bound into the config identity through impact_template_digests(V3) and the
+# specialist block of identity.config_snapshot_id. Engine behaviour: reviewer.pipeline.specialists.
+
+INVESTIGATOR_IMPACT_V3_PROMPT = "investigator.impact@v3"
+SPECIALIST_LENS_VERSION = "specialist-lenses@1"
+
+SPECIALIST_LENSES = (
+    ("contracts", (
+        "Specialist lens (contracts and dependents): you are the first of three specialist investigators who review "
+        "this change one after another with the same context and tools; the other two focus on logic and edge cases "
+        "inside the changed code and on failure paths and safety. Your focus is the contracts the change alters and "
+        "the code that depends on them, as described above: signatures, parameters and defaults, return values and "
+        "their meaning, raised errors, configuration keys, schemas and serialised or API shapes, and every caller, "
+        "importer, subclass, implementation or reader that relies on them. If you see clear evidence of a defect "
+        "outside your focus, report it as well; the host merges duplicate hypotheses across specialists.")),
+    ("logic", (
+        "Specialist lens (logic and edge cases): you are the second of three specialist investigators who review this "
+        "change one after another with the same context and tools; the other two focus on contracts and dependents "
+        "and on failure paths and safety. Your focus is the logic inside the changed code itself: boundary values and "
+        "off-by-one errors in ranges, indexes, loops and slices; null, None, empty, zero or missing inputs; wrong "
+        "conditions, inverted checks and wrong comparison, boolean or arithmetic operators; wrong state transitions "
+        "or a wrong order of steps; incorrect defaults and constants; and copy-paste errors such as a variable, "
+        "field, key or branch reused from nearby code where a different one was meant. Trace each changed branch "
+        "with concrete values, including the edge cases, and read the definitions and helpers it relies on before "
+        "you conclude. If you see clear evidence of a defect outside your focus, report it as well; the host merges "
+        "duplicate hypotheses across specialists.")),
+    ("safety", (
+        "Specialist lens (failure paths and safety): you are the third of three specialist investigators who review "
+        "this change one after another with the same context and tools; the other two focus on contracts and "
+        "dependents and on logic and edge cases inside the changed code. Your focus is what the changed code does "
+        "when something goes wrong, and its safety: error handling; exceptions that are swallowed, leaked, re-raised "
+        "with the wrong type or that skip cleanup; the lifecycle of resources, files, connections, locks and "
+        "transactions (acquire and release, commit and rollback, cleanup on every path, early returns included); "
+        "concurrency and race conditions; security, including authentication, authorization checks, injection, "
+        "unsafe handling of untrusted input and exposure of secrets or private data; and data integrity, including "
+        "migrations, partial writes and lost updates. Follow each error path of the changed code to where it is "
+        "handled. If you see clear evidence of a defect outside your focus, report it as well; the host merges "
+        "duplicate hypotheses across specialists.")),
+)
+SPECIALIST_AGENTS = tuple(a for a, _ in SPECIALIST_LENSES)
+IMPACT_V3_TEMPLATES = {**IMPACT_V2_TEMPLATES, "lenses": [[a, t] for a, t in SPECIALIST_LENSES]}
+
+
+def investigator_v3_task(agent: str) -> str:
+    """The investigator.impact@v3 task of one specialist: the v2 task with that agent's lens paragraph appended."""
+    lens = dict(SPECIALIST_LENSES).get(agent)
+    if lens is None:
+        raise ValueError(f"unknown specialist {agent!r}; known: {list(SPECIALIST_AGENTS)}")
+    return INVESTIGATOR_IMPACT_V2_TASK + " " + lens
 
 
 # ---------------------------------------------------------------- opt-in experiment: context-check@1
@@ -486,7 +544,10 @@ def verifier_task(prompt_version: str) -> str:
 
 
 def investigator_task(prompt_version: str) -> str:
-    """The retrieval investigator task for a policy prompt id (impact mode v1/v2 or the frozen retrieval@2 text)."""
+    """The retrieval investigator task for a policy prompt id (impact mode v1/v2 or the frozen retrieval@2 text).
+    investigator.impact@v3 has one task per specialist: investigator_v3_task(agent)."""
+    if prompt_version == INVESTIGATOR_IMPACT_V3_PROMPT:
+        raise ValueError("investigator.impact@v3 has one task per specialist; use investigator_v3_task(agent)")
     if prompt_version == INVESTIGATOR_IMPACT_V2_PROMPT:
         return INVESTIGATOR_IMPACT_V2_TASK
     return INVESTIGATOR_IMPACT_TASK if prompt_version == INVESTIGATOR_IMPACT_PROMPT else INVESTIGATOR_RETRIEVE_TASK

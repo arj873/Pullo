@@ -448,11 +448,13 @@ class Bench(TBH.Base):
 
     def test_live_arm_sends_selected_text_on_the_wire_and_replays_only_under_the_same_selector(self):
         rep, model = self.live(experiment=ARM)
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 5))
+        # SPECIALISTS-01: three specialists (ask, final) come first, then the verifier and the judge
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
         users = [json.loads(next(m["content"] for m in b["messages"] if m["role"] == "user")) for b in model.bodies]
-        self.assertEqual([u["task"] for u in users[2:4]], [prompts.VERIFIER_CONTEXT_CHECK_TASK] * 2)
-        self.assertEqual(users[4]["task"], prompts.JUDGE_FACT_TASK)
-        self.assertEqual(users[0]["task"], prompts.INVESTIGATOR_IMPACT_V2_TASK)    # EXPLORE-FLOOR: pilot default
+        self.assertEqual([u["task"] for u in users[6:8]], [prompts.VERIFIER_CONTEXT_CHECK_TASK] * 2)
+        self.assertEqual(users[8]["task"], prompts.JUDGE_FACT_TASK)
+        self.assertEqual([u["task"] for u in users[0:6:2]],                       # SPECIALISTS-01: pilot default
+                         [prompts.investigator_v3_task(a) for a in prompts.SPECIALIST_AGENTS])
         self.assertIs(rep["experiment"]["audited"], False)
         trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
         ok = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "rp-ok"), replay_trace=trace,
