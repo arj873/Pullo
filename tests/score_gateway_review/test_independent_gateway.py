@@ -463,7 +463,10 @@ class Diagnostics(Base):
                                {"match": True, "confidence": 0.5, S.SENT: 1}, {S.SENT: S.SENT}],
                    "deduper": [{"groups": [[S.SENT]]}, {"groups": S.SENT}, {S.SENT: []}],
                    "extractor": [{"candidates": [{"sourceCommentId": 1, "text": S.SENT, S.SENT: 1}]},
-                                 {"candidates": [{S.SENT: "x"}]}, {S.SENT: 1}]}
+                                 {"candidates": [{S.SENT: "x"}]}, {S.SENT: 1},
+                                 {"candidates": [{"sourceCommentId": "c1", "start": S.SENT, "end": 1}]},
+                                 {"candidates": [{"sourceCommentId": "c1", "start": True, "end": 1}]},
+                                 {"candidates": [{"sourceCommentId": "c1", "start": 5, "end": 5}]}]}
 
     def test_malformed_output_never_raises_and_is_one_provider_call(self):
         for role, outs in self.BAD_OUTPUTS.items():
@@ -488,7 +491,7 @@ class Diagnostics(Base):
 
     def test_sentinel_only_in_trusted_trace_for_ok_and_invalid_outputs(self):
         gw, rec, _ = S.live(self.tmp, Fake(lambda q, k: ProviderResult(
-            S.response("extractor", output={"candidates": [{"sourceCommentId": "c1", "text": S.SENT}]},
+            S.response("extractor", output={"candidates": [{"sourceCommentId": S.SENT, "start": 0, "end": 1}]},
                        rawText=S.SENT), None, "processed")))
         r = self.call(gw, "extractor")
         self.assertTrue(r.ok)

@@ -15,7 +15,7 @@ PROJECTION_VERSION = "role-schema-projection@2"
 _STRIP = frozenset({"minLength", "maxLength", "minimum", "maximum", "pattern", "uniqueItems", "minItems",
                     "maxItems", "maxProperties", "propertyNames", "x-invariants", "format"})
 SCHEMA_NAMES = tuple(n for names in ROLE_SCHEMAS.values() for n in names)      # review family (legacy projections)
-SCORE_SCHEMA_NAMES = tuple(SCORE_ROLE_SCHEMA.values())                            # score family: ScoreExtraction/Dedup/Pair
+SCORE_SCHEMA_NAMES = tuple(SCORE_ROLE_SCHEMA.values())                            # score family: ScoreExtractionSpans/Dedup/Pair
 ALL_SCHEMA_NAMES = SCHEMA_NAMES + SCORE_SCHEMA_NAMES
 FAMILY_ROLE_SCHEMAS = {"review": dict(ROLE_SCHEMAS), "score": {r: (n,) for r, n in SCORE_ROLE_SCHEMA.items()}}
 _DEFS = export_bundle("runtime")["$defs"]

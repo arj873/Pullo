@@ -78,7 +78,7 @@ class Composition(Env):
         h = self.host()
         rep = h.execute_offline()
         names = [b["response_format"]["json_schema"]["name"] for b in self.transport.bodies]
-        self.assertEqual(names, ["ScoreExtraction"] * 2 + ["ScoreDedup"] * 2 + ["ScorePair"] * 12)      # ALL extraction, ALL dedup, then pairs
+        self.assertEqual(names, ["ScoreExtractionSpans"] * 2 + ["ScoreDedup"] * 2 + ["ScorePair"] * 12)      # ALL extraction, ALL dedup, then pairs
         self.assertTrue(rep["complete"])
         self.assertEqual((rep["admission"]["reason"], rep["admission"]["pairs"], rep["gate"]["ok"]), ("admitted", 12, True))
         ik = [i["callKey"] for i in self.intents()]
@@ -102,7 +102,7 @@ class Composition(Env):
     def test_missing_extraction_failure_stops_all_pairs_and_marks_everything_unsent(self):
         def respond(body):
             n = body["response_format"]["json_schema"]["name"]
-            return RuntimeError("boom") if (n == "ScoreExtraction" and len(self_t.bodies) == 2) else None
+            return RuntimeError("boom") if (n == "ScoreExtractionSpans" and len(self_t.bodies) == 2) else None
         self_t = S.CaptureTransport()
         calls = []
         base = self_t._default
@@ -127,7 +127,7 @@ class Composition(Env):
         h = self.host()
         rep = h.execute_offline()
         names = [b["response_format"]["json_schema"]["name"] for b in self.transport.bodies]
-        self.assertEqual(names, ["ScoreExtraction"] * 2 + ["ScoreDedup"] * 2)
+        self.assertEqual(names, ["ScoreExtractionSpans"] * 2 + ["ScoreDedup"] * 2)
         self.assertEqual((rep["admission"]["reason"], rep["fitRefusal"]), ("does-not-fit", "scoring-cap"))
         self.assertFalse(rep["complete"])
         self.assertEqual({u["status"] for u in rep["attemptSet"]["units"] if u["phase"] == "pair"}, {"unsent"})
@@ -162,6 +162,55 @@ class Composition(Env):
         with self.assertRaises(S.ScoreHostError) as cm:
             self.host(tools=(), declared=[]).execute_offline()
         self.assertEqual(cm.exception.reason, "no-declared-units")
+
+
+class ExtractV3(Env):
+    """bench.extract@v3 through the real Gateway/OpenRouterProvider: the extractor is asked for ScoreExtractionSpans, the fake
+    transport answers offsets only, and every stored candidate text is the trusted comment slice (no model-copied text)."""
+
+    def test_wire_asks_for_spans_and_documents_hold_the_trusted_slices(self):
+        from reviewer.benchmark import score_prompts as P
+        from reviewer.contracts import validate
+        from reviewer.runtime import schemas
+        h = self.host()
+        rep = h.execute_offline()
+        self.assertTrue(rep["complete"])
+        ext = [b for b in self.transport.bodies if b["response_format"]["json_schema"]["name"] == "ScoreExtractionSpans"]
+        self.assertEqual(len(ext), 2)
+        for b in ext:
+            self.assertEqual(b["response_format"]["json_schema"]["schema"], schemas.provider_schema("ScoreExtractionSpans", "anthropic"))
+            self.assertEqual(b["messages"][0]["content"], P.SYSTEM["extract"])
+            data = json.loads(b["messages"][-1]["content"])
+            self.assertTrue(all(c["length"] == len(c["text"]) and c["lineStarts"] == P.line_starts(c["text"]) for c in data["comments"]))
+            out = S.CaptureTransport._default(b)
+            self.assertEqual(validate("ScoreExtractionSpans", out), [])
+            self.assertTrue(all(set(c) == {"sourceCommentId", "start", "end"} for c in out["candidates"]))
+        case = make_case()
+        bodies = {c.id: c.body for r in case.reviews for c in r.comments}
+        for d in json.loads((self.store / f"{h.run_id}.documents.json").read_text()):
+            self.assertEqual(d["judge"]["extractionPrompt"], "bench.extract@v3")
+            self.assertEqual([c["text"] for c in d["extraction"]["candidates"]], [bodies[c["sourceCommentId"]] for c in d["extraction"]["candidates"]])
+
+    def test_out_of_range_span_from_the_provider_is_extraction_invalid_and_blocks_pairs(self):
+        def respond(b):
+            if b["response_format"]["json_schema"]["name"] == "ScoreExtractionSpans":
+                c = json.loads(b["messages"][-1]["content"])["comments"][0]
+                return {"candidates": [{"sourceCommentId": c["id"], "start": 0, "end": c["length"] + 1}]}   # schema-valid, locally invalid
+            return None
+        t = S.CaptureTransport(respond=respond)
+        rep = self.host(transport=t).execute_offline()
+        self.assertFalse(rep["complete"])
+        self.assertIn(["zeta-tool", URL, "extract", "extraction-invalid"], rep["gate"]["failures"])
+        self.assertNotIn("ScorePair", [b["response_format"]["json_schema"]["name"] for b in t.bodies])
+
+    def test_schema_digest_covers_the_spans_projection(self):
+        import hashlib
+        from reviewer.benchmark.jsonio import canonical
+        from reviewer.runtime import schemas
+        want = hashlib.sha256(canonical({n: schemas.provider_schema(n, "anthropic")
+                                         for n in ("ScoreExtractionSpans", "ScoreDedup", "ScorePair")})).hexdigest()
+        self.assertEqual(S.schema_sha256(), want)
+        self.assertEqual(CFG.canonical()["promptVersions"]["extract"], "bench.extract@v3")
 
 
 class Refusals(Env):

@@ -2987,7 +2987,7 @@
     },
     "ScoreExtraction": {
       "additionalProperties": false,
-      "description": "Candidate findings extracted from one tool's review. text is required data and is kept exactly as supplied, including whitespace-only non-empty strings.",
+      "description": "LEGACY copy shape (bench.extract@v1/v2); not legal for any score role. Candidate findings extracted from one tool's review. text is required data and is kept exactly as supplied, including whitespace-only non-empty strings.",
       "properties": {
         "candidates": {
           "items": {
@@ -3018,6 +3018,49 @@
         "candidates"
       ],
       "type": "object"
+    },
+    "ScoreExtractionSpans": {
+      "additionalProperties": false,
+      "description": "Candidate findings of one tool's review BY REFERENCE (bench.extract@v3): each names a source comment id and the half-open Unicode code point offsets [start, end) of the finding inside that comment's text as supplied. No model-written text. The upper bound (end <= len(text)) and the id lookup are local producer checks against the trusted comment text.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "end": {
+                "maximum": 1000000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "sourceCommentId": {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              "start": {
+                "maximum": 1000000,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sourceCommentId",
+              "start",
+              "end"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates"
+      ],
+      "type": "object",
+      "x-invariants": [
+        "span-order: every span is non-empty: start < end"
+      ]
     },
     "ScorePair": {
       "additionalProperties": false,
@@ -3212,7 +3255,7 @@
                   ]
                 },
                 "outputSchema": {
-                  "const": "ScoreExtraction"
+                  "const": "ScoreExtractionSpans"
                 },
                 "params": {},
                 "price": {
@@ -3457,7 +3500,7 @@
         },
         "outputSchema": {
           "enum": [
-            "ScoreExtraction",
+            "ScoreExtractionSpans",
             "ScoreDedup",
             "ScorePair"
           ]

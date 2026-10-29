@@ -52,7 +52,8 @@ OLD_DEF_NAMES = frozenset({
     "SpendAuthorization", "StageArtifact", "StagePayload", "SuiteManifest", "Tier", "ToolResult", "TraceEvent",
     "TypedError", "Usage", "VerificationRecord", "VerifierOutput", "VerifierTurn"})
 NEW_DEF_NAMES = frozenset({"ScoreStage", "ScoreRole", "ScoreExtraction", "ScoreDedup", "ScorePair", "ScoreProfile",
-                           "ScoreRequest", "ScoreRun", "ScoreTraceEvent"})
+                           "ScoreRequest", "ScoreRun", "ScoreTraceEvent",
+                           "ScoreExtractionSpans"})              # bench.extract@v3 by-reference extractor output (additive)
 COSTRECORD_BASELINE = "sha256:60504efb585bf21ad183b01e1a197c8af10c969fe7a3e266f10c5c71b24eaef8"
 TRACEEVENT_BASELINE = "sha256:317934ec2b8ec44866e9d7245ab6ffceeea8d6877bd117a1d20e84d6b3d15365"
 # sha256 of canonical JSON of sorted [["<schema>/<flavour>", sha256(json.dumps(proj, sort_keys=True))]] (15 entries).
@@ -155,7 +156,7 @@ EVR_A, EVR_B = "evr_" + "a" * 16, "evr_" + "b" * 16
 CASE = "z901-t07"
 INPUTS = C.digest({"reviewer-invented": "rendered score inputs"})
 AUTH = C.digest({"reviewer-invented": "spend authorization file"})
-ROLE_SCHEMA = {"extractor": "ScoreExtraction", "deduper": "ScoreDedup", "matcher": "ScorePair"}
+ROLE_SCHEMA = {"extractor": "ScoreExtractionSpans", "deduper": "ScoreDedup", "matcher": "ScorePair"}
 ROLE_STAGE = {"extractor": "EXTRACT", "deduper": "DEDUP", "matcher": "MATCH"}
 USAGE = {"uncachedInputTokens": 40, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 7,
          "reasoningTokens": None}
@@ -204,7 +205,7 @@ def scall(seq=2, role="extractor", agent="x-0", run_id=None, output=None, error=
     if error is not None:
         d["response"], d["error"] = None, error
     else:
-        out = output if output is not None else {"candidates": [{"sourceCommentId": "s-1", "text": " \n "}]}
+        out = output if output is not None else {"candidates": [{"sourceCommentId": "s-1", "start": 0, "end": 3}]}
         d["response"] = {"status": "ok", "resolvedModel": OPUS, "output": out, "rawText": None, "usage": USAGE}
     return d
 
@@ -504,6 +505,16 @@ class Outputs(Base):
                                 {"candidates": [{"sourceCommentId": "s"}]},
                                 {"candidates": [{"sourceCommentId": "s", "text": "x", "why": "y"}]},
                                 {"candidates": [], "notes": "x"}, {}, {"candidates": "x"}],
+            "ScoreExtractionSpans": [{"candidates": [{"sourceCommentId": "s", "start": 0, "end": 0}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": 4, "end": 2}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": -1, "end": 2}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": True, "end": 2}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": 0, "end": 2.0}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": "0", "end": 2}]},
+                                     {"candidates": [{"sourceCommentId": "", "start": 0, "end": 2}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": 0}]},
+                                     {"candidates": [{"sourceCommentId": "s", "start": 0, "end": 2, "text": "x"}]},
+                                     {"candidates": [], "notes": "x"}, {}, {"candidates": "x"}],
             "ScoreDedup": [{"groups": [[]]}, {"groups": [[-1]]}, {"groups": [[True]]}, {"groups": [[0.0]]},
                            {"groups": [0]}, {"groups": [[0]], "reasoning": "x"}, {}],
             "ScorePair": [{"match": 1, "confidence": 0.1}, {"match": True, "confidence": True},
@@ -531,8 +542,10 @@ class Outputs(Base):
             elif isinstance(node, list):
                 for i, v in enumerate(node):
                     walk(v, f"{path}[{i}]")
-        for n in ("ScoreExtraction", "ScoreDedup", "ScorePair"):
+        for n in ("ScoreExtraction", "ScoreExtractionSpans", "ScoreDedup", "ScorePair"):
             walk(bundle[n], n)
+        self.assertEqual(sorted(bundle["ScoreExtractionSpans"]["properties"]["candidates"]["items"]["properties"]),
+                         ["end", "sourceCommentId", "start"])                  # v3: no model-written text field
         self.assertEqual(sorted(bundle["ScorePair"]["properties"]), ["confidence", "match"])
         self.assertEqual(sorted(bundle["ScoreDedup"]["properties"]), ["groups"])
 
@@ -582,7 +595,8 @@ class ProfileAndRequest(Base):
     def test_request_rules(self):
         for r in ROLE_SCHEMA:
             self.ok("ScoreRequest", sreq(r))
-        self.bad("ScoreRequest", sreq("matcher", outputSchema="ScoreExtraction"), "score-role-schema")
+        self.bad("ScoreRequest", sreq("matcher", outputSchema="ScoreExtractionSpans"), "score-role-schema")
+        self.bad("ScoreRequest", sreq("extractor", outputSchema="ScoreExtraction"))    # legacy copy shape: no longer role-legal
         self.bad("ScoreRequest", sreq(tools=[{"type": "function", "name": "read_file"}]), "max-items")
         req = sreq()
         del req["tools"]
@@ -859,7 +873,8 @@ class L3L4AndRobustness(Base):
         for ent, d in (("ScorePair", {"match": SENTINEL, "confidence": SENTINEL}),
                        ("ScoreDedup", {"groups": [[SENTINEL]]}),
                        ("ScoreExtraction", {"candidates": [{"sourceCommentId": SENTINEL * 30, "text": 0}]}),
-                       ("ScoreExtraction", {"candidates": [{"sourceCommentId": "s", "text": SENTINEL * 20_000}]})):
+                       ("ScoreExtraction", {"candidates": [{"sourceCommentId": "s", "text": SENTINEL * 20_000}]}),
+                       ("ScoreExtractionSpans", {"candidates": [{"sourceCommentId": SENTINEL * 30, "start": SENTINEL, "end": 0}]})):
             with self.subTest(ent):
                 issues = self.bad(ent, d)
                 self.assertNotIn(SENTINEL, " ".join(str(i) for i in issues))
@@ -898,6 +913,7 @@ class L3L4AndRobustness(Base):
                       "run_" + "0" * 16)
         docs = {"ScoreRun": srun(), "ScoreRequest": sreq(), "CostRecord": scost(), "ScoreTraceEvent": scall(),
                 "ScoreExtraction": {"candidates": [{"sourceCommentId": "s", "text": " "}]},
+                "ScoreExtractionSpans": {"candidates": [{"sourceCommentId": "s", "start": 0, "end": 1}]},
                 "ScoreDedup": {"groups": [[0, 1], [2]]}, "ScorePair": {"match": False, "confidence": -3.5}}
 
         def paths(node, pre=()):

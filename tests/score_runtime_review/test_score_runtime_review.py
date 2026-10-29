@@ -296,7 +296,7 @@ class Provider(RT):
         self.assertEqual((body["model"], body["stream"], body["max_tokens"]), (OPUS, False, 1000))
         self.assertEqual(body["provider"], {"order": ["anthropic"], "only": ["anthropic"], "allow_fallbacks": False,
                                             "require_parameters": True})
-        self.assertEqual(body["response_format"]["json_schema"]["name"], "ScoreExtraction")
+        self.assertEqual(body["response_format"]["json_schema"]["name"], "ScoreExtractionSpans")
         res = p.call(score_req(), ("S", "extractor", "a", 0, 0))
         self.assertEqual(len(self.transport.requests), 1)
         self.assertIsNotNone(res.response)

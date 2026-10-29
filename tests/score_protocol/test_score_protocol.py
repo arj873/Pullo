@@ -69,8 +69,12 @@ class Fake:
         return [r for _, r, *_ in self.log]
 
 
-def two_cands(request, ordinal):
-    return {"candidates": [{"sourceCommentId": "c001", "text": "alpha"}, {"sourceCommentId": "c002", "text": " "}]}
+def span(cid, start, end):
+    return {"sourceCommentId": cid, "start": start, "end": end}
+
+
+def two_cands(request, ordinal):          # bench.extract@v3 references: "This" in c001 and the whitespace " " in c002
+    return {"candidates": [span("c001", 0, 4), span("c002", 4, 5)]}
 
 
 class Config(unittest.TestCase):
@@ -184,13 +188,13 @@ class Extraction(unittest.TestCase):
 
     def test_short_text_is_explicit_no_extraction_without_a_call(self):
         c = case(bodies={("toolA", 1): "a", ("toolA", 2): "b", ("toolA", 3): "c"})
-        f = Fake(extract={"candidates": [{"sourceCommentId": "c001", "text": "x"}]})
+        f = Fake(extract={"candidates": [span("c001", 0, 1)]})
         e = A.run_extract(f, CFG, REF, A.build_mapping(c, "toolA", "u"))
         self.assertEqual((e.status, e.candidates, f.log), ("no-extraction", (), []))
 
     def test_valid_extraction_keeps_whitespace_duplicates_and_real_source_ids(self):
-        e, _ = self.run_ex({"candidates": [{"sourceCommentId": "c001", "text": "dup"}, {"sourceCommentId": "c002", "text": "dup"},
-                                           {"sourceCommentId": "c003", "text": "  \n\t "}]})
+        bodies = {("toolA", 1): LONG + "dup", ("toolA", 2): "dup" + LONG, ("toolA", 3): "  \n\t " + LONG}
+        e, _ = self.run_ex({"candidates": [span("c001", len(LONG), len(LONG) + 3), span("c002", 0, 3), span("c003", 0, 5)]}, bodies)
         self.assertEqual(e.status, "ok")
         self.assertEqual([c["id"] for c in e.candidates], ["k0001", "k0002", "k0003"])
         self.assertEqual([c["text"] for c in e.candidates], ["dup", "dup", "  \n\t "])
@@ -201,21 +205,67 @@ class Extraction(unittest.TestCase):
         self.assertEqual((e.status, e.candidates), ("ok", ()))
 
     def test_invalid_shapes_are_extraction_invalid(self):
-        good = {"sourceCommentId": "c001", "text": "t"}
-        for name, out in {"empty text": {"candidates": [{**good, "text": ""}]}, "non-string": {"candidates": [{**good, "text": 5}]},
-                          "none text": {"candidates": [{**good, "text": None}]}, "unknown source": {"candidates": [{**good, "sourceCommentId": "c999"}]},
+        good = span("c001", 0, 1)
+        n = len(f"{LONG}item 1")
+        for name, out in {"empty span": {"candidates": [{**good, "end": 0}]}, "reversed": {"candidates": [span("c001", 5, 2)]},
+                          "negative start": {"candidates": [span("c001", -1, 2)]}, "end past text": {"candidates": [span("c001", 0, n + 1)]},
+                          "start past text": {"candidates": [span("c001", n, n + 1)]},
+                          "bool start": {"candidates": [{**good, "start": False}]}, "bool end": {"candidates": [{**good, "end": True}]},
+                          "float end": {"candidates": [{**good, "end": 1.0}]}, "string start": {"candidates": [{**good, "start": "0"}]},
+                          "none end": {"candidates": [{**good, "end": None}]}, "unknown source": {"candidates": [{**good, "sourceCommentId": "c999"}]},
                           "real id as source": {"candidates": [{**good, "sourceCommentId": "real-toolA-1"}]},
+                          "non-string id": {"candidates": [{**good, "sourceCommentId": 1}]},
+                          "copied text key": {"candidates": [{**good, "text": "T"}]}, "v2 copy shape": {"candidates": [{"sourceCommentId": "c001", "text": "t"}]},
                           "extra candidate key": {"candidates": [{**good, "x": 1}]}, "extra top key": {"candidates": [], "x": 1},
-                          "not a list": {"candidates": "no"}, "not object": ["x"], "null": None, "missing id": {"candidates": [{"text": "t"}]}}.items():
+                          "missing end": {"candidates": [{"sourceCommentId": "c001", "start": 0}]},
+                          "not a list": {"candidates": "no"}, "not object": ["x"], "null": None, "missing id": {"candidates": [{"start": 0, "end": 1}]},
+                          "one bad among good": {"candidates": [good, span("c002", 0, 10_000)]}}.items():
             with self.subTest(name):
                 e, _ = self.run_ex(out)
                 self.assertEqual((e.status, e.candidates), ("extraction-invalid", ()))
 
     def test_oversize_is_not_truncated(self):
-        e, _ = self.run_ex({"candidates": [{"sourceCommentId": "c001", "text": "t"}] * 201})
+        e, _ = self.run_ex({"candidates": [span("c001", 0, 1)] * 201})
         self.assertEqual((e.status, e.candidates), ("oversize", ()))
-        e, _ = self.run_ex({"candidates": [{"sourceCommentId": "c001", "text": "t"}] * 200})
+        e, _ = self.run_ex({"candidates": [span("c001", 0, 1)] * 200})
         self.assertEqual((e.status, len(e.candidates)), ("ok", 200))
+
+    def test_v3_candidate_text_is_the_trusted_slice_never_model_text(self):
+        body = "Title line\n\nFirst finding: x is off by one.\nSecond finding: é ünïcode → 漢字 counts code points.\n"
+        bodies = {("toolA", 1): body, ("toolA", 2): LONG + "two", ("toolA", 3): LONG + "three"}
+        ls = P.line_starts(body)
+        spans = [span("c001", 0, len(body)), span("c001", ls[2], ls[3]), span("c001", ls[3], len(body)),
+                 span("c002", len(LONG), len(LONG) + 3), span("c003", 0, 1)]
+        e, f = self.run_ex({"candidates": spans}, bodies)
+        self.assertEqual(e.status, "ok")
+        texts = {"c001": body, "c002": LONG + "two", "c003": LONG + "three"}
+        self.assertEqual([c["text"] for c in e.candidates], [texts[s["sourceCommentId"]][s["start"]:s["end"]] for s in spans])
+        self.assertEqual(e.candidates[2]["text"], "Second finding: é ünïcode → 漢字 counts code points.\n")
+        self.assertEqual([c["id"] for c in e.candidates], ["k0001", "k0002", "k0003", "k0004", "k0005"])
+        self.assertEqual([c["src"] for c in e.candidates], ["real-toolA-1"] * 3 + ["real-toolA-2", "real-toolA-3"])
+        # the model's reply carries no text; the request presents length and lineStarts that index the exact text string
+        comments = json.loads(f.log[0][4]["messages"][1]["content"])["comments"]
+        self.assertEqual(comments[0], {"id": "c001", "length": len(body), "lineStarts": ls, "text": body})
+        self.assertEqual([body[i - 1] for i in ls[1:]], ["\n"] * (len(ls) - 1))
+
+    def test_v3_request_and_schema_shape(self):
+        e, f = self.run_ex({"candidates": []})
+        r = f.log[0][4]
+        self.assertEqual((r["role"], r["promptVersion"], r["outputSchema"]), ("extractor", "bench.extract@v3", "ScoreExtractionSpans"))
+        self.assertEqual(P.VERSIONS, {"extract": "bench.extract@v3", "dedup": "bench.dedup@v2", "pair": "bench.pair@v2"})
+        self.assertEqual(PROFILE["roles"]["extractor"]["outputSchema"], "ScoreExtractionSpans")
+        self.assertEqual(PROFILE["roles"]["extractor"]["promptVersion"], "bench.extract@v3")
+        sysmsg = r["messages"][0]["content"]
+        for need in ("Never copy", "half-open", "lineStarts", "length", "start", "end"):
+            self.assertIn(need, sysmsg)
+        self.assertNotIn("copied faithfully", sysmsg)
+        data = json.loads(r["messages"][1]["content"])
+        self.assertTrue(all(set(c) == {"id", "length", "lineStarts", "text"} and c["length"] == len(c["text"]) for c in data["comments"]))
+
+    def test_v3_whitespace_only_and_end_equal_length_are_valid(self):
+        bodies = {("toolA", 1): "   \n" + LONG}
+        e, _ = self.run_ex({"candidates": [span("c001", 0, 4), span("c001", 4, 4 + len(LONG))]}, bodies)
+        self.assertEqual((e.status, [c["text"] for c in e.candidates]), ("ok", ["   \n", LONG]))
 
     def test_provider_failure_has_a_fixed_class_and_no_model_text(self):
         e, _ = self.run_ex(Res(error={"code": "provider-timeout", "message": SENT}))
@@ -350,7 +400,7 @@ class HostGate(unittest.TestCase):
     def test_one_failing_tool_blocks_every_pair_and_reservation_is_never_asked(self):
         calls = []
         pair_f = Fake(pair={"match": True, "confidence": 1})
-        c, ms, exts, dds = self.phases(("toolA", "toolB"), lambda t: two_cands if t == "toolA" else {"candidates": [{"sourceCommentId": "zzz", "text": "x"}]})
+        c, ms, exts, dds = self.phases(("toolA", "toolB"), lambda t: two_cands if t == "toolA" else {"candidates": [span("zzz", 0, 1)]})
         g = A.gate(exts, dds)
         self.assertFalse(g.ok)
         self.assertEqual({(f[0], f[2], f[3]) for f in g.failures}, {("toolB", "extract", "extraction-invalid"), ("toolB", "dedup", "unsent")})
@@ -399,7 +449,7 @@ class HostGate(unittest.TestCase):
         c, ms, exts, dds = self.phases(("toolA",), lambda t: Res(error={"code": "provider-error", "message": SENT}))
         blob = json.dumps([A.attempt_set(exts, dds, None), A.gate(exts, dds).failures, repr(exts), repr(dds)], default=str)
         self.assertNotIn(SENT, blob)
-        self.assertNotIn("alpha", blob)
+        self.assertNotIn(LONG, blob)
         self.assertNotIn("gold one", blob)
 
 
@@ -425,7 +475,7 @@ class GatewayComposition(unittest.TestCase):
     def test_all_phases_through_gateway_then_complete_graph_document(self):
         c = case(("toolA",))
         m = A.build_mapping(c, "toolA", "u001-t01")
-        entries = [("extractor", 0, "response", H.response("extractor", {"candidates": [{"sourceCommentId": "c001", "text": "alpha"}, {"sourceCommentId": "c002", "text": " "}]}), m.agent),
+        entries = [("extractor", 0, "response", H.response("extractor", two_cands(None, 0)), m.agent),
                    ("deduper", 0, "response", H.response("deduper", {"groups": [[0], [1]]}), m.agent)]
         entries += [("matcher", i, "response", H.response("matcher", {"match": i % 2 == 0, "confidence": 0.5 + i}), m.agent) for i in range(4)]
         with tempfile.TemporaryDirectory() as tmp:
@@ -465,8 +515,8 @@ class GatewayComposition(unittest.TestCase):
     def test_gateway_failure_unit_blocks_before_any_pair(self):
         c = case(("toolA", "toolB"))
         ms = [A.build_mapping(c, t, "u001-t0" + ("1" if t == "toolA" else "2")) for t in ("toolA", "toolB")]
-        entries = [("extractor", 0, "response", H.response("extractor", {"candidates": [{"sourceCommentId": "c001", "text": "alpha"}]}), ms[0].agent),
-                   ("extractor", 0, "response", H.response("extractor", {"candidates": [{"sourceCommentId": "nope", "text": "x"}]}), ms[1].agent)]
+        entries = [("extractor", 0, "response", H.response("extractor", {"candidates": [span("c001", 0, 4)]}), ms[0].agent),
+                   ("extractor", 0, "response", H.response("extractor", {"candidates": [span("nope", 0, 1)]}), ms[1].agent)]
         with tempfile.TemporaryDirectory() as tmp:
             gw, rec, prov, seen = self.gateway(tmp, H.script(entries))
             exts = [A.run_extract(gw.call, CFG, REF, m) for m in ms]
@@ -543,7 +593,7 @@ class Corrections(unittest.TestCase):
         g = A.gate(es, ds, [(m.tool, m.case_url) for m in ms])
         asked = []
         reserve = lambda p: asked.append(1) or True
-        _, ms2, es2, ds2 = self.full(("toolA",), extract=lambda r, o: {"candidates": [{"sourceCommentId": "c001", "text": "different text entirely"}]})
+        _, ms2, es2, ds2 = self.full(("toolA",), extract=lambda r, o: {"candidates": [span("c001", 5, 12)]})
         foreign, _ = A.plan_pairs(CFG, REF, list(zip(ms2, es2)))
         for name, ps in (("dropped plan", plans[:1]), ("duplicated plan", plans + plans[:1]), ("foreign plan", (plans[0], foreign[0])),
                          ("hand-built plan", (plans[0], A.PairPlan(plans[1].mapping, plans[1].extraction, plans[1].requests))), ("empty", ())):

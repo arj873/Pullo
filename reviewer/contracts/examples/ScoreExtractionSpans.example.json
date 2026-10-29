@@ -1,0 +1,14 @@
+{
+  "candidates": [
+    {
+      "end": 24,
+      "sourceCommentId": "c001",
+      "start": 0
+    },
+    {
+      "end": 4,
+      "sourceCommentId": "c002",
+      "start": 3
+    }
+  ]
+}

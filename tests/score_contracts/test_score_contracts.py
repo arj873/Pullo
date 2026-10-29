@@ -29,7 +29,8 @@ from reviewer.contracts.stages import ERROR_CODES, STAGE_CEILING_SEC, STAGES  # 
 
 EXAMPLES = ROOT / "reviewer" / "contracts" / "examples"
 NEW_DEFS = frozenset({"ScoreStage", "ScoreRole", "ScoreExtraction", "ScoreDedup", "ScorePair", "ScoreProfile",
-                      "ScoreRequest", "ScoreRun", "ScoreTraceEvent"})
+                      "ScoreRequest", "ScoreRun", "ScoreTraceEvent",
+                      "ScoreExtractionSpans"})                   # bench.extract@v3 by-reference extractor output (additive)
 SENTINEL = "SENTINEL_MODEL_TEXT_91c2"
 
 BASELINE_DEF_DIGESTS = {
@@ -367,13 +368,14 @@ class Compatibility(Base):
 # ============================================================ outputs, profile, request
 class Outputs(Base):
     def test_examples_are_valid(self):
-        for n, ent in (("ScoreExtraction.example", "ScoreExtraction"), ("ScoreDedup.example", "ScoreDedup"),
+        for n, ent in (("ScoreExtraction.example", "ScoreExtraction"), ("ScoreExtractionSpans.example", "ScoreExtractionSpans"),
+                       ("ScoreDedup.example", "ScoreDedup"),
                        ("ScorePair.example", "ScorePair")):
             self.assertValid(ent, ex(n))
 
     def test_outputs_are_closed_strict_projectable_objects_with_no_free_text_fields(self):
         bundle = export_bundle("t")["$defs"]
-        for name in ("ScoreExtraction", "ScoreDedup", "ScorePair"):
+        for name in ("ScoreExtraction", "ScoreExtractionSpans", "ScoreDedup", "ScorePair"):
             node = bundle[name]
             self.assertEqual(node["additionalProperties"], False)
             self.assertEqual(sorted(node["required"]), sorted(node["properties"]))      # every key required
@@ -401,6 +403,25 @@ class Outputs(Base):
                           "too many": {"candidates": [c] * 1001}}.items():
             with self.subTest(name):
                 self.assertInvalid("ScoreExtraction", doc)
+
+    def test_extraction_spans_v3_shape(self):
+        """bench.extract@v3: references only (id + half-open [start, end)); the extractor role asks for this shape."""
+        self.assertEqual(SCORE_ROLE_SCHEMA["extractor"], "ScoreExtractionSpans")
+        self.assertEqual(sorted(export_bundle("t")["$defs"]["ScoreExtractionSpans"]["properties"]["candidates"]["items"]["properties"]),
+                         ["end", "sourceCommentId", "start"])
+        for doc in ({"candidates": []}, {"candidates": [{"sourceCommentId": "c1", "start": 0, "end": 1}]},
+                    {"candidates": [{"sourceCommentId": "c1", "start": 5, "end": 900}, {"sourceCommentId": "c1", "start": 5, "end": 900}]}):
+            self.assertValid("ScoreExtractionSpans", doc)
+        c = {"sourceCommentId": "c1", "start": 0, "end": 3}
+        for name, doc in {"empty span": {"candidates": [{**c, "end": 0}]}, "reversed": {"candidates": [{**c, "start": 3, "end": 2}]},
+                          "negative": {"candidates": [{**c, "start": -1}]}, "bool start": {"candidates": [{**c, "start": False}]},
+                          "bool end": {"candidates": [{**c, "end": True}]}, "float end": {"candidates": [{**c, "end": 3.0}]},
+                          "string start": {"candidates": [{**c, "start": "0"}]}, "null end": {"candidates": [{**c, "end": None}]},
+                          "text key": {"candidates": [{**c, "text": "x"}]}, "missing end": {"candidates": [{"sourceCommentId": "c1", "start": 0}]},
+                          "empty id": {"candidates": [{**c, "sourceCommentId": ""}]}, "extra top": {"candidates": [], "notes": "x"},
+                          "too many": {"candidates": [c] * 1001}}.items():
+            with self.subTest(name):
+                self.assertInvalid("ScoreExtractionSpans", doc)
 
     def test_dedup_boundaries(self):
         self.assertValid("ScoreDedup", {"groups": []})

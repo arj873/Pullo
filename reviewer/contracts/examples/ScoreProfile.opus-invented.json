@@ -36,7 +36,7 @@
       "fallbacks": [],
       "family": "anthropic",
       "model": "anthropic/claude-opus-5.5",
-      "outputSchema": "ScoreExtraction",
+      "outputSchema": "ScoreExtractionSpans",
       "params": {
         "temperature": 0
       },
@@ -47,7 +47,7 @@
         "outputPerMTokUsdMicros": 25000000,
         "priceVersion": "invented-catalog@0"
       },
-      "promptVersion": "bench.extract@v1",
+      "promptVersion": "bench.extract@v3",
       "provider": "anthropic",
       "resolved": true
     },

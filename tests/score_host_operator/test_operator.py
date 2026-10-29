@@ -187,7 +187,7 @@ class Live(Fixture):
         self.assertTrue((self.state / "scorer.lock").exists())         # canonical lock lives in the ORIGINAL state dir
         self.assertTrue((self.state / "runtime-ledger.jsonl").exists())
         names = [b["response_format"]["json_schema"]["name"] for b in self.cap.bodies]
-        self.assertEqual(names, ["ScoreExtraction"] * 2 + ["ScoreDedup"] * 2 + ["ScorePair"] * 12)
+        self.assertEqual(names, ["ScoreExtractionSpans"] * 2 + ["ScoreDedup"] * 2 + ["ScorePair"] * 12)
         wire = json.dumps(self.cap.bodies)
         for leak in ("REALGOLD", "REALCID", "zeta-tool", "alpha-tool", "src/p1.py", "example.invalid"):
             self.assertNotIn(leak, wire)
@@ -266,7 +266,7 @@ class Live(Fixture):
         rc, rep, _ = self.op("canary", "--confirm-live", "--eval-run-id", EVR, base=b)
         self.assertEqual(rc, 0, rep)
         names = [x["response_format"]["json_schema"]["name"] for x in self.cap.bodies]
-        self.assertEqual(sorted(set(names)), ["ScoreDedup", "ScoreExtraction", "ScorePair"])
+        self.assertEqual(sorted(set(names)), ["ScoreDedup", "ScoreExtractionSpans", "ScorePair"])
         self.assertEqual(rep["realScoring"], False)
         # a campaign baseline cannot run canary mode and vice versa; a non-preregistered set is refused
         rc, rep, _ = self.op("canary", "--confirm-live", "--eval-run-id", EVR, base=self.write_baseline())

@@ -34,7 +34,7 @@ def run_two_tool_complete(t):
     tools = ("zeta-tool", "alpha-tool")
     c = case(tools, ngold=2)
     ms = [A.build_mapping(c, tool, f"u001-t{n:02d}") for n, tool in enumerate(tools, 1)]
-    ext = {"candidates": [{"sourceCommentId": "c001", "text": "alpha"}, {"sourceCommentId": "c002", "text": " "}]}
+    ext = {"candidates": [{"sourceCommentId": "c001", "start": 0, "end": 11}, {"sourceCommentId": "c002", "start": 11, "end": 12}]}   # v3 spans
     entries = []
     for m in ms:
         entries.append(("extractor", 0, "response", H.response("extractor", ext), m.agent))

@@ -21,7 +21,7 @@ from reviewer.runtime.catalog import TERRA_MODEL
 
 KEY = ("EVAL", "score", "extractor", 0, 0)
 S = dict(category="scoring", category_cap=8_000_000, aggregate_ceiling=20_000_000)
-OK_EXTRACT = {"candidates": [{"sourceCommentId": "c1", "text": "  "}]}
+OK_EXTRACT = {"candidates": [{"sourceCommentId": "c1", "start": 0, "end": 2}]}
 
 
 def score_req(role="extractor", **over):
@@ -198,12 +198,19 @@ class SchemaUnion(unittest.TestCase):
         self.assertEqual(schemas.SCHEMA_NAMES, ("InvestigatorOutput", "InvestigatorTurn", "VerifierOutput", "VerifierTurn", "JudgeOutput"))
 
     def test_score_projections_exist_and_validate_locally(self):
-        self.assertEqual(set(schemas.SCORE_SCHEMA_NAMES), {"ScoreExtraction", "ScoreDedup", "ScorePair"})
+        self.assertEqual(set(schemas.SCORE_SCHEMA_NAMES), {"ScoreExtractionSpans", "ScoreDedup", "ScorePair"})
         for n in schemas.SCORE_SCHEMA_NAMES:
             for f in ("anthropic", "openai-strict"):
                 self.assertIsInstance(schemas.provider_schema(n, f), dict)
         self.assertEqual(len(schemas.score_projection_snapshot()), 6)
-        self.assertEqual(schemas.local_issues("ScoreExtraction", OK_EXTRACT), [])
+        self.assertEqual(schemas.local_issues("ScoreExtractionSpans", OK_EXTRACT), [])
+        self.assertNotEqual(schemas.local_issues("ScoreExtractionSpans", {"candidates": [{"sourceCommentId": "c1", "start": 2, "end": 2}]}), [])
+        self.assertNotEqual(schemas.local_issues("ScoreExtractionSpans", {"candidates": [{"sourceCommentId": "c1", "start": 0, "end": 2, "text": "x"}]}), [])
+        proj = schemas.provider_schema("ScoreExtractionSpans", "anthropic")
+        item = proj["properties"]["candidates"]["items"]
+        self.assertEqual((item["required"], item["additionalProperties"]), (["sourceCommentId", "start", "end"], False))
+        self.assertEqual({k: v["type"] for k, v in item["properties"].items()}, {"sourceCommentId": "string", "start": "integer", "end": "integer"})
+        self.assertNotIn("x-invariants", json.dumps(proj))                        # the span-order rule is local-only
         self.assertEqual(schemas.local_issues("ScorePair", {"match": True, "confidence": 0.5}), [])
         self.assertNotEqual(schemas.local_issues("ScoreDedup", {}), [])
 
@@ -240,7 +247,7 @@ class ScoringProvider(ProviderBase):
         intent = [x for x in self.receipts() if x["type"] == "intent"][0]
         self.assertEqual(intent["category"], "scoring")
         self.assertEqual(self.ledger.totals("review")["calls"], 0)
-        self.assertEqual(self.receipts()[-1]["schemaName"], "ScoreExtraction")
+        self.assertEqual(self.receipts()[-1]["schemaName"], "ScoreExtractionSpans")
 
     def test_all_three_roles_build_their_schema(self):
         p = self.sp()

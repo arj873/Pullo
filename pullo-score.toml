@@ -25,8 +25,8 @@ max_output_tokens = 256
 timeout_sec = 60
 
 [prompts]
-extract_version = "bench.extract@v2"
-extract_sha256 = "4f260c3ea8be0414cadfa7073345eda7735bafd9db1008c6fac70947c8c40899"
+extract_version = "bench.extract@v3"
+extract_sha256 = "0551eefdd609ab209c19b1008541699605cda042fd28559a6cad6ab4a512b9be"
 dedup_version = "bench.dedup@v2"
 dedup_sha256 = "9c94b0c03cab34dc5425034cc57169eca853fd38a07bb3b9acd06d9664e9dbe9"
 pair_version = "bench.pair@v2"
