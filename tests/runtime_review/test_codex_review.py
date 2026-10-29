@@ -94,8 +94,8 @@ class CodexReview(RT):
         self.assertNotIn("SECRET", self.ledger_path.read_text())
 
     def test_F6_unrecognised_event_types_must_fail_closed(self):
-        """CONFIRMED fail-open: only item.started/completed/updated are inspected. Any tool activity reported under another
-        event type (the JSONL schema was never observed - handoff limit 3) is ignored and the call returns status ok."""
+        """Was CONFIRMED fail-open (only item.* events were inspected). FIXED in TERRA-ARM-01: an event type outside the
+        known set, or an item event without an item object, aborts the call as an isolation violation."""
         for e in ({"type": "exec_command_begin", "command": ["cat", "/etc/passwd"]}, {"type": "mcp_tool_call.started", "tool": "x"},
                   {"type": "tool.started", "name": "exec"}, {"type": "response_item", "payload": {"type": "function_call"}},
                   {"type": "item.completed", "details": {"type": "command_execution"}}):
@@ -105,13 +105,13 @@ class CodexReview(RT):
                 res = p.call(self.r(), KEY)
                 self.assertIsNone(res.response, f"ok result despite unrecognised event {e['type']}")
 
-    test_F6_unrecognised_event_types_must_fail_closed = unittest.expectedFailure(test_F6_unrecognised_event_types_must_fail_closed)
 
-    def test_nonjson_lines_do_not_fail_the_audit(self):
-        """Observation: unparsable stdout lines are counted but ignored; a tool event printed in a non-JSON form is invisible."""
+    def test_nonjson_lines_fail_the_audit(self):
+        """Was: unparsable stdout lines were counted but ignored, so a tool event printed in a non-JSON form was invisible.
+        TERRA-ARM-01: any malformed JSONL line now aborts the call as an isolation violation."""
         out = b"exec: cat /etc/passwd\n" + stream()
         res = self.prov(Fake(out)).call(self.r(), KEY)
-        self.assertEqual(res.response["status"], "ok")
+        self.assertEqual(res.error["detail"]["reason"], "isolation-violation")
 
     def test_turn_failed_and_error_events(self):
         for e in ({"type": "turn.failed", "error": {"message": "x"}}, {"type": "error", "message": "m"}):
@@ -209,8 +209,8 @@ class IsolationBoundary(unittest.TestCase):
         mode = m.get("tool_mode")
         self.assertIn(mode, (None, "code_mode_only", "standard"), mode)
         if mode == "code_mode_only":
-            self.assertFalse([f for f in C.DISABLED_FEATURES if f.startswith("code_mode")],
-                             "adapter does not disable any code_mode feature (documenting)")
+            self.assertIn("code_mode_host", C.DISABLED_FEATURES)
+            self.assertIn("code_mode", C.DISABLED_FEATURES)
         self.assertEqual(m.get("shell_type"), "unified_exec")
 
     def test_F1c_readonly_sandbox_still_reads_host_files_outside_cwd(self):
@@ -239,7 +239,7 @@ class IsolationBoundary(unittest.TestCase):
             home = Path(d) / "home"; (home / ".codex").mkdir(parents=True)
             decoy = home / ".codex" / "auth.json"; decoy.write_text("DECOY")
             base = [bw, "--unshare-all", "--die-with-parent", "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
-                    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+                    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", tempfile.gettempdir()]
             hidden = subprocess.run(base + ["--tmpfs", str(Path(d).parent), "cat", str(decoy)], capture_output=True, text=True, timeout=30)
             self.assertNotEqual(hidden.returncode, 0)
             exposed = subprocess.run(base + ["--ro-bind", str(home / ".codex"), "/codexhome", "cat", "/codexhome/auth.json"],
@@ -255,27 +255,26 @@ class RunBounded(unittest.TestCase):
 
     def test_deadline_kills_group_and_returns(self):
         code = ("from reviewer.runtime.codex_cli import run_bounded\nimport sys\n"
-                "r=run_bounded([sys.executable,'-c','import time;time.sleep(60)'],b'',{},'/tmp',1)\nprint(r.timed_out)")
+                "r=run_bounded([sys.executable,'-c','import time;time.sleep(60)'],b'',{},__import__('tempfile').gettempdir(),1)\nprint(r.timed_out)")
         p, dt = self._run_isolated(code, 5)
         self.assertEqual(p.stdout.strip(), "True")
         self.assertLess(dt, 10)
 
     def test_output_cap_kills(self):
         code = ("from reviewer.runtime.codex_cli import run_bounded\nimport sys\n"
-                "r=run_bounded([sys.executable,'-c','import sys\\nwhile True: sys.stdout.write(\"x\"*100000)'],b'',{},'/tmp',20,max_stdout=1000)\n"
+                "r=run_bounded([sys.executable,'-c','import sys\\nwhile True: sys.stdout.write(\"x\"*100000)'],b'',{},__import__('tempfile').gettempdir(),20,max_stdout=1000)\n"
                 "print(r.truncated,len(r.stdout))")
         p, dt = self._run_isolated(code, 20)
         self.assertEqual(p.stdout.split(), ["True", "1000"])
         self.assertLess(dt, 15)
 
-    @unittest.expectedFailure
     def test_F8_detached_grandchild_holding_the_pipes_must_not_hang_run_bounded(self):
-        """A descendant that leaves the process group (setsid) and keeps stdout open survives killpg. run_bounded then joins its
-        pump threads for 5 s each and calls stdout.close() while a pump thread is blocked in read(): close() waits on the buffer
-        lock held by that read, so the call can hang until the grandchild exits."""
+        """A descendant that leaves the process group (setsid) and keeps stdout open survives killpg. The old run_bounded joined
+        pump threads and called stdout.close() while a pump thread was blocked in read(), so it could hang until the grandchild
+        exited. FIXED in TERRA-ARM-01: non-blocking pipes and a selector; the deadline returns promptly."""
         code = ("from reviewer.runtime.codex_cli import run_bounded\nimport sys\n"
                 "child=\"import os,time,subprocess,sys\\nsubprocess.Popen([sys.executable,'-c','import time;time.sleep(45)'],start_new_session=True)\\ntime.sleep(60)\"\n"
-                "r=run_bounded([sys.executable,'-c',child],b'',{},'/tmp',1)\nprint('returned',r.timed_out)")
+                "r=run_bounded([sys.executable,'-c',child],b'',{},__import__('tempfile').gettempdir(),1)\nprint('returned',r.timed_out)")
         p, dt = self._run_isolated(code, 40)
         self.assertEqual(p.stdout.strip(), "returned True")
         self.assertLess(dt, 12, f"run_bounded took {dt:.1f}s with a 1 s deadline")

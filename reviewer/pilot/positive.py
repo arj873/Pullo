@@ -41,6 +41,7 @@ from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_US
 from reviewer.runtime.openrouter import OpenRouterProvider
 from reviewer.runtime.turn_canary import Refused, open_state
 
+from .providers import ReviewProviders, live_terra, needs, plan_providers, scrub_of, worst_case
 from .launcher import REPO, PilotError, _Unused, _force_cleanup, gateway_costs, ledger_costs, utc_now
 
 from .repository import (BOOK_NAME, RepositoryError, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, _check_ceiling,
@@ -422,6 +423,7 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, Path(os.path.realpath(o.out_dir)), *_control_roots(o)])
     scratch = tempfile.TemporaryDirectory(prefix="pilot-positive-plan-")
     transport = CapturingTransport()
+    capture = None
     problem = result = None
     try:
         root = Path(os.path.realpath(scratch.name))
@@ -430,9 +432,10 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
         book = SpendBook(handle, root / BOOK_NAME)
         ledger = RuntimeLedger(root / LEDGER_NAME, TRIAL_TOTAL_USD_MICROS)
         evr = eval_run_id(o, config_identity(prep, profile, plan, policy))
-        provider = OpenRouterProvider(enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle,
-                                      book=book, ledger=ledger, transport=transport, run_scope=provider_scope(evr, prep))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        providers, capture = plan_providers(profile, transport, lambda: OpenRouterProvider(
+            enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle, book=book, ledger=ledger,
+            transport=transport, run_scope=provider_scope(evr, prep)))
+        backend = RecordBackend(handle, book, providers.mapping, utc_now)
         spec = build_spec(o, prep, backend, runs, profile, plan, policy)
         try:
             validate_spec(spec)
@@ -444,10 +447,10 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
             problem = {"code": "authorization", "message": str(e)[:400]}
     finally:
         _force_cleanup(scratch)
-    first = [_request_facts(r) for r in transport.requests]
+    first = capture.facts(transport.requests, _request_facts) if capture else []
     ceiling = plan["budget"]["maxUsdMicros"]
-    worst = max((f["worstCaseRouterUsdMicros"] for f in first), default=None)
-    planned = bool(first) and not any(f["toolsInBody"] for f in first)
+    worst = worst_case(first)
+    planned = bool(first) and not any(f.get("toolsInBody", False) for f in first)
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent review of this harness, then root's explicit invocation",
              STRICT_REPLAY_ONLY]
@@ -494,6 +497,9 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
     cfg = effective_config(o, cfg)
     out = check_out(o)
     profile, plan, policy = _profile_parts(cfg)
+    if needs(profile, "openai"):                  # gate S1: this host's state is the OpenRouter trial state
+        raise PositiveError("live Terra arms run through the repository/benchmark hosts with their own Terra state "
+                            "dir; the positive-control host only plans them")
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out, *_control_roots(o)])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
@@ -510,12 +516,17 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
     except PipelineError as e:
         raise PositiveError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
+    terra = live_terra(profile, ledger, provider_scope(evr, prep))
     runs = make_out(out)
+    key = None
     try:
-        key = key_loader(o.env_file, forbidden_roots=[REPO / "reviewer", REPO / "fixtures", out, *_control_roots(o)])
-        provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
-                                      transport=transport, run_scope=provider_scope(evr, prep))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        router = DisabledProvider("anthropic")
+        if needs(profile, "anthropic"):
+            key = key_loader(o.env_file, forbidden_roots=[REPO / "reviewer", REPO / "fixtures", out, *_control_roots(o)])
+            router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
+                                        transport=transport, run_scope=provider_scope(evr, prep))
+        provider = ReviewProviders(router, terra)
+        backend = RecordBackend(handle, book, provider.mapping, utc_now)
         spec = build_spec(o, prep, backend, runs, profile, plan, policy)
         before = ledger.totals()
         try:
@@ -526,14 +537,14 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
                    "costs": {"runtime": ledger_costs(before, ledger.totals()), "spendBook": book.totals(),
                              "note": "key/generation reconciliation is root's, outside this tool"},
                    "forkAndStageReplay": STRICT_REPLAY_ONLY}
-            rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+            rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
             return rep
         except BaseException as e:
             _interrupted(out, prep, o, e, key, ledger, before, provider)
             raise
         rep = run_report(o, prep, res, provider_calls=provider.calls, ledger_before=before,
                          ledger_after=ledger.totals(), book=book.totals())
-        rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+        rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
         return rep
     except (EnvFileError, PipelineError):
         _remove_if_empty(out, runs)
@@ -547,7 +558,7 @@ def _interrupted(out, prep, o, exc, key, ledger, before, provider) -> None:
                "costs": {"runtime": ledger_costs(before, ledger.totals())},
                "note": "an interrupted call keeps its ledger intent; the next invocation refuses at the in-flight "
                        "gate until root reconciles"}
-        write_report(out, rep, scrub=key.scrub)
+        write_report(out, rep, scrub=scrub_of(key))
     except Exception:  # noqa: BLE001 - never hides the original interruption
         pass
 

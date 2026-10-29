@@ -1,0 +1,150 @@
+{
+ "models": [
+  {
+   "additional_speed_tiers": [],
+   "apply_patch_tool_type": null,
+   "availability_nux": null,
+   "available_access_programs": {
+    "cyber": []
+   },
+   "base_instructions": "",
+   "comp_hash": "3000",
+   "context_window": 272000,
+   "default_reasoning_level": "medium",
+   "default_reasoning_summary": "none",
+   "default_verbosity": "low",
+   "description": "Older balanced model for straightforward work.",
+   "display_name": "GPT-5.6-Terra",
+   "effective_context_window_percent": 95,
+   "experimental_supported_tools": [],
+   "include_apps_usage_instructions": false,
+   "include_plugin_usage_instructions": false,
+   "include_skills_usage_instructions": false,
+   "input_modalities": [
+    "text"
+   ],
+   "max_context_window": 872000,
+   "model_messages": null,
+   "node_repl_auto_review_required": false,
+   "node_repl_disabled": true,
+   "priority": 8,
+   "service_tiers": [],
+   "shell_type": "disabled",
+   "slug": "gpt-5.6-terra",
+   "support_verbosity": true,
+   "supported_in_api": true,
+   "supported_reasoning_levels": [
+    {
+     "description": "Fast responses with lighter reasoning",
+     "effort": "low"
+    },
+    {
+     "description": "Balances speed and reasoning depth for everyday tasks",
+     "effort": "medium"
+    },
+    {
+     "description": "Greater reasoning depth for complex problems",
+     "effort": "high"
+    },
+    {
+     "description": "Extra high reasoning depth for complex problems",
+     "effort": "xhigh"
+    },
+    {
+     "description": "Maximum reasoning depth for the hardest problems",
+     "effort": "max"
+    },
+    {
+     "description": "Maximum reasoning with automatic task delegation",
+     "effort": "ultra"
+    }
+   ],
+   "supports_experimental_context": false,
+   "supports_image_detail_original": true,
+   "supports_reasoning_effort_updates": false,
+   "supports_search_tool": false,
+   "tool_mode": "standard",
+   "truncation_policy": {
+    "limit": 10000,
+    "mode": "tokens"
+   },
+   "upgrade": null,
+   "use_responses_lite": true,
+   "visibility": "list",
+   "web_search_tool_type": "text"
+  },
+  {
+   "additional_speed_tiers": [],
+   "apply_patch_tool_type": null,
+   "availability_nux": null,
+   "available_access_programs": {
+    "cyber": []
+   },
+   "base_instructions": "",
+   "comp_hash": "3000",
+   "context_window": 500000,
+   "default_reasoning_level": "low",
+   "default_reasoning_summary": "none",
+   "default_verbosity": "low",
+   "description": "GPT-6.1 Terra Codex model.",
+   "display_name": "GPT-6.1 Terra",
+   "effective_context_window_percent": 95,
+   "experimental_supported_tools": [],
+   "include_apps_usage_instructions": false,
+   "include_plugin_usage_instructions": false,
+   "include_skills_usage_instructions": false,
+   "input_modalities": [
+    "text"
+   ],
+   "max_context_window": 872000,
+   "model_messages": null,
+   "node_repl_auto_review_required": false,
+   "node_repl_disabled": true,
+   "priority": 3,
+   "service_tiers": [],
+   "shell_type": "disabled",
+   "slug": "gpt-6.1-terra",
+   "support_verbosity": true,
+   "supported_in_api": true,
+   "supported_reasoning_levels": [
+    {
+     "description": "Fast responses with lighter reasoning",
+     "effort": "low"
+    },
+    {
+     "description": "Balances speed and reasoning depth for everyday tasks",
+     "effort": "medium"
+    },
+    {
+     "description": "Greater reasoning depth for complex problems",
+     "effort": "high"
+    },
+    {
+     "description": "Extra high reasoning depth for complex problems",
+     "effort": "xhigh"
+    },
+    {
+     "description": "Maximum reasoning depth for the hardest problems",
+     "effort": "max"
+    },
+    {
+     "description": "Maximum reasoning with automatic task delegation",
+     "effort": "ultra"
+    }
+   ],
+   "supports_experimental_context": false,
+   "supports_image_detail_original": true,
+   "supports_reasoning_effort_updates": true,
+   "supports_search_tool": false,
+   "tool_mode": "standard",
+   "truncation_policy": {
+    "limit": 10000,
+    "mode": "tokens"
+   },
+   "upgrade": null,
+   "use_responses_lite": true,
+   "visibility": "list",
+   "web_search_tool_type": "text"
+  }
+ ]
+}

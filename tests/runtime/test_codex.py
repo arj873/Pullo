@@ -167,7 +167,7 @@ class Calls(Base):
 
     def test_stderr_and_garbage_lines_never_surface(self):
         res = self.prov(RunResult(0, b"garbage\n" + events(), b"secret stderr " + FAKE_KEY.encode())).call(VERIFY_TERRA(), KEY)
-        self.assertEqual(res.response["status"], "ok")
+        self.assertEqual(res.error["detail"]["reason"], "isolation-violation")
         with open(os.path.join(self.dir, "led.jsonl")) as f:
             self.assertNotIn(FAKE_KEY, f.read())
 
@@ -184,7 +184,7 @@ class Calls(Base):
 
 class Preflight(Base):
     def fake(self, help_text="--sandbox --ephemeral --ignore-user-config --ignore-rules --skip-git-repo-check --json "
-                             "--output-schema --cd --model --disable --config --color", login=0, feats=None):
+                             "--output-schema --cd --model --disable --config --color --strict-config", login=0, feats=None):
         feats = feats if feats is not None else "".join(f"{f}   stable   true\n" for f in cc.DISABLED_FEATURES)
 
         def run(argv):
@@ -195,7 +195,7 @@ class Preflight(Base):
             if argv[1:] == ["features", "list"]:
                 return RunResult(0, feats.encode(), b"")
             if argv[1:] == ["login", "status"]:
-                return RunResult(login, b"", b"")
+                return RunResult(login, b"Logged in using ChatGPT", b"")
             raise AssertionError(argv)
         return run
 

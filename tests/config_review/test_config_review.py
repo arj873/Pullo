@@ -33,7 +33,7 @@ MIX = (HAIKU, OPUS, SONNET)                                  # investigator, ver
 ROLES = ("investigator", "verifier", "judge")
 ROLE_OF = {"InvestigatorOutput": "investigator", "InvestigatorTurn": "investigator", "VerifierOutput": "verifier",
            "VerifierTurn": "verifier", "JudgeOutput": "judge"}
-HELD = 'provider = "openai"\nmodel = "gpt-5.6-terra"'
+HELD = 'provider = "openai"\nmodel = "gpt-unallowlisted-terra"'
 
 
 def toml(inv=SONNET, ver=SONNET, jdg=SONNET, extra=""):
@@ -199,7 +199,7 @@ class Resolution(Files):
 
     def test_held_provider_refuses_for_every_role_and_names_no_fallback(self):
         for role in ROLES:
-            with self.subTest(role), self.assertRaisesRegex(ConfigError, "held.*no\\s+fallback"):
+            with self.subTest(role), self.assertRaisesRegex(ConfigError, "allowlist.*no\\s+fallback"):
                 resolve_config(self.write(held_toml(role), f"h-{role}.toml"))
 
     def test_size_boundary_is_exact(self):

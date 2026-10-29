@@ -28,6 +28,7 @@ from reviewer.runtime import RuntimeLedger, TRIAL_TOTAL_USD_MICROS, load_openrou
 from reviewer.runtime.catalog import worst_case_router_micros
 from reviewer.runtime.openrouter import OpenRouterProvider
 
+from .providers import ReviewProviders, live_terra, needs, planned_request, scrub_of
 from .profile import (MODEL, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, live_plan, live_profile)
 
 REPO = Path(__file__).resolve().parents[2]
@@ -437,10 +438,18 @@ def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, wo
             validate_spec(_spec(o, paths, bridge, record, profile, plan, _Unused(handle), runs))
             RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(
                 profile, plan["budget"])             # the authorization must cover every configured role model
-            key = get_key()
-            provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
-                                          transport=transport, run_scope=_run_id(o, bridge, record, profile, plan))
-            backend = RecordBackend(handle, book, _providers(provider), utc_now)
+            scope = _run_id(o, bridge, record, profile, plan)
+            if needs(profile, "openai"):          # gate S1: this host's state is the OpenRouter trial state
+                raise PilotError("live Terra arms run through the repository/benchmark hosts with their own Terra "
+                                 "state dir; this historical pilot only plans them")
+            terra = live_terra(profile, ledger, scope)
+            key, router = None, DisabledProvider("anthropic")
+            if needs(profile, "anthropic"):
+                key = get_key()
+                router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
+                                            transport=transport, run_scope=scope)
+            provider = ReviewProviders(router, terra)
+            backend = RecordBackend(handle, book, provider.mapping, utc_now)
         spec = _spec(o, paths, bridge, record, profile, plan, backend, runs)
         live = o.mode == "live"
         before = ledger.totals() if live else None
@@ -450,7 +459,7 @@ def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, wo
                           ledger_after=after, book=book.totals() if live else None,
                           discard_note=_discard(bridge, out))
         if live:
-            rep["summary"] = write_summary(paths.out, rep, scrub=key.scrub)
+            rep["summary"] = write_summary(paths.out, rep, scrub=scrub_of(key))
         return rep
     except (PilotError, PipelineError, historical.BridgeError) as e:
         if bridge is not None:
@@ -476,7 +485,7 @@ def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs, cfg)
     """Run the REAL pipeline in a scratch dir against a provider that sends nothing: proves inputs, coverage,
     authorization and prompt building, and records the first request sizes. Touches nothing under --out."""
     prov = PlanProvider()
-    backend = RecordBackend(handle, book, _providers(prov), utc_now)
+    backend = RecordBackend(handle, book, ReviewProviders(prov, prov).mapping, utc_now)
     spec = _spec(o, paths, bridge, record, profile, plan, backend, runs)
     validate_spec(spec)
     backend.preflight(profile, plan["budget"])
@@ -489,7 +498,8 @@ def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs, cfg)
     for r in prov.requests:
         size = len(json.dumps(r.get("messages"), ensure_ascii=False).encode("utf-8"))
         cap = r["params"]["maxOutputTokens"]
-        reqs.append({"role": r.get("role"), "approxRequestBytes": size,
+        reqs.append(planned_request(r) or {"role": r.get("role"), "provider": r["provider"], "model": r["model"],
+                     "approxRequestBytes": size,
                      "worstCaseRouterUsdMicros": worst_case_router_micros(r["model"], size, cap)})
     return {"case": record["caseId"], "status": "planned", "mode": "plan", "disclosure": disclosure(record),
             "pinsDigest": record["pinsDigest"], "quality": QUALITY,

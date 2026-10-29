@@ -38,7 +38,7 @@ SAFE_KEYS = frozenset({
     "type", "at", "callKey", "kind", "model", "resolvedModel", "resolvedModelSource", "generationId",
     "httpStatus", "outcome", "errorKind", "finishReason", "usage", "routerCostUsd", "routerCostUsdMicros",
     "upstreamInferenceCostUsdMicros", "tokenPricedUsdMicros", "costDeltaUsdMicros", "costBasis",
-    "billingKind", "apiEquivalentEstimateUsdMicros", "worstCaseUsdMicros", "requestBytes", "responseBytes",
+    "billingKind", "estimateBasis", "apiEquivalentEstimateUsdMicros", "worstCaseUsdMicros", "requestBytes", "responseBytes",
     "latencyMs", "droppedParams", "isolation", "schemaProjection", "schemaName", "schemaSha256", "contentSha256", "priceVersion", "note", "providerSlug",
     "isByok", "upstreamInferenceCostUsd", "accountableUsdMicros", "accountableBasis", "accountableEstimated",
     "keyLimitUsd", "keyRemainingUsd"})

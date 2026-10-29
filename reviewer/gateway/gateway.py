@@ -156,6 +156,7 @@ class Gateway:
         self.overruns: list[dict] = []
         self._consumed: set[int] = set()
         self._used_calls: set[str] = set()
+        self._subscription_keys: set[str] = set()
         self.auth = authorization
         self.book = book
         self.providers: dict = {}
@@ -493,6 +494,13 @@ class Gateway:
         refusal = self._guard_check(c)
         if refusal is not None:      # D4: nothing reserved, nothing sent; recorded as a zero-cost refused call
             return self._finish_error(c, refusal, 0, 0, None, refused=True)
+        # A subscription (Codex CLI) review call is bounded by this run's Plan ceiling at its API-equivalent
+        # reservation, the adapter's per-run call cap and the per-call timeout, and recorded in the trace and runtime
+        # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
+        subscription = (self.family == "review" and req["provider"] == "openai" and
+                        getattr(provider, "billing_kind", None) == "subscription-consumption")
+        if subscription:
+            self._subscription_keys.add(rkey)
         refuse = self._reserve(rkey, stage, amount)
         if refuse is not None:
             return self._finish_error(c, refuse, amount, 0, None, refused=True)
@@ -500,8 +508,9 @@ class Gateway:
             self.live_calls += 1
         try:
             send = copy.deepcopy(req)
-            if self.family == "score":
-                # explicit time bound: the adapter always gets the trusted per-call cap (default = cap, request may only lower it)
+            if self.family == "score" or subscription:
+                # explicit time bound: the adapter always gets the trusted per-call cap (default = cap, request may only lower it);
+                # for a subscription call it is the role's profile timeout, which the CLI adapter enforces as a hard deadline
                 send["params"]["timeoutSec"] = min(send["params"].get("timeoutSec", spec["caps"]["timeoutSec"]),
                                                    spec["caps"]["timeoutSec"])
             result = provider.call(send, c["key"])
@@ -524,7 +533,7 @@ class Gateway:
             if self.family == "score":
                 err.pop("stage", None)
             return err
-        if self.book is not None:
+        if self.book is not None and rkey not in self._subscription_keys:
             try:
                 err = self.book.reserve(rkey, amount)
             except Exception:
@@ -543,7 +552,7 @@ class Gateway:
     # book failure after provider contact must not erase the evidence, so these return the book
     # exception and `_settled` records the call before raising it.
     def _book_close(self, op, *args):
-        if self.book is None:
+        if self.book is None or args[0] in self._subscription_keys:
             return None
         try:
             getattr(self.book, op)(*args)
@@ -618,6 +627,8 @@ class Gateway:
     def _basis(self, provider, settled_basis, *, known_none=False):
         if provider == "synthetic":
             return "synthetic"
+        if provider == "openai" and not known_none:
+            return "estimated"          # subscription CLI usage priced at API-equivalent list rates: never a bill
         return settled_basis or ("measured" if known_none else "estimated")
 
     def _cost_doc(self, c, amount, usd, usage, basis, over, *, replay_of=None):

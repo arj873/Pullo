@@ -43,6 +43,8 @@ from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gatewa
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
 from .profile import ProfileError
+from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
+                        open_terra_state, plan_providers, scrub_of, worst_case)
 from .repository_profile import check_experiment, repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
@@ -163,8 +165,8 @@ def check_options(o: BenchmarkOptions) -> None:
     if live:
         if not o.confirm_live:
             raise BenchmarkLaunchError("--mode live needs --confirm-live")
-        if not (o.auth and o.state_dir and o.env_file):
-            raise BenchmarkLaunchError("live needs --auth, --state-dir and --env")
+        if not (o.auth and o.state_dir):           # --env is checked once the arm is known (a Terra arm reads no key)
+            raise BenchmarkLaunchError("live needs --auth, --state-dir and --env (--env only for an OpenRouter arm)")
         if type(o.baseline_micros) is not int or o.baseline_micros < 0:
             raise BenchmarkLaunchError("live needs an explicit --baseline-micros (non-negative integer)")
         if o.book_baseline_micros is not None and (type(o.book_baseline_micros) is not int or o.book_baseline_micros < 0):
@@ -620,6 +622,7 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     verify_authorization(o, ing)                         # and again after the handle read it (same bytes)
     scratch = tempfile.TemporaryDirectory(prefix="pilot-benchmark-plan-")
     transport = CapturingTransport()
+    capture = None
     problem = result = None
     try:
         root = _real(scratch.name)
@@ -628,10 +631,10 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         book = SpendBook(handle, root / BOOK_NAME)
         ledger = RuntimeLedger(root / LEDGER_NAME, TRIAL_TOTAL_USD_MICROS)
         evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval, cfg, o.experiment))
-        provider = OpenRouterProvider(enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle,
-                                      book=book, ledger=ledger, transport=transport,
-                                      run_scope=provider_scope(evr, ing, o.repeat))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        providers, capture = plan_providers(profile, transport, lambda: OpenRouterProvider(
+            enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle, book=book, ledger=ledger,
+            transport=transport, run_scope=provider_scope(evr, ing, o.repeat)))
+        backend = RecordBackend(handle, book, providers.mapping, utc_now)
         spec = build_spec(o, ing, backend, runs, profile, plan, policy, cfg)
         try:
             validate_spec(spec)
@@ -643,16 +646,18 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
             problem = {"code": "authorization", "message": str(e)[:400]}
     finally:
         _force_cleanup(scratch)
-    first = [_request_facts(r) for r in transport.requests]
+    first = capture.facts(transport.requests, _request_facts) if capture else []
     ceiling = plan["budget"]["maxUsdMicros"]
-    worst = max((f["worstCaseRouterUsdMicros"] for f in first), default=None)
-    planned = bool(first) and not any(f["toolsInBody"] for f in first)
+    worst = worst_case(first)
+    planned = bool(first) and not any(f.get("toolsInBody", False) for f in first)
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent Opus gate on this host, then root's explicit invocation with real admission files",
              "live: root must export the exact accepted code bytes/hash and runtime config, pin them externally before any "
              "real plan/live, and compare this plan's first-request body hash before sending (the launch baseline does not "
              "bind code, prompts, profile or plan)",
              STRICT_REPLAY_ONLY]
+    if needs(profile, "openai"):
+        unmet.insert(0, TERRA_STATE_NOTE)
     if worst is not None and worst > ceiling:
         planned = False
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
@@ -667,7 +672,11 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
                                                                     o.experiment)),
                      "firstRequestNote": "the first request is the investigator's and is identical in every arm; the "
                      "selected verifier/judge task text appears only in later requests and is bound through "
-                     "profileDigest, configIdentityDigest and experiment.taskDigests",
+                     "profileDigest, configIdentityDigest and experiment.taskDigests" + (
+                         "; Terra arm: bodySha256 pins the exact Codex CLI stdin (the same messages wrapped by the "
+                         "adapter prefix) and argvSha256/configSha256/instructionsSha256 pin the isolated CLI settings, "
+                         "so it is comparable with other Terra arms, not byte-equal to an OpenRouter body"
+                         if profile["roles"]["investigator"]["provider"] == "openai" else ""),
                      "authorization": "covers the profile and run ceiling" if problem is None
                      else "NOT covered / not reached: " + problem["message"],
                      "capturedRequests": first, "capturedCount": len(first), "firstRequest": first[0] if first else None,
@@ -707,9 +716,15 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.store, out, REPO])
     verify_authorization(o, ing)
     try:
-        book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
-                                  o.baseline_micros if o.book_baseline_micros is None else o.book_baseline_micros)
-    except Refused as e:
+        arm = live_arm(profile)
+        if arm == "terra":       # its own Terra state dir; the OpenRouter trial state is never opened or written
+            book, ledger = open_terra_state(o.state_dir, handle, o.baseline_micros)
+        else:
+            if not o.env_file:
+                raise BenchmarkLaunchError("live needs --auth, --state-dir and --env (--env only for an OpenRouter arm)")
+            book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
+                                      o.baseline_micros if o.book_baseline_micros is None else o.book_baseline_micros)
+    except (Refused, TerraStateError) as e:
         raise BenchmarkLaunchError(str(e)[:300]) from None
     try:
         _check_ceiling(ledger, plan)
@@ -721,12 +736,17 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
     except PipelineError as e:
         raise BenchmarkLaunchError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
+    terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat))    # CLI preflight before any output
     runs = make_out(out)
+    key = None
     try:
-        key = key_loader(o.env_file, forbidden_roots=[ing.store, out, REPO / "reviewer"])
-        provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
-                                      transport=transport, run_scope=provider_scope(evr, ing, o.repeat))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        router = DisabledProvider("anthropic")
+        if needs(profile, "anthropic"):           # a Terra-only arm never reads the OpenRouter key
+            key = key_loader(o.env_file, forbidden_roots=[ing.store, out, REPO / "reviewer"])
+            router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
+                                        transport=transport, run_scope=provider_scope(evr, ing, o.repeat))
+        provider = ReviewProviders(router, terra)
+        backend = RecordBackend(handle, book, provider.mapping, utc_now)
         spec = build_spec(o, ing, backend, runs, profile, plan, policy, cfg)
         before = ledger.totals()
         try:
@@ -737,14 +757,14 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
                    "costs": {"runtime": ledger_costs(before, ledger.totals()), "spendBook": book.totals(),
                              "note": "key/generation reconciliation is root's, outside this tool"},
                    "forkAndStageReplay": STRICT_REPLAY_ONLY}
-            rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+            rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
             return rep
         except BaseException as e:
             _best_effort_report(out, ing, o, profile, e, key, ledger, before, provider)
             raise
         rep = run_report(o, ing, res, profile, provider_calls=provider.calls, ledger_before=before,
                          ledger_after=ledger.totals(), book=book.totals())
-        rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+        rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
         return rep
     except (EnvFileError, PipelineError):
         _remove_if_empty(out, runs)
@@ -758,7 +778,7 @@ def _best_effort_report(out, ing, o, profile, exc, key, ledger, before, provider
                "costs": {"runtime": ledger_costs(before, ledger.totals())},
                "note": "an interrupted call keeps its ledger intent (worst case counted); the next invocation "
                        "refuses at the in-flight gate until root reconciles"}
-        write_report(out, rep, scrub=key.scrub)
+        write_report(out, rep, scrub=scrub_of(key))
     except Exception:  # noqa: BLE001 - never hides the original interruption
         pass
 
