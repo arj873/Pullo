@@ -5301,6 +5301,103 @@
         {
           "additionalProperties": false,
           "properties": {
+            "agentId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "decision": {
+              "enum": [
+                "skipped",
+                "continue",
+                "final",
+                "draft"
+              ]
+            },
+            "draftCallId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "errorCode": {
+              "enum": [
+                "replay-miss",
+                "replay-mismatch",
+                "live-calls-disabled",
+                "model-unresolved",
+                "schema-invalid",
+                "repair-exhausted",
+                "provider-error",
+                "provider-timeout",
+                "budget-exhausted",
+                "deadline-exceeded",
+                "cancelled",
+                "tool-denied",
+                "path-escape",
+                "invalid-citation",
+                "contract-violation",
+                "internal"
+              ]
+            },
+            "finalCallId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "turns",
+                "tool-calls",
+                "context-chars",
+                "stopped",
+                "call-failed"
+              ]
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INVESTIGATE"
+              ]
+            },
+            "type": {
+              "const": "retrieval.floor"
+            },
+            "version": {
+              "const": "exploration-floor@1"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "agentId",
+            "version",
+            "draftCallId",
+            "decision"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "floor-decision: investigator.impact@v2 exploration floor: draftCallId is the agent's first final answer, given before any context request. skipped (+reason: no turn/tool/context budget left, the draft is final), continue (the host sent its one continuation), final (+finalCallId: the continuation's final answer is used), draft (+reason, +errorCode for stopped/call-failed: the continuation ended without a final answer and the draft is used)",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "artifactDigest": {
               "pattern": "^(?:sha256:[0-9a-f]{64})$",
               "type": "string"

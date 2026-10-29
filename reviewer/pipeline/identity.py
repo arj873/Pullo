@@ -41,6 +41,10 @@ EXPERIMENT_BEHAVIOR = "context-check-arm@1"
 # reference scan, map format and its place first in the investigator context), the find_references tool, the
 # impact-coverage disclosure. Bound only when impact mode is selected, so every other run id is unchanged.
 IMPACT_BEHAVIOR = "impact-pipeline@1"
+# Behaviour of the impact@v2 exploration floor that is not in a template digest: when a first final answer counts as a
+# draft, the budget conditions for continuing, the one-time continuation chain, the draft fallback rules and the
+# `retrieval.floor` trace event. Bound only when investigator.impact@v2 is selected, so every v1 run id is unchanged.
+FLOOR_BEHAVIOR = "exploration-floor-pipeline@1"
 RECEIPT_SCHEMA = "run-receipt@1"
 
 
@@ -136,8 +140,11 @@ def config_snapshot_id(spec) -> str:
                               "prompts": prompts.retrieval_template_digests(),
                               "effective": retrieval.effective_limits(pol, spec.plan["budget"], lim.max_calls)}
     if impact_mode(spec):                        # absent unless selected => every other run id is unchanged
-        extra["impact"] = {"behavior": IMPACT_BEHAVIOR, "templates": prompts.impact_template_digests(),
+        extra["impact"] = {"behavior": IMPACT_BEHAVIOR,
+                           "templates": prompts.impact_template_digests(pol.investigator_prompt),
                            "limits": impact_mod.LIMITS_DOC}
+        if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
+            extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION}
     exp = experiment_id(spec)
     if exp != prompts.EXPERIMENT_BASELINE:       # absent for the baseline => default ids unchanged by this experiment
         extra["experiment"] = {"id": exp, "behavior": EXPERIMENT_BEHAVIOR, "tasks": prompts.experiment_task_digests(),

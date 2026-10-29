@@ -615,9 +615,10 @@ class Engine:
         if self.impact:         # the impact map goes first so the request context budget never drops it
             items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
         ctx, notes = self.bounded_context(items)
+        floor_inc: list = []                    # impact@v2 exploration floor fell back to the draft (else empty)
         if self.turn_role("investigator"):
             ctx, notes = self._cap_host_results(ctx, notes)
-            end = self._investigator_chain(stage, t0, ctx, notes)
+            end, floor_inc = self._investigator_chain(stage, t0, ctx, notes)
             if end.error is not None:
                 return self._agent_failed(end.error, reason=end.stop[0] if end.stop else None)
             if end.exhausted is not None:
@@ -652,8 +653,9 @@ class Engine:
             if validate("Hypothesis", h):
                 continue
             hyps.append(h)
-        return "completed", {"hypotheses": hyps, "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST,
-                                                             "status": "completed"}]}, None, []
+        return ("partial" if floor_inc else "completed"), {
+            "hypotheses": hyps, "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST, "status": "completed"}]}, \
+            None, floor_inc
 
     def _cap_host_results(self, ctx: list, notes: list) -> tuple[list, list]:
         """A request lists at most MAX_HOST_RESULTS host-prepared results; the rest are named as omitted."""
@@ -664,6 +666,8 @@ class Engine:
         return ctx, notes
 
     def _investigator_chain(self, stage, t0, ctx, notes):
+        """-> (ChainEnd, [incomplete]). The incomplete list is empty except when the impact@v2 exploration floor fell
+        back to the draft answer."""
         events = self.tool_calls()
         host = [events[c["toolCallId"]] for c in ctx]
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
@@ -671,13 +675,68 @@ class Engine:
         if self.coverage_doc() is None:
             doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
                                "context below is bounded and may be truncated or omitted.")
-        chain = retrieval.Chain(self, stage=stage, role="investigator", agent=SPECIALIST,
-                                session=self.new_session(stage, SPECIALIST), t0=t0,
-                                turns=self.policy.investigator_turns, policy=self.policy, host_events=host,
-                                unrendered=self.unrendered_ids(ctx, host))
-        return chain.run(lambda hop, state: prompts.turn_request(
-            self.profile, self.profile_ref, "investigator", doc, state, self.policy.requests_per_turn,
-            retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools()))
+        session = self.new_session(stage, SPECIALIST)
+        unrendered = self.unrendered_ids(ctx, host)
+
+        def chain(turns):
+            return retrieval.Chain(self, stage=stage, role="investigator", agent=SPECIALIST, session=session, t0=t0,
+                                   turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
+
+        def build(d):
+            return lambda hop, state: prompts.turn_request(
+                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools())
+
+        first = chain(self.policy.investigator_turns)
+        end = first.run(build(doc))
+        if not self.policy.exploration_floor or end.payload is None or first.history:
+            return end, []
+        return self._exploration_floor(stage, first, end, chain, build, doc)
+
+    def _exploration_floor(self, stage, first, draft_end, chain, build, doc):
+        """investigator.impact@v2: the agent gave a final answer on its first hop without requesting any context.
+        That answer is a DRAFT. When at least two turns, a tool call and context budget remain, the host sends its one
+        fixed continuation (prompts.EXPLORATION_FLOOR_CONTINUATION with the draft) as a new chain of the same agent,
+        session and budgets (its turns are what the first chain left), and accepts that chain's final answer as it
+        stands. Without a final answer there (call failure, a stage/run stop, exhausted turns/tools/context) the draft
+        is used and the fallback is disclosed as incomplete; replay failures and cancellation keep their usual path.
+        Every decision is a `retrieval.floor` trace event, so the floor is auditable and replays deterministically."""
+        draft_id = draft_end.final_call
+        rec = dict(stage=stage, agentId=SPECIALIST, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
+        turns_left = self.policy.investigator_turns - draft_end.hops
+        skip = ("turns" if turns_left < 2 else "tool-calls" if first.tools_exhausted or first._allowed() == 0
+                else "context-chars" if first.context_exhausted else None)
+        if skip is not None:
+            self.recorder.append("retrieval.floor", decision="skipped", reason=skip, **rec)
+            return draft_end, []
+        self.recorder.append("retrieval.floor", decision="continue", **rec)
+        second = chain(turns_left)
+        end = second.run(build(dict(doc, explorationFloor=prompts.exploration_floor_block(draft_end.payload))))
+        end.hops += draft_end.hops
+        end.call_ids = draft_end.call_ids + end.call_ids
+        if end.payload is not None:
+            self.recorder.append("retrieval.floor", decision="final", finalCallId=end.final_call, **rec)
+            return end, []
+        if end.error is not None and (end.error["code"] in REPLAY_CODES or end.error["code"] == "cancelled"):
+            return end, []                       # a broken replay or a cancelled run is never masked by the draft
+        n = len(draft_end.payload["hypotheses"])
+        if end.error is not None:
+            code = end.error["code"]
+            why = "stopped" if end.stop is not None else "call-failed"
+            self.recorder.append("retrieval.floor", decision="draft", reason=why, errorCode=code, **rec)
+            reason = ("deadline" if code == "deadline-exceeded" else "budget" if code == "budget-exhausted"
+                      else "agent-failure")
+            detail = f"the exploration-floor continuation {'was stopped' if end.stop else 'failed'} ({code})"
+        else:
+            self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
+            reason = "tool-calls-exhausted"
+            detail = (f"the exploration-floor continuation ended at the {end.exhausted} limit after "
+                      f"{end.hops - draft_end.hops} hop(s) and {end.tool_calls} requested tool call(s) without a "
+                      f"final answer; {len(end.unread)} pending request(s) were not run: {unread_note(end.unread)}")
+        inc = [self._inc(stage, reason, f"{detail}; the first-hop draft answer ({n} hypothesis(es)) was used")]
+        draft_end.hops, draft_end.call_ids = end.hops, end.call_ids
+        draft_end.tool_calls = end.tool_calls
+        return draft_end, inc
 
     def _investigator_exhausted(self, stage, end):
         detail = (f"investigator retrieval ended at the {end.exhausted} limit after {end.hops} hop(s) and "

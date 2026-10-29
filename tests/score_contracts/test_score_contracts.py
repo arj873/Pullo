@@ -105,7 +105,10 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:7cd136dbd446caa159a1b120798073ffae98e490c2c861ff5f39c724c5aeb80b"
+LIVE_TRACEEVENT_DIGEST = "sha256:1050260292df80c5484b8e58924f7530ead56a044c2c42f97f4bf2adc4cec26d"
+# EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
+# exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
+FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
 LIVE_HOST_STOP_DIGEST = "sha256:f4b6bf08491c8f2fda91c1c075fb9d3ca1c9cb0e9228731106606a319f55965f"
 
 
@@ -122,9 +125,10 @@ def budget_minus_live(b):
 
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
-    hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == "host.stop"]
-    assert len(hits) == 1, hits
-    del te["oneOf"][hits[0]]
+    for kind in ("host.stop", "retrieval.floor"):
+        hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == kind]
+        assert len(hits) == 1, (kind, hits)
+        del te["oneOf"][hits[0]]
     return te
 
 
@@ -251,6 +255,8 @@ class Compatibility(Base):
         te = REGISTRY["TraceEvent"].to_json()
         self.assertEqual(dig(te), LIVE_TRACEEVENT_DIGEST)
         self.assertEqual(dig(host_stop_variant(te)), LIVE_HOST_STOP_DIGEST)
+        floor = next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "retrieval.floor")
+        self.assertEqual(dig(floor), FLOOR_VARIANT_DIGEST)
 
     def test_TraceEvent_differs_only_by_the_cost_variant_invariant(self):
         te = copy.deepcopy(REGISTRY["TraceEvent"].to_json())

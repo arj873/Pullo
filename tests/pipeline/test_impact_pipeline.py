@@ -240,12 +240,19 @@ class LegacyUnchanged(ImpactRig):
 
 class RepositoryProfile(unittest.TestCase):
     def test_pilot_default_is_impact_mode_and_impact_false_is_the_earlier_profile(self):
-        on = repository_profile(True)
+        on = repository_profile(True, impact_version=1)
         self.assertEqual((on["roles"]["investigator"]["promptVersion"], on["roles"]["verifier"]["promptVersion"]),
                          (INV, VER))
-        pol = repository_policy(True)
+        pol = repository_policy(True, impact_version=1)
         self.assertTrue(pol.impact)
+        self.assertFalse(pol.exploration_floor)
         self.assertEqual((pol.investigator_prompt, pol.verifier_prompt), (INV, VER))
+        # EXPLORE-FLOOR: the default is impact@v2 (same verifier, same numeric limits)
+        v2 = repository_policy(True)
+        self.assertEqual((v2.investigator_prompt, v2.verifier_prompt), (prompts.INVESTIGATOR_IMPACT_V2_PROMPT, VER))
+        self.assertTrue(v2.impact and v2.exploration_floor)
+        self.assertEqual(repository_profile(True)["roles"]["investigator"]["promptVersion"],
+                         prompts.INVESTIGATOR_IMPACT_V2_PROMPT)
         old = repository_profile(True, impact=False)
         self.assertEqual(old["roles"]["investigator"]["promptVersion"], "investigator.retrieve@v2")
         self.assertEqual(repository_policy(True, impact=False), RetrievalPolicy())
@@ -256,8 +263,11 @@ class RepositoryProfile(unittest.TestCase):
         self.assertNotEqual(profile_digest(on), profile_digest(old))
 
     def test_context_check_experiment_composes_with_impact(self):
-        pol = repository_policy(True, prompts.EXPERIMENT_CONTEXT_CHECK)
+        pol = repository_policy(True, prompts.EXPERIMENT_CONTEXT_CHECK, impact_version=1)
         self.assertEqual((pol.investigator_prompt, pol.verifier_prompt), (INV, prompts.VERIFIER_CONTEXT_CHECK_PROMPT))
+        pol2 = repository_policy(True, prompts.EXPERIMENT_CONTEXT_CHECK)
+        self.assertEqual((pol2.investigator_prompt, pol2.verifier_prompt),
+                         (prompts.INVESTIGATOR_IMPACT_V2_PROMPT, prompts.VERIFIER_CONTEXT_CHECK_PROMPT))
         self.assertEqual(repository_policy(True, prompts.EXPERIMENT_CONTEXT_CHECK, impact=False),
                          RetrievalPolicy(verifier_prompt=prompts.VERIFIER_CONTEXT_CHECK_PROMPT))
 

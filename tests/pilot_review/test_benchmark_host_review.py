@@ -300,7 +300,9 @@ class Wire:
 
 
 def happy(head_id):
-    """Investigator -> verifier -> judge for one real defect in lib/calc.py (line 2 of the head file)."""
+    """Investigator -> verifier -> judge for one real defect in lib/calc.py (line 2 of the head file). EXPLORE-FLOOR:
+    the pilot default investigator.impact@v2 treats the hop-0 answer as a draft; the second (same) final answers the
+    one exploration-floor continuation, so a happy run is 4 provider calls."""
     claim, line = "rate0 divides by zero for every truthy input", 2
     cite = {"kind": "code", "path": "lib/calc.py", "lines": [line, line], "commit": head_id,
             "excerpt": "    return v // 0 if v else 2"}
@@ -308,6 +310,7 @@ def happy(head_id):
            "location": {"path": "lib/calc.py", "line": line}, "mechanism": "v // 0 raises ZeroDivisionError.", "evidence": [cite]}
     hid = hypothesis_id("generalist", 0, claim, "lib/calc.py", line)
     return [{"contextRequests": [], "output": {"hypotheses": [hyp]}},
+            {"contextRequests": [], "output": {"hypotheses": [hyp]}},
             {"contextRequests": [], "output": {"verdict": "confirmed", "reachable": True, "impact": "crash",
                                                "evidence": [cite], "notes": "visible in the diff"}},
             {"comments": [{"findingIds": [hid], "title": "Division by zero", "body": "rate0 now divides by zero."}]}]
@@ -844,13 +847,13 @@ class Live(Base):
         plan, bodies = self.plan_bodies(p)
         wire = Wire(*happy(p.imports["head"].snapshot_id))
         rep = self.live(p, wire)
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 3))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 4))
         self.assertEqual(bytes(wire.requests[0].body), bodies[0])
         self.assertTrue(all(b["model"] == SONNET and b["provider"]["allow_fallbacks"] is False and "tools" not in b
                             for b in wire.bodies))
         self.assertEqual(rep["costs"]["runtime"]["capUsdMicros"], 50_000_000)
-        self.assertEqual(rep["costs"]["runtime"]["cumulative"]["accountable"]["usdMicros"], COMMITTED + 3 * PER_CALL)
-        self.assertEqual(p.ledger()["committedUsdMicros"], COMMITTED + 3 * PER_CALL)
+        self.assertEqual(rep["costs"]["runtime"]["cumulative"]["accountable"]["usdMicros"], COMMITTED + 4 * PER_CALL)
+        self.assertEqual(p.ledger()["committedUsdMicros"], COMMITTED + 4 * PER_CALL)
         self.assertEqual(self.keys, [str(p.env)])
         files = [f for f in Path(p.out).rglob("*") if f.is_file()]
         self.assertTrue(files and all(KEY not in f.read_text(errors="ignore") for f in files))
@@ -903,7 +906,7 @@ class Live(Base):
         nxt = Wire(*happy(p.imports["head"].snapshot_id))
         rep = B.run_benchmark(p.live_options(out_dir=str(self.tmp / "o3"), baseline_micros=led, book_baseline_micros=book,
                                              repeat=1), transport=nxt, key_loader=self.loader)
-        self.assertEqual((rep["status"], len(nxt.requests)), ("completed", 3))
+        self.assertEqual((rep["status"], len(nxt.requests)), ("completed", 4))
         self.assertNotEqual(rep["runId"], first["runId"])
 
     def test_CONTROL_auth_that_widens_caps_or_models_is_refused_and_the_aggregate_boundary_holds(self):
@@ -1085,7 +1088,7 @@ class Replay(Base):
             rep = self.replay()
         self.assertEqual((rep["status"], rep["ok"]), ("completed", True))
         self.assertEqual((rep["replay"]["liveCalls"], rep["replay"]["newSpendUsdMicros"], rep["replay"]["replayedCalls"]),
-                         (0, 0, 3))
+                         (0, 0, 4))
         for n in ("trusted_authorization", "open_state", "OpenRouterProvider", "SpendBook", "RuntimeLedger"):
             self.assertEqual(s[n].call_count, 0, n)
         self.assertEqual(seen.under(self.p.state) + seen.under(self.p.env) + seen.under(self.p.auth), [])

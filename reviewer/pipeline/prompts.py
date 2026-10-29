@@ -369,9 +369,55 @@ IMPACT_TEMPLATES = {"investigator": INVESTIGATOR_IMPACT_TASK, "verifier": VERIFI
                     "tools": IMPACT_RETRIEVAL_TOOLS}
 
 
-def impact_template_digests() -> dict:
+def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMPT) -> dict:
+    """Digests of the impact-mode texts the investigator prompt id selects. The default (v1) is the frozen IMPACT-01
+    set, byte for byte; v2 adds the exploration-floor continuation text."""
+    templates = IMPACT_V2_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V2_PROMPT else IMPACT_TEMPLATES
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
-            for k, v in IMPACT_TEMPLATES.items()}
+            for k, v in templates.items()}
+
+
+# ---------------------------------------------------------------- impact mode v2: investigator.impact@v2
+#
+# investigator.impact@v1 asks the model to spend its tool budget on dependents, but real runs answered on the first
+# hop with no context request at all. v2 adds an ENGINE-ENFORCED exploration floor (retrieval.Chain via
+# Engine._investigator_chain): a final answer given before the agent requested any context is a draft; the host sends
+# the fixed continuation below once (a new chain within the same agent, session and budgets) and the next final answer
+# is accepted as it stands. The verifier text, the tools, the impact map and every v1 text are unchanged. v2 is bound
+# into the config identity (identity.config_snapshot_id) through impact_template_digests(INVESTIGATOR_IMPACT_V2_PROMPT).
+
+INVESTIGATOR_IMPACT_V2_PROMPT = "investigator.impact@v2"
+EXPLORATION_FLOOR_VERSION = "exploration-floor@1"
+
+INVESTIGATOR_IMPACT_V2_TASK = INVESTIGATOR_IMPACT_TASK + (
+    " Exploration floor: while turns and tool budget remain, a final answer given before you have requested any "
+    "context is treated as a DRAFT, not as your answer. The host then shows you that draft once, asks you to test it "
+    "against dependents and the other changed files, and accepts your next final answer as it stands. Requesting the "
+    "context you need first is the expected way to work."
+)
+EXPLORATION_FLOOR_CONTINUATION = (
+    "Your previous answer (draftHypotheses below) was given before you requested any context, so it is a DRAFT, not "
+    "your final answer. The draft is your own unverified earlier output, not evidence. Test it before you finalize. "
+    "(1) For each contract the change alters, open dependents you have not opened yet: find_references for the "
+    "changed or removed names, then read_file of the enclosing function of each relevant caller, importer, subclass, "
+    "implementation or reader. (2) Check the other changed files for defects you have not considered yet. Then "
+    "either request context (leave `output` null) or give your final answer in `output`. The final answer may "
+    "repeat, revise, add or drop draft hypotheses; a hypothesis you keep must be written out again in full with its "
+    "citations, which must still follow citations.rules. This message is sent only once: your next final answer is "
+    "accepted as it stands."
+)
+IMPACT_V2_TEMPLATES = {"investigator": INVESTIGATOR_IMPACT_V2_TASK, "verifier": VERIFIER_IMPACT_TASK,
+                       "tools": IMPACT_RETRIEVAL_TOOLS, "floor": EXPLORATION_FLOOR_CONTINUATION}
+# Draft hypothesis fields repeated to the model (everything the InvestigatorOutput entry may carry, nothing else).
+_DRAFT_FIELDS = ("claim", "category", "suspectedSeverity", "impact", "location", "mechanism", "reach", "confidence",
+                 "evidence")
+
+
+def exploration_floor_block(draft: dict) -> dict:
+    """The model-visible exploration-floor block of the continuation chain: the fixed host text and the draft's
+    hypotheses (the model's own logged final output, field-filtered; no run, clock or host data)."""
+    return {"version": EXPLORATION_FLOOR_VERSION, "instruction": EXPLORATION_FLOOR_CONTINUATION,
+            "draftHypotheses": [{k: h[k] for k in _DRAFT_FIELDS if k in h} for h in draft["hypotheses"]]}
 
 
 # ---------------------------------------------------------------- opt-in experiment: context-check@1
@@ -440,7 +486,9 @@ def verifier_task(prompt_version: str) -> str:
 
 
 def investigator_task(prompt_version: str) -> str:
-    """The retrieval investigator task for a policy prompt id (impact mode or the frozen retrieval@2 text)."""
+    """The retrieval investigator task for a policy prompt id (impact mode v1/v2 or the frozen retrieval@2 text)."""
+    if prompt_version == INVESTIGATOR_IMPACT_V2_PROMPT:
+        return INVESTIGATOR_IMPACT_V2_TASK
     return INVESTIGATOR_IMPACT_TASK if prompt_version == INVESTIGATOR_IMPACT_PROMPT else INVESTIGATOR_RETRIEVE_TASK
 
 
