@@ -40,6 +40,7 @@ from reviewer.runtime.turn_canary import Refused, open_state
 
 from .launcher import QUALITY, REPO, gateway_costs, ledger_costs, load_baseline, utc_now
 from .launcher import PilotError, _Unused, _force_cleanup
+from .providers import ReviewProviders, live_terra, needs, plan_providers, scrub_of, worst_case
 from .profile import RUN_CEILING_USD_MICROS
 from .repository_profile import repository_plan, repository_policy, repository_profile
 
@@ -348,6 +349,7 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.case_dir.parent, ing.store, _real(o.out_dir), REPO])
     scratch = tempfile.TemporaryDirectory(prefix="pilot-repository-plan-")
     transport = CapturingTransport()
+    capture = None
     problem = result = None
     try:
         root = _real(scratch.name)
@@ -356,10 +358,10 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
         book = SpendBook(handle, root / BOOK_NAME)
         ledger = RuntimeLedger(root / LEDGER_NAME, TRIAL_TOTAL_USD_MICROS)
         evr = eval_run_id(o, config_identity(ing, profile, plan, policy, o.retrieval))
-        provider = OpenRouterProvider(enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle,
-                                      book=book, ledger=ledger, transport=transport,
-                                      run_scope=provider_scope(evr, ing, o.repeat))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        providers, capture = plan_providers(profile, transport, lambda: OpenRouterProvider(
+            enabled=True, key=Secret("plan-placeholder-not-a-key"), authorization=handle, book=book,
+            ledger=ledger, transport=transport, run_scope=provider_scope(evr, ing, o.repeat)))
+        backend = RecordBackend(handle, book, providers.mapping, utc_now)
         spec = build_spec(o, ing, backend, runs, profile, plan, policy)
         try:
             validate_spec(spec)
@@ -371,9 +373,9 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
             problem = {"code": "authorization", "message": str(e)[:400]}
     finally:
         _force_cleanup(scratch)
-    first = [_request_facts(r) for r in transport.requests]
+    first = capture.facts(transport.requests, _request_facts) if capture else []
     ceiling = plan["budget"]["maxUsdMicros"]
-    worst = max((f["worstCaseRouterUsdMicros"] for f in first), default=None)
+    worst = worst_case(first)
     planned = bool(first) and not any(f["toolsInBody"] for f in first)
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent pipeline, tools and launcher acceptance, then root's explicit invocation",
@@ -447,13 +449,17 @@ def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
     except PipelineError as e:
         raise RepositoryError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
+    terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat))
     runs = make_out(out)
     key = None
     try:
-        key = key_loader(o.env_file, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO / "reviewer"])
-        provider = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
-                                      transport=transport, run_scope=provider_scope(evr, ing, o.repeat))
-        backend = RecordBackend(handle, book, _providers(provider), utc_now)
+        router = DisabledProvider("anthropic")
+        if needs(profile, "anthropic"):
+            key = key_loader(o.env_file, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO / "reviewer"])
+            router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
+                                        transport=transport, run_scope=provider_scope(evr, ing, o.repeat))
+        provider = ReviewProviders(router, terra)
+        backend = RecordBackend(handle, book, provider.mapping, utc_now)
         spec = build_spec(o, ing, backend, runs, profile, plan, policy)
         before = ledger.totals()
         try:
@@ -464,7 +470,7 @@ def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader
                    "costs": {"runtime": ledger_costs(before, ledger.totals()), "spendBook": book.totals(),
                              "note": "key/generation reconciliation is root's, outside this tool"},
                    "forkAndStageReplay": STRICT_REPLAY_ONLY}
-            rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+            rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
             return rep
         except BaseException as e:
             _best_effort_report(out, ing, o, e, key, ledger, before, provider)
@@ -472,7 +478,7 @@ def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader
         after = ledger.totals()
         rep = run_report(o, ing, res, provider_calls=provider.calls, ledger_before=before, ledger_after=after,
                          book=book.totals())
-        rep["reportPath"] = write_report(out, rep, scrub=key.scrub)
+        rep["reportPath"] = write_report(out, rep, scrub=scrub_of(key))
         return rep
     except (EnvFileError, PipelineError):
         _remove_if_empty(out, runs)
@@ -486,7 +492,7 @@ def _best_effort_report(out, ing, o, exc, key, ledger, before, provider) -> None
                "costs": {"runtime": ledger_costs(before, ledger.totals())},
                "note": "an interrupted call keeps its ledger intent (worst case counted); the next invocation "
                        "refuses at the in-flight gate until root reconciles"}
-        write_report(out, rep, scrub=key.scrub)
+        write_report(out, rep, scrub=scrub_of(key))
     except Exception:  # noqa: BLE001 - never hides the original interruption
         pass
 

@@ -97,8 +97,8 @@ class Parse(unittest.TestCase):
             self.assertNotIn("f4k3", str(cm.exception))
 
     def test_held_openai_refuses_clearly_and_has_no_fallback(self):
-        t = toml().replace('provider = "anthropic"\nmodel = "%s"' % SONNET, 'provider = "openai"\nmodel = "gpt-5.6-terra"', 1)
-        with self.assertRaisesRegex(ConfigError, "held.*no fallback"):
+        t = toml().replace('provider = "anthropic"\nmodel = "%s"' % SONNET, 'provider = "openai"\nmodel = "gpt-unallowlisted-terra"', 1)
+        with self.assertRaisesRegex(ConfigError, "allowlist.*no fallback"):
             resolve_config(self.write(t))
 
     def test_non_regular_missing_symlink_and_not_utf8_refuse(self):
@@ -229,7 +229,7 @@ class Live(Rig):
 
     def test_bad_held_and_overlapping_configs_refuse_before_key_network_or_output(self):
         held = toml().replace('provider = "anthropic"\nmodel = "%s"' % SONNET,
-                              'provider = "openai"\nmodel = "gpt-5.6-terra"', 1)
+                              'provider = "openai"\nmodel = "gpt-unallowlisted-terra"', 1)
         inside = self.corpus / "pullo.toml"
         inside.write_text(toml())
         inout = self.cfgdir / "x.toml"
@@ -243,7 +243,7 @@ class Live(Rig):
                 self.assertIn("ConfigError", err)
                 self.assertEqual(m.requests, [])
                 self.assertFalse(self.out.exists())
-        self.assertIn("held", err if name == "held" else self.run_main(
+        self.assertIn("allowlist", err if name == "held" else self.run_main(
             self.argv("--config", self.cfg(held)), key_loader=H.boom_key_loader)[2])
 
     def test_legacy_model_flag_conflicts_instead_of_overriding(self):

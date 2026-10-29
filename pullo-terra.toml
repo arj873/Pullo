@@ -1,0 +1,29 @@
+# Pullo review-model configuration variant (schema pullo-config@1): the GPT Terra review arm (TERRA-ARM-01).
+#
+# Select it explicitly with --config pullo-terra.toml. The default pullo.toml (Sonnet 5.5 through OpenRouter) and the
+# common scoring judge (Opus 5.5 through OpenRouter) are unchanged by this file.
+#
+# provider "openai" = OpenAI GPT Terra through the installed Codex CLI, billed to the ChatGPT subscription (never the
+# OpenRouter key). Allowed models (exact ids): gpt-6.1-terra (GPT Terra 6, from `codex debug models`),
+# gpt-5.6-terra (older arm). Every call runs `codex exec` in a fresh per-call isolated CODEX_HOME
+# (codex-isolated-home@1): no AGENTS.md, skills, plugins, MCP, hooks, rules or tool features; read-only sandbox;
+# audited event stream. Receipts carry an API-equivalent ESTIMATE only. Bounds: the $4 per-run Plan ceiling at
+# API-equivalent rates, the per-role timeouts, a per-run call cap, no retries, repairs or fallbacks.
+#
+# Before the first live use, root runs the one-call canary:  orchestration/tools/terra_canary.py --confirm-live
+# The spend authorization named by --auth must list provider "openai" and these models; a Terra-only arm never
+# reads the OpenRouter key. This file selects models only and authorizes nothing.
+
+schema = "pullo-config@1"
+
+[review.investigator]
+provider = "openai"
+model = "gpt-6.1-terra"
+
+[review.verifier]
+provider = "openai"
+model = "gpt-6.1-terra"
+
+[review.judge]
+provider = "openai"
+model = "gpt-6.1-terra"

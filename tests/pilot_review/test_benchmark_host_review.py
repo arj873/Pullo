@@ -51,7 +51,10 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # LIVE-DEADLINE-04: benchmark.py candidate pin moved to the LIVE-DEADLINE-02 opt-in live-stage-timing extension
 # (--live-stage-timing). This is an intentional extension that still awaits the independent LIVE-DEADLINE-03 gate; it is
 # NOT already accepted. The previous pin 4fe30e94... is retained in orchestration/archive (before-LIVE-DEADLINE04).
-GATED = {"reviewer/pilot/benchmark.py": "4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807",
+# TERRA-ARM-01: benchmark.py candidate pin moved to the GPT Terra review arm (role -> provider routing, Terra-only arm reads
+# no OpenRouter key, Terra plan pin). Like LIVE-DEADLINE-04 this is an intentional extension that still awaits an
+# independent gate; it is NOT already accepted. Previous pin: 4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807.
+GATED = {"reviewer/pilot/benchmark.py": "956bc0672c1eff2e131a57f5dd398fd5fbe40b695b38079a9da60e4d5c21a49d",
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
