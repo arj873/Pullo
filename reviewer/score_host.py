@@ -193,6 +193,7 @@ class ScoreHost:
         units = tuple(units)
         self.cfg, self.baseline, self.units = cfg, baseline, units
         self.profile_ref, self.profile = profile_ref, cfg.profile(price)
+        _need(profile_ref == f"{self.profile['id']}@{self.profile['version']}", "profile-ref-mismatch")   # e.g. an @1 ref on the @2 profile
         self.auth, self.book, self.ledger, self.key, self.transport = auth, book, ledger, key, transport
         self.store = Path(store_dir)
         self.evr, self.case_id, self.repeat, self.clock = eval_run_id, eval_case_id, repeat, clock
