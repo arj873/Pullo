@@ -302,36 +302,71 @@ class Segmentation(unittest.TestCase):
         self.assertEqual(P.segments("\n\nfirst\n  \nsecond"), ["\n\nfirst\n  \n", "second"])
         self.assertEqual(P.segments("\u2028x\x0by\rz\n"), ["\u2028x\x0by\rz\n"])          # only "\n" splits lines
 
-    def test_long_lines_split_at_sentence_boundaries_only(self):
+    def test_every_prose_line_splits_at_sentence_boundaries_whatever_its_length(self):
+        self.assertEqual(P.segments("Bug: x is off by one. Also, y leaks a handle."),
+                         ["Bug: x is off by one. ", "Also, y leaks a handle."])                  # short line still splits (R1)
         unit = "This is a sentence. "
-        line = unit * 15 + "Ends here.\n"
-        segs = P.segments(line)
-        self.assertEqual(segs, [unit] * 15 + ["Ends here.\n"])
-        short = unit * 5 + "Ends.\n"                                                         # <= MAX_LINE: never split
-        self.assertLessEqual(len(short), P.MAX_LINE)
-        self.assertEqual(P.segments(short), [short])
+        self.assertEqual(P.segments(unit * 15 + "Ends here.\n"), [unit] * 15 + ["Ends here.\n"])
         for boundary in ("? ", "! "):
-            t = ("Why" + boundary) * 50 + "End"
-            self.assertEqual(P.segments(t), ["Why" + boundary] * 50 + ["End"])
-        mixed = "A. " + "word " * 60 + "x. lower. 9 digit. `tick` after. B"           # split only before uppercase/digit/backtick
-        self.assertEqual(P.segments(mixed), ["A. " + "word " * 60 + "x. lower. ", "9 digit. ", "`tick` after. ", "B"])
-        self.assertEqual(P.segments("x" * 300 + ".Next. done"), ["x" * 300 + ".Next. done"])     # no space / lowercase: no split
+            self.assertEqual(P.segments(("Why" + boundary) * 3 + "End"), ["Why" + boundary] * 3 + ["End"])
+        mixed = "A. word x. lower. 9 digit. `tick` after. B"                                  # only before A-Z, 0-9 or a backtick
+        self.assertEqual(P.segments(mixed), ["A. word x. lower. ", "9 digit. ", "`tick` after. ", "B"])
+        self.assertEqual(P.segments("End.Next. done; Then. \u00c9tat. \u0394elta"),
+                         ["End.Next. done; Then. \u00c9tat. \u0394elta"])                     # no space, lowercase, ';', non-ASCII upper
 
     def test_never_splits_inside_inline_code_or_fenced_blocks(self):
-        inline = "Start `" + "x. Y " * 60 + "` done. Tail"
-        self.assertEqual(P.segments(inline), ["Start `" + "x. Y " * 60 + "` done. ", "Tail"])
-        fenced = "```\n" + "a. B " * 80 + "\n```\n" + "After. Done"
-        self.assertEqual(P.segments(fenced), ["```\n", "a. B " * 80 + "\n", "```\n", "After. Done"])
-        fence_line = "```js " + "x. Y " * 60 + "\n"
-        self.assertEqual(P.segments(fence_line), [fence_line])
+        self.assertEqual(P.segments("Start `x. Y z. Q` done. Tail"), ["Start `x. Y z. Q` done. ", "Tail"])
+        self.assertEqual(P.segments("```\na. B c. D\n```\nAfter. Done"), ["```\n", "a. B c. D\n", "```\n", "After. ", "Done"])
+        self.assertEqual(P.segments("~~~\na. B\n```\nstill. Code\n~~~\nOut. Here"),           # ~~~ fence; ``` inside it is code
+                         ["~~~\n", "a. B\n", "```\n", "still. Code\n", "~~~\n", "Out. ", "Here"])
+        self.assertEqual(P.segments("  ```js x. Y\n"), ["  ```js x. Y\n"])                      # a fence line itself never splits
 
     def test_long_single_paragraph_bot_comment(self):
         para = ("**Potential issue.** The handler returns early. `cleanup()` is skipped. 3 callers depend on it. "
                 "Consider moving the release into a finally block, e.g. around line 12. ") * 4
         segs = P.segments(para)
-        self.assertGreater(len(segs), 4)
+        self.assertEqual(len(segs), 13)                     # ".**" is not a boundary (no '. ' + A-Z/0-9/backtick): kept joined
         self.assertEqual("".join(segs), para)
-        self.assertTrue(all(len(s) <= P.MAX_LINE for s in segs))
+        self.assertEqual(segs[:4], ["**Potential issue.** The handler returns early. ", "`cleanup()` is skipped. ",
+                                    "3 callers depend on it. ",
+                                    "Consider moving the release into a finally block, e.g. around line 12. **Potential issue.** The handler returns early. "])
+
+    GOLDEN = {
+        "": [], "  \n\t": ["  \n\t"], "a\n\n\nb\n": ["a\n\n\n", "b\n"], "\n\nfirst\n  \nsecond": ["\n\nfirst\n  \n", "second"],
+        "Bug: x is off by one. Also, y leaks a handle.": ["Bug: x is off by one. ", "Also, y leaks a handle."],
+        "Why? Because. 9 lives! `code` next. lower case. \u00c9tat stays. End":
+            ["Why? ", "Because. ", "9 lives! ", "`code` next. lower case. \u00c9tat stays. ", "End"],
+        "Start `a. B` done. Tail": ["Start `a. B` done. ", "Tail"],
+        "```\na. B\n```\nAfter. Done": ["```\n", "a. B\n", "```\n", "After. ", "Done"],
+        "~~~\na. B\n```\nstill. Code\n~~~\nOut. Here": ["~~~\n", "a. B\n", "```\n", "still. Code\n", "~~~\n", "Out. ", "Here"],
+        "CRLF. Line\r\nnext\r\n": ["CRLF. ", "Line\r\n", "next\r\n"],
+        "\u00dcn\u00efc\u00f6d\u00e9 \u2192 \u6f22\u5b57 \U0001f600. Next\u2028x\x0by\n":
+            ["\u00dcn\u00efc\u00f6d\u00e9 \u2192 \u6f22\u5b57 \U0001f600. ", "Next\u2028x\x0by\n"],
+    }
+
+    def test_golden_vectors_are_the_pinned_set(self):
+        self.assertEqual(P.SEGMENTER, "segments@1")
+        self.assertEqual(tuple(self.GOLDEN), P.SEGMENTER_GOLDEN)
+        for t, want in self.GOLDEN.items():
+            with self.subTest(t=t[:20]):
+                self.assertEqual(P.segments(t), want)
+
+    def test_segmenter_identity_is_folded_into_the_extract_pin(self):
+        from unittest import mock
+        pin = P.prompt_digests()["extract"]
+        self.assertEqual(pin, CFG.prompt_sha256["extract"])                                     # pullo-score.toml carries it
+        self.assertNotEqual(pin, P.sha(P.VERSIONS["extract"] + "\n" + P.SYSTEM["extract"]))   # not the bare prompt hash
+        others = {k: v for k, v in P.prompt_digests().items() if k != "extract"}
+        changes = {"identity": mock.patch.object(P, "SEGMENTER", "segments@2"),
+                   "rule constant": mock.patch.object(P, "_FENCES", ("```",)),
+                   "behaviour": mock.patch.object(P, "segments", lambda t: [t] if t else []),
+                   "golden set": mock.patch.object(P, "SEGMENTER_GOLDEN", P.SEGMENTER_GOLDEN + ("x. Y",))}
+        for name, patch in changes.items():
+            with self.subTest(name), patch:
+                self.assertNotEqual(P.prompt_digests()["extract"], pin)
+                self.assertEqual({k: v for k, v in P.prompt_digests().items() if k != "extract"}, others)
+                with self.assertRaises(ScoreConfigError):
+                    parse_score_config(CONFIG.read_text())                                        # the shipped pin no longer matches
 
 
 class Dedup(unittest.TestCase):
