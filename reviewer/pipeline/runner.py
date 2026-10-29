@@ -68,10 +68,18 @@ def validate_spec(spec: ReviewSpec) -> None:
         if identity.plan_specialists(spec) == ["generalist"]:
             raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
         v = ("v4" if identity.plan_specialists(spec) == sweeps.plan_specialists()
-             else "v5" if identity.plan_specialists(spec) == list(lanes.AGENTS) else "v3")
+             else "v5" if identity.plan_specialists(spec) == list(lanes.AGENTS)
+             else "v7" if identity.plan_specialists(spec) == list(lanes.V7_AGENTS) else "v3")
         raise PipelineError("invalid-input", f"investigator.impact@{v} needs Plan.specialists "
                             f"{identity.plan_specialists(spec)} (the specialist investigators, in run order"
                             + (", then the diff-shard sweep marker)" if v == "v4" else ")"))
+    pol = identity.retrieval_policy(spec)
+    cross = identity.impact_mode(spec) and pol.cross_model
+    if cross and lanes.alternate_problem(prof) is not None:      # impact@v7: refused before any model call
+        raise PipelineError("invalid-input", lanes.alternate_problem(prof))
+    if "alternates" in prof and not cross:
+        raise PipelineError("invalid-input", "ModelProfile.alternates (an alternate investigator model) is used only "
+                            "by investigator.impact@v7")
     host = spec.host
     if not (isinstance(host.attempt, int) and not isinstance(host.attempt, bool) and 1 <= host.attempt <= 1000):
         raise PipelineError("invalid-input", "attempt must be an integer >= 1")
@@ -512,7 +520,7 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
     if specialists.is_specialist_plan(tplan):    # impact@v3/@v4: the merge record is re-derived
         try:
             again = (specialists.merge(inv["hypotheses"], sweeps.merge_order(inv["agents"])) if sweeps.is_v4_plan(tplan)
-                     else specialists.merge(inv["hypotheses"], list(lanes.AGENTS)) if lanes.is_v5_plan(tplan)
+                     else specialists.merge(inv["hypotheses"], lanes.lane_order(tplan)) if lanes.lane_order(tplan)
                      else specialists.merge(inv["hypotheses"]))
         except KeyError:
             again = None
@@ -521,12 +529,12 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
                                 "hypotheses")
     elif "merges" in inv:
         raise PipelineError("checkpoint-invalid", "INVESTIGATE merges in a run without specialist investigators")
-    if lanes.is_v5_plan(tplan) and "collapses" in inv \
+    if lanes.lane_order(tplan) and "collapses" in inv \
             and inv["collapses"] != lanes.collapse(inv["hypotheses"], inv.get("merges", [])):
         raise PipelineError("checkpoint-invalid", "INVESTIGATE collapses are not what the near-duplicate cap gives for "
                             "its hypotheses")
-    if "collapses" in inv and not lanes.is_v5_plan(tplan):
-        raise PipelineError("checkpoint-invalid", "INVESTIGATE collapses in a run without the impact@v5 lanes")
+    if "collapses" in inv and not lanes.lane_order(tplan):
+        raise PipelineError("checkpoint-invalid", "INVESTIGATE collapses in a run without the impact@v5/@v7 lanes")
     swept = [e["coverage"] for e in trace.events if e["type"] == "investigate.coverage"]
     if ("sweep" in inv or swept) and (not sweeps.is_v4_plan(tplan) or swept != [inv.get("sweep")]):
         raise PipelineError("checkpoint-invalid", "INVESTIGATE sweep coverage is not the one investigate.coverage trace "

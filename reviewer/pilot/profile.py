@@ -30,6 +30,12 @@ class ProfileError(ValueError):
     pass
 
 
+def model_fields(provider: str, m: str) -> dict:
+    """The model-specific part of a RoleSpec (what an impact@v7 alternate investigator replaces; key order as before)."""
+    return {"provider": provider, "model": m, "family": "gpt" if m in TERRA_MODELS else "claude",
+            "price": terra_gateway_price(m) if m in TERRA_MODELS else gateway_price(m)}
+
+
 def live_profile(model: str | None = None, output_caps: dict | None = None, timeouts: dict | None = None, *,
                  models: ReviewModels | None = None) -> dict:
     """`models` is the per-role selection (from pullo.toml). The legacy single `model` means all three roles and
@@ -50,10 +56,10 @@ def live_profile(model: str | None = None, output_caps: dict | None = None, time
 
     def role(r):
         m = models.model(r)
-        return {"provider": models.provider(r), "model": m, "family": "gpt" if m in TERRA_MODELS else "claude", "resolved": True,
+        return {**model_fields(models.provider(r), m), "resolved": True,
                 "promptVersion": _PV[r], "outputSchema": _OUT[r], "params": {"maxOutputTokens": caps[r]},
                 "caps": {"maxOutputTokens": caps[r], "timeoutSec": tmo[r], "maxRetries": 0, "maxRepairs": 0},
-                "price": terra_gateway_price(m) if m in TERRA_MODELS else gateway_price(m), "fallbacks": []}
+                "fallbacks": []}
     return {"id": PROFILE_ID, "version": 1, "tier": "standard", "triage": "fixed-rule@1",
             "roles": {r: role(r) for r in _OUT}}
 

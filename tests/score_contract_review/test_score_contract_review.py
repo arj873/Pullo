@@ -153,8 +153,24 @@ def investigate_merges(sp):
     return next(v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")["properties"]["merges"]
 
 
+# TOURNAMENT-V7 (declared for root acceptance): the optional ModelProfile "alternates" (impact@v7 alternate investigator
+# model) and its "alternate-pinning" invariant. Subtracted below and pinned on their own.
+ALTERNATES_DIGEST = "sha256:2d91dc56710b6406d53a76373337977e651ad7853009335b6fb2669508dd87c1"
+ALTERNATE_INVARIANT = "alternate-pinning: an alternate changes only the model of its role"
+
+
+def modelprofile_minus_live(mp):
+    mp = copy.deepcopy(mp)
+    assert "alternates" in mp["properties"] and "alternates" not in mp["required"]
+    del mp["properties"]["alternates"]
+    assert mp["x-invariants"][-1] == ALTERNATE_INVARIANT
+    del mp["x-invariants"][-1]
+    return mp
+
+
 def minus_live(name, d):
-    return budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload" else d
+    return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
+            else modelprofile_minus_live(d) if name == "ModelProfile" else d)
 
 
 def traceevent_minus_live(te):
@@ -318,6 +334,7 @@ class L1L2Compatibility(Base):
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(C.digest(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
         self.assertEqual(C.digest(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
+        self.assertEqual(C.digest(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"]), ALTERNATES_DIGEST)
         self.assertEqual(C.digest(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)

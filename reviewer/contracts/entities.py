@@ -955,16 +955,40 @@ RoleSpec = Obj(
                 "Stage 0A: an unapproved fallback is a typed failure.",
 )
 
+ALTERNATE_FIELDS = ("provider", "model", "family", "price")
+
+
+def _alternates_ok(d):
+    alts = d.get("alternates")
+    if alts is None:
+        return
+    if not alts:
+        yield ".alternates", "name at least one alternate (omit the key otherwise)"
+    for r, alt in alts.items():
+        base = d["roles"][r]
+        for k in sorted(set(base) | set(alt)):
+            if k not in ALTERNATE_FIELDS and alt.get(k) != base.get(k):
+                yield f".alternates.{r}.{k}", (f"an alternate differs from roles.{r} only in "
+                                               f"{', '.join(ALTERNATE_FIELDS)}")
+        if alt["model"] == base["model"]:
+            yield f".alternates.{r}.model", f"an alternate names a model other than roles.{r}'s"
+
+
 ModelProfile = define("ModelProfile", Obj(
     required={"id": Slug, "version": Int(1, 999_999), "tier": Tier,
               "triage": Str(min_len=1, max_len=64),
               "roles": Obj(required={"investigator": RoleSpec, "verifier": RoleSpec,
                                      "judge": RoleSpec})},
+    optional={"alternates": Obj(required={}, optional={"investigator": RoleSpec})},
     invariants=[Invariant("role-schema", "each role returns its own plain or Turn schema",
                           lambda d: [(f".roles.{r}.outputSchema", f"a {r} role returns one of "
                                       f"{list(ROLE_SCHEMAS[r])}")
                                      for r, s in d["roles"].items()
-                                     if s["outputSchema"] not in ROLE_SCHEMAS[r]])],
+                                     if s["outputSchema"] not in ROLE_SCHEMAS[r]]),
+                Invariant("alternate-pinning", "an alternate changes only the model of its role", _alternates_ok)],
+    # optional `alternates.investigator` (investigator.impact@v7 only): a second, different investigator model with the
+    # role's prompt, schema, params and caps; a request naming its provider and model is admitted, priced and replayed
+    # against it (call role investigator). The description text stays the legacy one (pinned definition bytes).
     description="Immutable; a change is a new version. Referenced as '<id>@<version>'. A "
                 "retrieval profile sets investigator/verifier outputSchema to the Turn schema.",
 ))

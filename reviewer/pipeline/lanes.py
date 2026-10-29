@@ -202,3 +202,126 @@ def identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls
             "verify": {"rule": VERIFY_RULE, "text": VERIFY_TEXT, "maxCandidates": verify_cap(len(AGENTS)),
                        "perLane": VERIFY_CANDIDATES_PER_LANE, "sessionCandidates": sweeps.VERIFY_SESSION_CANDIDATES,
                        "judgeReserveBp": sweeps.JUDGE_RESERVE_BP}}
+
+
+# ---------------------------------------------------------------- investigator.impact@v7: cross-model lanes
+#
+# impact@v7 runs the five v5 lanes UNCHANGED on the configured investigator model (lens texts, chains, exploration
+# floor, the v5 per-lane tool/spend/time numbers), then prompts.V7_ALT_LENSES (logic, consistency, hygiene) a second time
+# as lanes `<lens>.alt` on the ALTERNATE investigator model, ModelProfile.alternates.investigator (same prompt id,
+# schema, caps and params; only provider, model, family and price differ). Without an alternate the run is refused
+# before any model call (runner.validate_spec, repository_profile): v7 never silently equals v5.
+#
+# Budget (CROSS_BUDGET_RULE), K = 8 lanes in prompts.V7_AGENTS order, A = 3 alternate lanes:
+#   tool calls  lane i may start a tool call while INVESTIGATE tool calls < pool*(i+1)//K, pool = min(LANE_TOOL_CALLS*K,
+#               run_tool_calls, maxToolCalls) = 160 (20 per lane: the five v5 lanes keep exactly 20, 40, ... 100);
+#   time        lane i stops at C*(i+1)//K s (the v7 Plan sets C = 800 s live, 320 s legacy: 100 s / 40 s per lane, the
+#               v5 lanes keep exactly their v5 slices);
+#   spend       a v5 lane i (i < 5) may start an investigator call while INVESTIGATE spend < top*(i+1)//5 with the v5
+#               top = min(investigation_limit, INVESTIGATE_SPEND_BP of the ceiling) ($2.20 of $4, $0.44 per lane);
+#               an alternate lane j may start one while INVESTIGATE spend < min(S + alt*(j+1)//A, v7top), where S is
+#               the INVESTIGATE spend when the first alternate lane started (from the logged cost records, so replay
+#               re-derives it), alt = ALT_SPEND_BP of the ceiling ($1.20: the alternate model spends at most that,
+#               $0.40 per lane with unused room rolling forward) and v7top = min(investigation_limit,
+#               V7_INVESTIGATE_SPEND_BP of the ceiling) ($2.60). Unused v5 room never rolls into the alternate lanes.
+# VERIFY and JUDGE therefore keep at least 35% of the run ceiling ($1.40; the gateway's investigation share, 70%, still
+# binds every call); VERIFY starts no candidate once the run reaches the JUDGE reserve (sweeps.JUDGE_RESERVE_BP).
+# Spend shares are API-equivalent estimates on the subscription arm and count the same way. gpt-5.6-terra lists at about
+# twice gpt-6.1-terra's input and 2.4x its output rate, so at ~$0.16 per gpt-6.1-terra investigator call an alternate
+# call is ~$0.35: about one call plus the exploration-floor continuation per alternate lane.
+#
+# Merge, near-duplicate cap and VERIFY are the v5 rules over the eight lanes in V7_AGENTS order: an alternate lane's
+# hypothesis that duplicates an earlier lane's (same head path and category, start lines within 3) is merged into it, so
+# what the alternate model adds to VERIFY is what the v5 lanes did not propose; VERIFY takes each lane's candidates by
+# value, round-robin across all eight lanes (a lane's best before anyone's second), cap verify_cap(8) = 40 (spend binds
+# first). The verifier model is unchanged.
+
+CROSS_BEHAVIOR = prompts.CROSS_MODEL_VERSION
+CROSS_BUDGET_RULE = "cross-model-budget-split@1"
+V7_AGENTS = prompts.V7_AGENTS
+ALT_AGENTS = prompts.V7_ALT_AGENTS
+V7_INVESTIGATE_SPEND_BP = 6500        # all of INVESTIGATE (v5 lanes + alternate lanes) <= 65%: VERIFY + JUDGE keep >= 35%
+ALT_SPEND_BP = 3000                   # the alternate model's own INVESTIGATE spend cap (30% of the ceiling)
+
+CROSS_BUDGET_TEXT = ("K = 8 lanes in V7_AGENTS order (the five v5 lanes, then the alternate-model lanes); tool calls < "
+                     "pool*(i+1)//K with pool = min(LANE_TOOL_CALLS*K, run_tool_calls, maxToolCalls); time C*(i+1)//K "
+                     "s; spend: v5 lane i < top*(i+1)//5 with the v5 top; alternate lane j < min(S + alt*(j+1)//A, v7top) "
+                     "with S = INVESTIGATE spend when the first alternate lane started, alt = ALT_SPEND_BP and v7top = "
+                     "min(investigation_limit, V7_INVESTIGATE_SPEND_BP) of the ceiling; per-agent caps unchanged; "
+                     "VERIFY keeps the JUDGE reserve")
+
+
+def is_v7_plan(plan: dict) -> bool:
+    return plan.get("specialists") == list(V7_AGENTS)
+
+
+def lane_order(plan: dict) -> list | None:
+    """The lane (merge) order of a v5 or v7 Plan, else None."""
+    return list(AGENTS) if is_v5_plan(plan) else list(V7_AGENTS) if is_v7_plan(plan) else None
+
+
+def v7_spend_top(budget: dict) -> int:
+    return min(investigation_limit(budget), budget["maxUsdMicros"] * V7_INVESTIGATE_SPEND_BP // 10_000)
+
+
+def alt_spend_top(budget: dict) -> int:
+    return min(v7_spend_top(budget), budget["maxUsdMicros"] * ALT_SPEND_BP // 10_000)
+
+
+def primary_spend_cumulative(budget: dict) -> list[int]:
+    """The v5 lanes' spend ceilings, exactly as impact@v5 computes them."""
+    return specialists.cumulative(spend_top(budget), len(AGENTS))
+
+
+def alt_spend_ceiling(start: int, j: int, budget: dict) -> int:
+    """Alternate lane j (0-based): INVESTIGATE spend ceiling given S = `start`, the spend when the first one started."""
+    return min(start + specialists.cumulative(alt_spend_top(budget), len(ALT_AGENTS))[j], v7_spend_top(budget))
+
+
+def alternate(profile: dict) -> dict | None:
+    """ModelProfile.alternates.investigator, or None."""
+    return (profile.get("alternates") or {}).get("investigator")
+
+
+def alternate_problem(profile: dict) -> str | None:
+    """Why `profile` cannot run impact@v7 (None when it can)."""
+    alt = alternate(profile)
+    if alt is None:
+        return ("investigator.impact@v7 needs an alternate investigator model (ModelProfile.alternates.investigator, "
+                "from [review.investigator_alt]); refused instead of running the v5 lanes alone")
+    if alt["model"] == profile["roles"]["investigator"]["model"]:
+        return "investigator.impact@v7 needs an alternate investigator model different from the investigator's"
+    return None
+
+
+def cross_budget_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int) -> dict:
+    k, a = len(V7_AGENTS), len(ALT_AGENTS)
+    pool = tool_pool(policy, budget, k)
+    c = stage_ceiling("INVESTIGATE", budget)
+    return {"rule": CROSS_BUDGET_RULE, "text": CROSS_BUDGET_TEXT, "agents": list(V7_AGENTS),
+            "altAgents": list(ALT_AGENTS),
+            "toolCalls": {"pool": pool, "cumulative": specialists.cumulative(pool, k)},
+            "spendUsdMicros": {"top": spend_top(budget), "cumulative": primary_spend_cumulative(budget),
+                               "altTop": alt_spend_top(budget),
+                               "altCumulative": specialists.cumulative(alt_spend_top(budget), a),
+                               "v7Top": v7_spend_top(budget), "investigateSpendBp": INVESTIGATE_SPEND_BP,
+                               "altSpendBp": ALT_SPEND_BP, "v7InvestigateSpendBp": V7_INVESTIGATE_SPEND_BP},
+            "timeSec": {"ceiling": c, "cumulative": specialists.time_slices(c, k)},
+            "perAgent": {"investigatorTurns": policy.investigator_turns, "agentToolCalls": policy.agent_tool_calls,
+                         "hostMaxCalls": tool_max_calls, "contextChars": policy.context_chars}}
+
+
+def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int, profile: dict) -> dict:
+    """The impact@v7 lane identity: the v5 lens texts, the alternate lanes, the alternate model and the budget split."""
+    alt = alternate(profile)
+    return {"behavior": CROSS_BEHAVIOR, "lanesBehavior": LANES_BEHAVIOR, "lensVersion": prompts.V5_LENS_VERSION,
+            "v3LensVersion": prompts.SPECIALIST_LENS_VERSION, "agents": list(V7_AGENTS),
+            "altLanes": {a: prompts.lens_of(a) for a in ALT_AGENTS},
+            "alternateInvestigator": None if alt is None else {k: alt[k] for k in ("provider", "model", "family")},
+            "budget": cross_budget_doc(policy, budget, tool_max_calls),
+            "merge": {"rule": specialists.MERGE_RULE, "lineWindow": specialists.MERGE_LINE_WINDOW},
+            "nearDuplicates": {"rule": NEAR_DUP_RULE, "text": NEAR_DUP_TEXT, "similarity": NEAR_DUP_SIMILARITY,
+                               "cap": NEAR_DUP_CAP},
+            "verify": {"rule": VERIFY_RULE, "text": VERIFY_TEXT, "maxCandidates": verify_cap(len(V7_AGENTS)),
+                       "perLane": VERIFY_CANDIDATES_PER_LANE, "sessionCandidates": sweeps.VERIFY_SESSION_CANDIDATES,
+                       "judgeReserveBp": sweeps.JUDGE_RESERVE_BP}}

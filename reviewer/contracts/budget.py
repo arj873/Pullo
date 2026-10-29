@@ -274,7 +274,8 @@ def check_spend_authorization(auth: dict, profile: dict, budget: dict,
         return problems
     if parse_timestamp(now_iso) >= parse_timestamp(auth["expiresAt"]):
         problems.append("authorization expired")
-    for name, role in profile["roles"].items():
+    alts = [(f"alternates.{n}", r) for n, r in profile.get("alternates", {}).items()]
+    for name, role in [*profile["roles"].items(), *alts]:
         if role["provider"] not in auth["providers"]:
             problems.append(f"{name}: provider {role['provider']} not authorized")
         if role["model"] not in auth["models"]:

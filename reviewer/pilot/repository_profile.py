@@ -14,23 +14,31 @@ investigator.impact@v4: the v3 specialists unchanged plus deterministic diff-sha
 (reviewer.pipeline.sweeps); its Plan lists the specialists and the sweep marker and scales the budgets for the extra
 agents (V4_* below; the $4 run ceiling and the spend split are unchanged). 5 (explicit only) is investigator.impact@v5:
 the v3 specialists unchanged plus the `consistency` and `hygiene` lanes and a near-duplicate cap
-(reviewer.pipeline.lanes); its Plan lists the five lanes (V5_* below). 1 is exactly the IMPACT-01 profile and policy
+(reviewer.pipeline.lanes); its Plan lists the five lanes (V5_* below). 7 (explicit only) is investigator.impact@v7: the
+v5 lanes unchanged plus the logic, consistency and hygiene lenses again on the ALTERNATE investigator model
+(`[review.investigator_alt]`, bound as ModelProfile.alternates.investigator; without one, or with the investigator's own
+model, the profile is refused: v7 never silently equals v5); its Plan lists the eight lanes and names the alternate
+model in its reasons (V7_* below). 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
 
 from __future__ import annotations
 
 from reviewer.pipeline import RetrievalPolicy
+import copy
+
+from reviewer.pipeline import lanes
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
                                        INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                        INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                                       INVESTIGATOR_IMPACT_V5_PROMPT, SPECIALIST_AGENTS, V5_AGENTS,
+                                       INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
+                                       SPECIALIST_AGENTS, V5_AGENTS, V7_AGENTS, V7_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
                                        VERIFIER_CONTEXT_CHECK_PROMPT, VERIFIER_IMPACT_PROMPT)
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
 from reviewer.pipeline.sweeps import plan_specialists as v4_plan_specialists
 
-from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile
+from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile, model_fields
 
 PROFILE_ID = "pilot-repository"
 MAX_TOOL_CALLS = 160            # run-wide tool calls (matches RetrievalPolicy.run_tool_calls)
@@ -46,7 +54,7 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
 
 
 IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT,
-                   4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT}
+                   4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
 # investigator.impact@v4 Plan scaling (only for v4; every other Plan keeps its bytes). The INVESTIGATE ceiling doubles so
 # the specialists keep exactly the v3 seconds (they split the first half, reviewer.pipeline.sweeps) and the diff-shard
@@ -64,6 +72,14 @@ V5_MAX_TOOL_CALLS = 320
 V5_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 500, "VERIFY": 420, "JUDGE": 200}
 V5_LIVE_WALL_CLOCK_SEC, V5_LIVE_SOFT_DEADLINE_SEC = 1_500, 1_200
 V5_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 200}      # 5 x the legacy 40 s per specialist
+# investigator.impact@v7 Plan scaling (only for v7): eight lanes keep the v5 per-lane seconds (100 s live, 40 s legacy;
+# the five v5 lanes get exactly their v5 slices); the run tool-call cap adds the three alternate lanes' 60-call pool to
+# v5's 320; VERIFY keeps v5's 420 s (spend, not time, binds it: pipeline.lanes keeps INVESTIGATE <= 65%); the run deadlines
+# move by the extra 300 s. The $4 ceiling and the 30% verify reserve are unchanged.
+V7_MAX_TOOL_CALLS = 380
+V7_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 800, "VERIFY": 420, "JUDGE": 200}
+V7_LIVE_WALL_CLOCK_SEC, V7_LIVE_SOFT_DEADLINE_SEC = 1_800, 1_500
+V7_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 320}      # 8 x the legacy 40 s per lane
 
 
 def _prompts(impact: bool, impact_version: int = DEFAULT_IMPACT_VERSION) -> tuple[str, str]:
@@ -88,6 +104,17 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
     if experiment == EXPERIMENT_CONTEXT_CHECK:
         profile["roles"]["verifier"]["promptVersion"] = VERIFIER_CONTEXT_CHECK_PROMPT
         profile["roles"]["judge"]["promptVersion"] = JUDGE_FACT_WORDING_PROMPT
+    if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V7_PROMPT:
+        alt = None if models is None else models.investigator_alt
+        if alt is None:
+            raise ProfileError("impact_version 7 needs an alternate investigator model: set [review.investigator_alt] "
+                               "in the review config (refused; v7 never runs as the v5 lanes alone)")
+        spec = copy.deepcopy(profile["roles"]["investigator"])
+        spec.update(model_fields(models.provider("investigator_alt"), alt))
+        profile["alternates"] = {"investigator": spec}
+        problem = lanes.alternate_problem(profile)
+        if problem is not None:
+            raise ProfileError(problem)
     return profile
 
 
@@ -97,6 +124,22 @@ def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep
     marker and the V4_* budget scaling (every other profile keeps the one generalist, same Plan bytes)."""
     inv = profile["roles"]["investigator"]["promptVersion"]
+    if inv == INVESTIGATOR_IMPACT_V7_PROMPT:     # the v7 scaling (V7_*); the alternate model is named in the reasons
+        problem = lanes.alternate_problem(profile)
+        if problem is not None:
+            raise ProfileError(problem)
+        plan = live_plan(profile, **({"stage_ceilings_sec": V7_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
+                                      "wall_clock_sec": V7_LIVE_WALL_CLOCK_SEC,
+                                      "soft_deadline_sec": V7_LIVE_SOFT_DEADLINE_SEC}
+                                     if live_stage_timing else {"stage_ceilings_sec": V7_LEGACY_STAGE_CEILINGS_SEC}))
+        plan["budget"] = dict(plan["budget"], maxToolCalls=V7_MAX_TOOL_CALLS,
+                              maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+        plan["specialists"] = list(V7_AGENTS)
+        alt = lanes.alternate(profile)
+        plan["reasons"] = ["pilot-repository: fixed standard Plan, retries/repairs off, complete pinned repository imports",
+                           f"investigator.impact@v7: lanes {', '.join(V7_ALT_AGENTS)} on the alternate investigator "
+                           f"{alt['provider']}/{alt['model']} (investigator {profile['roles']['investigator']['model']})"]
+        return plan
     if inv == INVESTIGATOR_IMPACT_V5_PROMPT:     # the v5 scaling (V5_*)
         plan = live_plan(profile, **({"stage_ceilings_sec": V5_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
                                       "wall_clock_sec": V5_LIVE_WALL_CLOCK_SEC,
@@ -139,4 +182,6 @@ def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V4_MAX_TOOL_CALLS)
     if inv == INVESTIGATOR_IMPACT_V5_PROMPT:         # likewise for v5
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V5_MAX_TOOL_CALLS)
+    if inv == INVESTIGATOR_IMPACT_V7_PROMPT:         # and v7
+        return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V7_MAX_TOOL_CALLS)
     return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)

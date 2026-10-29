@@ -16,6 +16,7 @@ gateway. `runner.run_review` owns pre-flight, idempotency and resume. Design rul
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 
@@ -122,7 +123,10 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                           specialists=(artifacts["INVESTIGATE"]["payload"]
                                        if specialists.is_specialist_plan(artifacts["TRIAGE"]["payload"]["plan"])
                                        else None),
-                          sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"))
+                          sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"),
+                          alternate_models=sorted({e["request"]["model"] for e in events if e["type"] == "model.call"
+                                                   and e["stage"] == "INVESTIGATE"
+                                                   and prompts.is_alt_lane(e["agentId"])}) or None)
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -173,6 +177,13 @@ class Engine:
         self.sweep = bool(self.impact and self.policy.diff_sweep)
         # investigator.impact@v5: five specialist lanes with the lanes.py split and near-duplicate cap
         self.five = bool(self.impact and self.policy.five_lanes)
+        # investigator.impact@v7: the v5 lanes, then alternate-model lanes (lanes.ALT_AGENTS) whose requests are built
+        # from a profile view whose investigator is ModelProfile.alternates.investigator (runner refuses v7 without one)
+        self.cross = bool(self.impact and self.policy.cross_model)
+        self.alt_profile = None
+        if self.cross and lanes.alternate(spec.profile) is not None:
+            self.alt_profile = copy.deepcopy(spec.profile)
+            self.alt_profile["roles"]["investigator"] = copy.deepcopy(lanes.alternate(spec.profile))
         self.off_shard: dict[str, str] = {}     # v4 VERIFY: sweep drafts located outside their own shard -> agent
         self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
         self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
@@ -412,9 +423,12 @@ class Engine:
             spent = self.stage_spend(stage)
             if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
                 sweep = self.agent_label(agent) != "specialist"
+                alt = self.cross and prompts.is_alt_lane(agent)
                 err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
-                                  stage=stage, detail={"scope": "sweep-share" if sweep else "specialist-share",
-                                                       "rule": sweeps.BUDGET_RULE if sweep else specialists.BUDGET_RULE,
+                                  stage=stage, detail={"scope": "sweep-share" if sweep else "alternate-model-share" if alt
+                                                       else "specialist-share",
+                                                       "rule": sweeps.BUDGET_RULE if sweep else lanes.CROSS_BUDGET_RULE
+                                                       if self.cross else specialists.BUDGET_RULE,
                                                        "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
                 self.recorder.append("error", error=err)
                 return None, err, []
@@ -709,10 +723,15 @@ class Engine:
             items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
         return self.bounded_context(items)
 
+    def lane_profile(self, agent: str) -> dict:
+        """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
+        lane, else the run's profile."""
+        return self.alt_profile if self.cross and prompts.is_alt_lane(agent) else self.profile
+
     def _hypotheses(self, agent: str, out: dict, source: str) -> list[dict]:
         """The agent's final InvestigatorOutput -> the Hypothesis documents whose citations and location resolve."""
         tools = self.citable(source)
-        family = self.profile["roles"]["investigator"]["family"]
+        family = self.lane_profile(agent)["roles"]["investigator"]["family"]
         changed = self.changed_head_paths()
         hyps = []
         for n, d in enumerate(out["hypotheses"]):
@@ -762,9 +781,11 @@ class Engine:
             return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
                                    turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
 
+        profile = self.lane_profile(agent)         # impact@v7: an alternate lane's requests name the alternate model
+
         def build(d):
             return lambda hop, state: prompts.turn_request(
-                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
                 retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools())
 
         first = chain(self.policy.investigator_turns)
@@ -862,6 +883,9 @@ class Engine:
             tool_cum = specialists.cumulative(lanes.tool_pool(self.policy, self.budget, k), k)
             spend_cum = specialists.cumulative(lanes.spend_top(self.budget), k)
             slices = specialists.time_slices(ceiling, k)
+        if self.cross:                           # impact@v7: v5 spend shares, then the alternate lanes' own cap
+            spend_cum = lanes.primary_spend_cumulative(self.budget)
+        alt_start = None                         # impact@v7: INVESTIGATE spend when the first alternate lane started
         agents, hyps, inc = [], [], []
         first_err = None                     # (error, reason) of the first specialist that failed or was stopped
         usable = 0
@@ -890,10 +914,16 @@ class Engine:
                 if ctx is None:
                     ctx, notes = self._cap_host_results(*self._investigate_context())
                 used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-                self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), spend_cum[i]
+                if self.cross and prompts.is_alt_lane(agent):      # impact@v7 (lanes.CROSS_BUDGET_RULE)
+                    if alt_start is None:
+                        alt_start = self.stage_spend(stage)
+                    ceiling_i = lanes.alt_spend_ceiling(alt_start, lanes.ALT_AGENTS.index(agent), self.budget)
+                else:
+                    ceiling_i = spend_cum[i]
+                self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), ceiling_i
                 try:
                     end, floor_inc = self._investigator_chain(stage, t0, ctx, notes, agent,
-                                                              prompts.specialist_task(agent))
+                                                              prompts.specialist_task(prompts.lens_of(agent)))
                 finally:
                     self._tool_share = self._spend_ceiling = None
             finally:
@@ -1366,7 +1396,8 @@ class Engine:
                                      f"({sweeps.VERIFY_RULE}); later ones (round-robin across specialist and sweep "
                                      "lanes) are not verified" if self.sweep else
                                      f"more than {cap} distinct specialist lane hypotheses ({lanes.VERIFY_RULE}); later "
-                                     "ones (round-robin across the five specialist lanes) are not verified" if self.five
+                                     f"ones (round-robin across the {'eight specialist and alternate-model' if self.cross else 'five specialist'} "
+                                     "lanes) are not verified" if self.five
                                      else f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist "
                                      "hypotheses; later ones (round-robin specialist order) are not verified")})
             return True

@@ -383,8 +383,19 @@ class Gateway:
         # effect-free: the recorder is not this gateway's to write into
         return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=self._st(c["stage"])), record=False)
 
-    def _check_request(self, role: str, req: dict) -> dict | None:
+    def _spec(self, role: str, req: dict | None = None) -> dict:
+        """The profile RoleSpec a request is admitted, priced and replayed against: the role's, or its pinned
+        alternate (ModelProfile.alternates, investigator.impact@v7) when the request names exactly that alternate's
+        provider and model. A profile without alternates always gives the role's spec (unchanged behaviour)."""
         spec = self.profile["roles"][role]
+        alt = (self.profile.get("alternates") or {}).get(role) if self.family == "review" else None
+        if alt is not None and isinstance(req, dict) and req.get("provider") == alt["provider"] \
+                and req.get("model") == alt["model"]:
+            return alt
+        return spec
+
+    def _check_request(self, role: str, req: dict) -> dict | None:
+        spec = self._spec(role, req)
         def bad(why, code="contract-violation"):
             return typed_error(code, why)
         if req["role"] != role:
@@ -481,7 +492,7 @@ class Gateway:
         unbound = self._bound(c)
         if unbound is not None:
             return unbound
-        spec = self.profile["roles"][c["role"]]
+        spec = self._spec(c["role"], req)
         amount = reservation(spec["price"], estimate_input_tokens(req), spec["caps"]["maxOutputTokens"])
         rkey = scoped_key(self.run_id, c["cid"])
         with self._lock:
@@ -632,9 +643,10 @@ class Gateway:
         return settled_basis or ("measured" if known_none else "estimated")
 
     def _cost_doc(self, c, amount, usd, usage, basis, over, *, replay_of=None):
+        price = self._spec(c["role"], c["req"])["price"]
         doc = {"id": cost_id(c["cid"]), "kind": self.cost_kind, "basis": basis, "usage": copy.deepcopy(usage),
-               "usdMicros": usd, "reservedUsdMicros": amount, "priceVersion": self.profile["roles"][c["role"]]["price"]["priceVersion"]
-               if self.profile["roles"][c["role"]]["price"] else None,
+               "usdMicros": usd, "reservedUsdMicros": amount, "priceVersion": price["priceVersion"]
+               if price else None,
                "runId": self.run_id, "role": c["role"], "callId": c["cid"],
                "provider": c["req"]["provider"], "model": c["req"]["model"]}
         if self.family != "score":
@@ -752,7 +764,7 @@ class Gateway:
                 return self._mismatch(c, "recorded guard refusal carries a charge")
             return self._finish_error(c, copy.deepcopy(rerr), 0, 0, None,
                                       replay_cost=self._replayed_cost(c, recorded_cost, 0))
-        spec = self.profile["roles"][c["role"]]
+        spec = self._spec(c["role"], c["req"])
         amount = reservation(spec["price"], estimate_input_tokens(c["req"]), spec["caps"]["maxOutputTokens"])
         rkey = scoped_key(self.run_id, c["cid"])
         if amount != recorded_cost["reservedUsdMicros"]:

@@ -46,7 +46,8 @@ class ReviewProviders:
 
 
 def needs(profile, provider) -> bool:
-    return any(s["provider"] == provider for s in profile["roles"].values())
+    """Any role, or a role's impact@v7 alternate (ModelProfile.alternates), runs on `provider`."""
+    return any(s["provider"] == provider for s in [*profile["roles"].values(), *profile.get("alternates", {}).values()])
 
 
 def live_arm(profile) -> str:

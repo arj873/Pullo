@@ -109,7 +109,8 @@ def sweep_section(cov: dict, investigate: dict | None = None, limit: int = 60) -
 def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete: list, error: dict | None,
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
               coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
-              specialists: dict | None = None, sweep: dict | None = None) -> str:
+              specialists: dict | None = None, sweep: dict | None = None,
+              alternate_models: list | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -181,6 +182,10 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
         if "collapses" in specialists:       # investigator.impact@v5 only
             out[-1:] = [f"- Near-duplicates collapsed before verification (same file, category and spot; the best "
                         f"evidenced kept): {sum(len(g['collapsedIds']) for g in specialists['collapses'])}", ""]
+        if alternate_models:                 # investigator.impact@v7 only: bytes unchanged else
+            out[-1:] = [f"- Lanes ending in `.alt` re-ran those lenses on the alternate investigator model "
+                        f"{', '.join(alternate_models)}; their duplicates of earlier lanes were merged before "
+                        "verification.", ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
         out += sweep_section(sweep, specialists)
     out += [f"## Comments ({len(comments)})", ""]

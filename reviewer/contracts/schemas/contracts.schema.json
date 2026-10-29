@@ -2024,6 +2024,154 @@
       "additionalProperties": false,
       "description": "Immutable; a change is a new version. Referenced as '<id>@<version>'. A retrieval profile sets investigator/verifier outputSchema to the Turn schema.",
       "properties": {
+        "alternates": {
+          "additionalProperties": false,
+          "properties": {
+            "investigator": {
+              "additionalProperties": false,
+              "description": "resolved=false (e.g. exact Terra id pending) blocks live use. No fallbacks in Stage 0A: an unapproved fallback is a typed failure.",
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxRetries": {
+                      "maximum": 3,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outputSchema": {
+                  "enum": [
+                    "InvestigatorOutput",
+                    "VerifierOutput",
+                    "JudgeOutput",
+                    "InvestigatorTurn",
+                    "VerifierTurn"
+                  ]
+                },
+                "params": {},
+                "price": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cacheWriteInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "cachedInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "inputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "outputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "priceVersion": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "priceVersion",
+                        "inputPerMTokUsdMicros",
+                        "cachedInputPerMTokUsdMicros",
+                        "cacheWriteInputPerMTokUsdMicros",
+                        "outputPerMTokUsdMicros"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "enum": [
+                    "anthropic",
+                    "openai",
+                    "synthetic"
+                  ]
+                },
+                "resolved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "role-pinning: pinned, runtime-eligible, priced"
+              ]
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
         "id": {
           "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
           "type": "string"
@@ -2485,7 +2633,8 @@
       ],
       "type": "object",
       "x-invariants": [
-        "role-schema: each role returns its own plain or Turn schema"
+        "role-schema: each role returns its own plain or Turn schema",
+        "alternate-pinning: an alternate changes only the model of its role"
       ]
     },
     "ModelRequest": {

@@ -386,6 +386,7 @@ def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMP
                  else IMPACT_V3_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V3_PROMPT
                  else IMPACT_V4_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V4_PROMPT
                  else IMPACT_V5_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT
+                 else IMPACT_V7_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V7_PROMPT
                  else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
@@ -636,6 +637,37 @@ def specialist_task(agent: str) -> str:
     return INVESTIGATOR_IMPACT_V2_TASK + " " + lens
 
 
+# ---------------------------------------------------------------- impact mode v7: investigator.impact@v7 (cross-model)
+#
+# The five v5 lanes run unchanged on the configured investigator model, then V7_ALT_LENSES run a second time on the
+# ALTERNATE investigator model (ModelProfile.alternates.investigator) as their own lanes `<lens>.alt`. An alternate lane's
+# task is its lens's v5 task, byte for byte: only the model differs (reviewer.pipeline.lanes, cross-model rules). Every
+# v1-v5 text is unchanged; the lane list is bound into the config identity through impact_template_digests(V7).
+
+INVESTIGATOR_IMPACT_V7_PROMPT = "investigator.impact@v7"
+CROSS_MODEL_VERSION = "cross-model-lanes@1"
+ALT_SUFFIX = ".alt"
+# logic (edge cases, conditions, off-by-one), consistency (parallel/sibling code) and hygiene (state, defaults, test
+# precision) are the lenses whose misses are small local defects a different model is most likely to see differently;
+# contracts and safety lean on the cross-file impact map and find_references and cost the most tool calls and turns.
+V7_ALT_LENSES = ("logic", "consistency", "hygiene")
+V7_ALT_AGENTS = tuple(a + ALT_SUFFIX for a in V7_ALT_LENSES)
+V7_AGENTS = V5_AGENTS + V7_ALT_AGENTS
+IMPACT_V7_TEMPLATES = {**IMPACT_V5_TEMPLATES, "crossModel": {"version": CROSS_MODEL_VERSION,
+                                                             "altLanes": [[a + ALT_SUFFIX, a] for a in V7_ALT_LENSES]}}
+
+
+def lens_of(agent: str) -> str:
+    """The lens a lane runs: an alternate lane `<lens>.alt` runs `<lens>`; every other lane is its own lens."""
+    if agent in V7_ALT_AGENTS:
+        return agent[:-len(ALT_SUFFIX)]
+    return agent
+
+
+def is_alt_lane(agent: str) -> bool:
+    return agent in V7_ALT_AGENTS
+
+
 # ---------------------------------------------------------------- opt-in experiment: context-check@1
 #
 # A prompt-only arm on the EXISTING VerifierTurn / JudgeOutput schemas. It is selected only by an explicit prompt id on
@@ -704,7 +736,8 @@ def verifier_task(prompt_version: str) -> str:
 def investigator_task(prompt_version: str) -> str:
     """The retrieval investigator task for a policy prompt id (impact mode v1/v2 or the frozen retrieval@2 text).
     investigator.impact@v3 has one task per specialist: investigator_v3_task(agent)."""
-    if prompt_version in (INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT):
+    if prompt_version in (INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT,
+                          INVESTIGATOR_IMPACT_V7_PROMPT):
         raise ValueError(f"{prompt_version} has one task per specialist; use investigator_v3_task(agent) "
                          "(and SWEEP_TASK for a v4 diff-shard sweep)")
     if prompt_version == INVESTIGATOR_IMPACT_V2_PROMPT:

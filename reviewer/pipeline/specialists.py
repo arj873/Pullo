@@ -64,7 +64,8 @@ def is_specialist_plan(plan: dict) -> bool:
     """A Plan whose INVESTIGATE runs the specialists: impact@v3, impact@v4 (the specialists then the diff-shard sweep
     marker, see reviewer.pipeline.sweeps.PLAN_MARKER) or impact@v5 (five specialist lanes)."""
     return (is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
-            or plan.get("specialists") == list(prompts.V5_AGENTS))      # impact@v5: five lanes (pipeline.lanes)
+            or plan.get("specialists") == list(prompts.V5_AGENTS)       # impact@v5: five lanes (pipeline.lanes)
+            or plan.get("specialists") == list(prompts.V7_AGENTS))      # impact@v7: v5 lanes + alternate-model lanes
 
 
 def time_slices(ceiling_sec: int | None, k: int = len(AGENTS)) -> list[int] | None:
