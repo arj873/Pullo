@@ -102,7 +102,9 @@ class Model:
         return self.positive_script()[:3] + [self.verdict("refuted")]
 
     def miss_script(self):
-        return [{"contextRequests": [], "output": {"hypotheses": []}}]
+        # EXPLORE-FLOOR: under investigator.impact@v2 the hop-0 empty answer is a draft; the second answers the one
+        # floor continuation (and is accepted as it stands).
+        return [{"contextRequests": [], "output": {"hypotheses": []}}] * 2
 
     def __call__(self, http_req):
         self.requests.append(http_req)
@@ -431,7 +433,9 @@ class LiveTests(Rig):
     def test_a_miss_is_reported_as_is_with_exactly_one_call_and_no_retry_or_repeat(self):
         rep, model = self.live(self.model("miss"))
         self.assertEqual((rep["status"], rep["counts"]["hypotheses"], rep["counts"]["comments"]), ("completed", 0, 0))
-        self.assertEqual(len(model.requests), 1)
+        # one draft call + the one exploration-floor continuation (EXPLORE-FLOOR); no retry, no repeat
+        self.assertEqual(len(model.requests), 2)
+        self.assertIn("explorationFloor", json.loads(json.loads(model.requests[1].body)["messages"][1]["content"]))
         committed = RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()["committedUsdMicros"]
         again = self.model("miss")
         try:

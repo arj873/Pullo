@@ -23,6 +23,7 @@ from reviewer.tools import TOOLS, ArgError, ToolCall, normalize
 from reviewer.tools.ops import Outcome
 
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
+from .prompts import INVESTIGATOR_IMPACT_V2_PROMPT
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -73,8 +74,13 @@ class RetrievalPolicy:
     @property
     def impact(self) -> bool:
         """Impact mode (impact map in PREPARE, find_references, impact prompts) is selected by the investigator
-        prompt id alone; every other id keeps the frozen retrieval@2 behaviour byte for byte."""
-        return self.investigator_prompt == INVESTIGATOR_IMPACT_PROMPT
+        prompt id alone (impact@v1 or impact@v2); every other id keeps the frozen retrieval@2 behaviour byte for byte."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT)
+
+    @property
+    def exploration_floor(self) -> bool:
+        """The engine-enforced exploration floor (investigator.impact@v2 only; see Engine._investigator_chain)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V2_PROMPT
 
     def to_doc(self) -> dict:
         return {"version": RETRIEVAL_VERSION, **dataclasses.asdict(self)}

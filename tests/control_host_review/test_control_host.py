@@ -66,7 +66,9 @@ class Fake:
     """Fake OpenRouter: answers from a script; records every request."""
 
     def __init__(self, script=None):
-        self.script = script or [EMPTY]
+        # EXPLORE-FLOOR: the hop-0 empty answer is a draft under investigator.impact@v2; the second EMPTY answers the
+        # one floor continuation.
+        self.script = script or [EMPTY, EMPTY]
         self.requests = []
 
     def __call__(self, req):

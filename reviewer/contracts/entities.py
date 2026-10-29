@@ -1260,6 +1260,26 @@ def _host_stop_ok(d):
         yield ".afterSeq", "must equal seq - 1"
 
 
+EXPLORATION_FLOOR_VERSION = "exploration-floor@1"
+FLOOR_DECISIONS = ("skipped", "continue", "final", "draft")
+FLOOR_SKIP_REASONS = ("turns", "tool-calls", "context-chars")
+FLOOR_DRAFT_REASONS = FLOOR_SKIP_REASONS + ("stopped", "call-failed")
+
+
+def _floor_ok(d):
+    dec = d["decision"]
+    if ("finalCallId" in d) != (dec == "final"):
+        yield ".finalCallId", "present exactly when decision is final"
+    if ("reason" in d) != (dec in ("skipped", "draft")):
+        yield ".reason", "present exactly when decision is skipped or draft"
+    elif dec == "skipped" and d["reason"] not in FLOOR_SKIP_REASONS:
+        yield ".reason", f"a skipped floor names one of {list(FLOOR_SKIP_REASONS)}"
+    if ("errorCode" in d) != (d.get("reason") in ("stopped", "call-failed")):
+        yield ".errorCode", "present exactly when the draft was used because of a stop or a failed call"
+    if d.get("finalCallId") == d["draftCallId"]:
+        yield ".finalCallId", "the accepted final answer is not the draft"
+
+
 TraceEvent = define("TraceEvent", Union("type", {
     "run.start": _event("run.start", {"run": ReviewRun}),
     "stage.start": _event("stage.start", {"stage": Stage}),
@@ -1292,6 +1312,15 @@ TraceEvent = define("TraceEvent", Union("type", {
         [Invariant("stop-position", "afterSeq is the seq of the event immediately before the "
                               "decision; gateOrdinal (host-stop@2) is the 1-based count of this stage's gate checks "
                               "including this one", _host_stop_ok)]),
+    "retrieval.floor": _event("retrieval.floor", {
+        "stage": Enum("INVESTIGATE"), "agentId": Slug, "version": Const(EXPLORATION_FLOOR_VERSION),
+        "draftCallId": Id("call"), "decision": Enum(*FLOOR_DECISIONS)},
+        {"finalCallId": Id("call"), "reason": Enum(*FLOOR_DRAFT_REASONS), "errorCode": Enum(*ERROR_CODES)},
+        [Invariant("floor-decision", "investigator.impact@v2 exploration floor: draftCallId is the agent's first "
+                   "final answer, given before any context request. skipped (+reason: no turn/tool/context budget "
+                   "left, the draft is final), continue (the host sent its one continuation), final (+finalCallId: "
+                   "the continuation's final answer is used), draft (+reason, +errorCode for stopped/call-failed: "
+                   "the continuation ended without a final answer and the draft is used)", _floor_ok)]),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
     "error": _event("error", {"error": TypedError}),

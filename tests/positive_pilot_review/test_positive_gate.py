@@ -111,6 +111,11 @@ class Model:
         return HttpResponse(200, {}, json.dumps(d).encode())
 
 
+# EXPLORE-FLOOR: under the pilot default investigator.impact@v2 a hop-0 empty answer is a draft; the second empty
+# answer replies to the one exploration-floor continuation and is accepted as it stands.
+MISS = [Model.final({"hypotheses": []})] * 2
+
+
 class Rig(unittest.TestCase):
     def setUp(self):
         self._t = tempfile.TemporaryDirectory()
@@ -433,16 +438,17 @@ class ModelDecides(Rig):
         self.assertNotIn("JudgeOutput", [b["response_format"]["json_schema"]["name"] for b in m.bodies])
 
     def test_a_miss_and_a_wrong_finding_are_reported_as_the_model_decided_them(self):
-        miss = self.model([Model.final({"hypotheses": []})])
+        miss = self.model(MISS)
         rep, m = self.live(miss)
-        self.assertEqual((rep["status"], len(m.requests), rep["counts"]["hypotheses"]), ("completed", 1, 0))
+        self.assertEqual((rep["status"], len(m.requests), rep["counts"]["hypotheses"]), ("completed", 2, 0))
         self.assertTrue(rep["ok"])                                           # a miss is not an error, not retried
         rmtree(self.out)
         self.state_reset()
         benign = self.model()
         benign.script = [Model.final({"hypotheses": [benign.hyp(path=BENIGN, line=2, text="    return \"\\n\".join(lines)")]}),
                          ]
-        benign.script = [Model.final({"hypotheses": [benign.hyp(path=BUG[0], line=BUG[1], text=BUG[2], claim="other")]}),
+        other = Model.final({"hypotheses": [benign.hyp(path=BUG[0], line=BUG[1], text=BUG[2], claim="other")]})
+        benign.script = [other, other,             # draft + the exploration-floor continuation (EXPLORE-FLOOR)
                          benign.ask((DEFN[0], 1, 9)), benign.verdict("confirmed"), benign.comment("other")]
         rep2, _ = self.live(benign, out_dir=str(self.out))
         self.assertIn("model-decided", rep2["outcome"])
@@ -502,7 +508,7 @@ class ModelDecides(Rig):
 
     def test_a_key_echoed_by_the_model_is_scrubbed_from_the_report_at_least(self):
         m = self.model()
-        m.script = [Model.final({"hypotheses": []})]
+        m.script = MISS
         rep, _ = self.live(m)
         self.assertNotIn(FAKE_KEY, Path(rep["reportPath"]).read_text())
         for p in Path(rep["paths"]["runDir"]).rglob("*"):
@@ -536,9 +542,9 @@ class Admission(Rig):
 
     def test_exactly_at_the_aggregate_is_admitted_through_preflight(self):
         self.seed(committed=46_000_000)
-        m = self.model([Model.final({"hypotheses": []})])
+        m = self.model(MISS)
         rep = P.run_positive(self.live_options(baseline_micros=46_000_000), transport=m, key_loader=self.loader)
-        self.assertEqual(len(m.requests), 1)
+        self.assertEqual(len(m.requests), 2)                # the draft + its one exploration-floor continuation
         self.assertIn(rep["status"], ("completed", "pipeline-refused"))
 
     def test_book_inflight_and_wrong_baselines_refuse(self):
@@ -589,9 +595,9 @@ class Admission(Rig):
         self.assertFalse(self.out.exists())
 
     def test_a_second_identical_live_run_makes_no_provider_contact(self):
-        rep, _ = self.live(self.model([Model.final({"hypotheses": []})]))
+        rep, _ = self.live(self.model(MISS))
         committed = RuntimeLedger(self.state / P.LEDGER_NAME, 50_000_000).totals()["committedUsdMicros"]
-        again = self.model([Model.final({"hypotheses": []})])
+        again = self.model(MISS)
         try:
             P.run_positive(self.live_options(out_dir=str(self.tmp / "again"), baseline_micros=committed),
                            transport=again, key_loader=self.loader)
@@ -680,7 +686,7 @@ class PersistenceAndReplay(Rig):
             P.run_positive(self.replay_options(rep, replay_trace=str(self.tmp / "nope.jsonl")), key_loader=self.boom)
 
     def test_miss_and_refuted_runs_replay_strictly_too(self):
-        for name, script in (("miss", [Model.final({"hypotheses": []})]), ("refuted", None)):
+        for name, script in (("miss", MISS), ("refuted", None)):
             with self.subTest(name):
                 self.state_reset()
                 outd = self.tmp / f"live-{name}"

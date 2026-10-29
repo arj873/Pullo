@@ -452,7 +452,7 @@ class Bench(TBH.Base):
         users = [json.loads(next(m["content"] for m in b["messages"] if m["role"] == "user")) for b in model.bodies]
         self.assertEqual([u["task"] for u in users[2:4]], [prompts.VERIFIER_CONTEXT_CHECK_TASK] * 2)
         self.assertEqual(users[4]["task"], prompts.JUDGE_FACT_TASK)
-        self.assertEqual(users[0]["task"], prompts.INVESTIGATOR_IMPACT_TASK)       # IMPACT-01: pilot default
+        self.assertEqual(users[0]["task"], prompts.INVESTIGATOR_IMPACT_V2_TASK)    # EXPLORE-FLOOR: pilot default
         self.assertIs(rep["experiment"]["audited"], False)
         trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
         ok = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "rp-ok"), replay_trace=trace,

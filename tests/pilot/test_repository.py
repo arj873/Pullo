@@ -20,7 +20,7 @@ from reviewer.contracts.canonical import digest, hypothesis_id
 from reviewer.gateway import SpendBook, load_trace, trusted_authorization
 from reviewer.historical import capture_bridge_pins, write_pins
 from reviewer.pilot import repository as R
-from reviewer.pilot.profile import MODEL, OUTPUT_CAPS, RUN_CEILING_USD_MICROS
+from reviewer.pilot.profile import MODEL, OUTPUT_CAPS, RUN_CEILING_USD_MICROS, ProfileError
 from reviewer.pilot.repository_profile import repository_plan, repository_policy, repository_profile
 from reviewer.pipeline import RetrievalPolicy
 from reviewer.repoimport import (RelatesSpec, capture_import_pins, import_repository, write_import_pins)
@@ -255,14 +255,24 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual((off["investigator"]["outputSchema"], off["verifier"]["outputSchema"]),
                          ("InvestigatorOutput", "VerifierOutput"))
         self.assertEqual(repository_policy(True, impact=False), RetrievalPolicy())
-        # IMPACT-01: the default with retrieval is impact mode (same schemas, impact prompt ids)
-        imp = repository_profile(True)["roles"]
+        # IMPACT-01: impact mode (same schemas, impact prompt ids); impact@v1 is now selected explicitly
+        imp = repository_profile(True, impact_version=1)["roles"]
         self.assertEqual((imp["investigator"]["outputSchema"], imp["investigator"]["promptVersion"]),
                          ("InvestigatorTurn", "investigator.impact@v1"))
         self.assertEqual((imp["verifier"]["outputSchema"], imp["verifier"]["promptVersion"]),
                          ("VerifierTurn", "verifier.impact@v1"))
-        self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v1",
+        self.assertEqual(repository_policy(True, impact_version=1),
+                         RetrievalPolicy(investigator_prompt="investigator.impact@v1", verifier_prompt="verifier.impact@v1"))
+        # EXPLORE-FLOOR: the default with retrieval is impact@v2 (exploration floor); the verifier is unchanged
+        dflt = repository_profile(True)["roles"]
+        self.assertEqual((dflt["investigator"]["outputSchema"], dflt["investigator"]["promptVersion"]),
+                         ("InvestigatorTurn", "investigator.impact@v2"))
+        self.assertEqual(dflt["verifier"]["promptVersion"], "verifier.impact@v1")
+        self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v2",
                                                                   verifier_prompt="verifier.impact@v1"))
+        for bad in (0, 3, True, "2", None):
+            with self.assertRaises(ProfileError):
+                repository_profile(True, impact_version=bad)
         self.assertIsNone(repository_policy(False))
 
     def test_the_reused_private_helpers_keep_their_shape(self):

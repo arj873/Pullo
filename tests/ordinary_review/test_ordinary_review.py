@@ -130,7 +130,9 @@ class World:
 
 
 class Wire:
-    """Fake OpenRouter: investigator, verifier and judge each answer at hop 0."""
+    """Fake OpenRouter: investigator, verifier and judge each answer at hop 0. EXPLORE-FLOOR: the pilot default
+    investigator.impact@v2 treats the hop-0 investigator answer as a draft and sends one continuation, which this
+    wire answers with the same final (so 4 provider calls)."""
 
     def __init__(self, head_snapshot, *, fail=None, interrupt_at=None):
         self.requests, self.bodies, self.fail, self.interrupt_at = [], [], fail, interrupt_at
@@ -140,6 +142,7 @@ class Wire:
         h = {"claim": claim, "category": "bug", "suspectedSeverity": "P1", "impact": "incorrect-result",
              "location": {"path": "lib/rate.py", "line": 2}, "mechanism": "n / 60 replaces n * 60.", "evidence": [cite]}
         self.script = [{"contextRequests": [], "output": {"hypotheses": [h]}},
+                       {"contextRequests": [], "output": {"hypotheses": [h]}},      # the floor continuation
                        {"contextRequests": [], "output": {"verdict": "confirmed", "reachable": True,
                                                           "impact": "incorrect-result", "evidence": [cite],
                                                           "notes": "line 2 divides"}},
@@ -335,18 +338,18 @@ class Composed(Base):
     def test_live_uses_the_plan_first_wire_caps_no_fallback_and_binds_the_sidecar(self):
         plan = O.run_ordinary(self.w.options(), key_loader=self.no_key)
         rep, wire = self.run_live()
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 3))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 4))
         self.assertEqual(plan["plan"]["firstRequest"]["bodySha256"],
                          __import__("hashlib").sha256(wire.requests[0].body).hexdigest())
         models = {r: v["model"] for r, v in rep["reviewModels"]["roles"].items()}
-        for b, role in zip(wire.bodies, ("investigator", "verifier", "judge")):
+        for b, role in zip(wire.bodies, ("investigator", "investigator", "verifier", "judge")):
             self.assertEqual(b["model"], models[role])
             self.assertNotIn("tools", b)
             self.assertIs(b["provider"]["allow_fallbacks"], False)
         self.assertEqual(self.keys, [str(self.w.env)])
         rt = rep["costs"]["runtime"]
-        self.assertEqual(rt["ledgerCalls"]["thisCase"], 3)
-        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], COMMITTED + 3 * PER_CALL)
+        self.assertEqual(rt["ledgerCalls"]["thisCase"], 4)
+        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], COMMITTED + 4 * PER_CALL)
         out = Path(self.w.out)
         on_disk = json.loads((out / "report.json").read_text())
         origin = json.loads((out / "origin.json").read_text())
