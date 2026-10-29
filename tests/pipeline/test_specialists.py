@@ -272,19 +272,23 @@ class Merge(SpecRig):
                 "claim": f"{agent}{n}", "category": cat, "location": loc}
 
     def test_merge_rule(self):
-        a = self.H("contracts", 0, "x.py", 10, "bug", 12)
+        a = self.H("contracts", 0, "x.py", 10, "bug", 40)            # a wide range does not widen the match
         a2 = self.H("contracts", 1, "x.py", 11, "bug")                # same agent: never merged
-        b = self.H("logic", 0, "x.py", 12, "bug", 20)                 # overlaps a at 12
-        c = self.H("logic", 1, "x.py", 13, "bug")                     # overlaps b only (b is merged: not a base)
+        b = self.H("logic", 0, "x.py", 13, "bug")                     # start 3 from a: merged into a
+        c = self.H("logic", 1, "x.py", 14, "bug")                     # 4 from a, 3 from a2: merged into a2
+        h = self.H("logic", 2, "x.py", 20, "bug")                     # kept
         d = self.H("safety", 0, "x.py", 10, "security")               # other category
         e = self.H("safety", 1, "y.py", 10, "bug")                    # other path
-        f = self.H("safety", 2, "x.py", 13, "bug")                    # overlaps c (kept, earlier agent)
-        g = self.H("safety", 3, "x.py", 11, "bug")                    # overlaps a and a2: the first kept wins
-        got = specialists.merge([a, a2, b, c, d, e, f, g])
-        self.assertEqual(got, [{"keptId": a["id"], "mergedIds": [b["id"], g["id"]], "rule": "specialist-merge@1"},
-                               {"keptId": c["id"], "mergedIds": [f["id"]], "rule": "specialist-merge@1"}])
+        f = self.H("safety", 2, "x.py", 30, "bug")                    # inside a's [10, 40] but its start is far: kept
+        g = self.H("safety", 3, "x.py", 12, "bug")                    # near a and a2: the first kept wins
+        i = self.H("safety", 4, "x.py", 22, "bug")                    # near h (kept, earlier agent)
+        got = specialists.merge([a, a2, b, c, h, d, e, f, g, i])
+        self.assertEqual(got, [{"keptId": a["id"], "mergedIds": [b["id"], g["id"]], "rule": "specialist-merge@2"},
+                               {"keptId": a2["id"], "mergedIds": [c["id"]], "rule": "specialist-merge@2"},
+                               {"keptId": h["id"], "mergedIds": [i["id"]], "rule": "specialist-merge@2"}])
         self.assertEqual(specialists.merge([a, a2]), [])
-        self.assertEqual(specialists.MERGE_RULE, "specialist-merge@1")
+        self.assertEqual(specialists.MERGE_LINE_WINDOW, 3)
+        self.assertEqual(specialists.MERGE_RULE, "specialist-merge@2")
 
     def test_duplicates_are_dropped_before_verify_and_recorded(self):
         m = self.case()
@@ -299,7 +303,7 @@ class Merge(SpecRig):
         self.assertEqual(res.status, "completed", res.incomplete)
         kept, merged = shid("contracts", 0, hc), shid("logic", 0, dup)
         p = self.payload(res)["payload"]
-        self.assertEqual(p["merges"], [{"keptId": kept, "mergedIds": [merged], "rule": "specialist-merge@1"}])
+        self.assertEqual(p["merges"], [{"keptId": kept, "mergedIds": [merged], "rule": "specialist-merge@2"}])
         self.assertIn(merged, [h["id"] for h in p["hypotheses"]])       # kept in the artifact for audit
         self.assertEqual({e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")},
                          {kept, shid("safety", 0, hs)})                  # no verifier call for the duplicate
@@ -308,12 +312,36 @@ class Merge(SpecRig):
         self.assertIn(kept, drops[0]["detail"])
         self.assertEqual(len(res.findings), 2)
 
+    def test_a_kept_hypothesis_without_a_finding_hands_verify_its_first_duplicate(self):
+        m = self.case()
+        hc, hs = self.h_contract(m), self.h_safety(m)
+        dup = hyp(m, "src/lib.py", 2, claim="cache default removed (logic view)", category="breaking-change",
+                  impact="crash", evidence=[m.cite("src/lib.py", 1)])
+        dup2 = hyp(m, "src/lib.py", 1, claim="cache default removed (safety view)", category="breaking-change",
+                   impact="crash", evidence=[m.cite("src/lib.py", 1)])
+        kept, d1, d2 = shid("contracts", 0, hc), shid("logic", 0, dup), shid("safety", 1, dup2)
+        scr = script(ask("contracts", 0), sfinal("contracts", 1, hc), ask("logic", 0), sfinal("logic", 1, dup),
+                     ask("safety", 0), sfinal("safety", 1, hs, dup2),
+                     vfinal(0, verdict="uncertain", evidence=[]), vfinal(1, m, path="src/lib.py", line=1),
+                     vfinal(2, m, path="src/lib.py", line=1),
+                     judge(w([shid("safety", 0, hs)]), w([d1])))
+        res, _ = self.record_v3(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(self.payload(res)["payload"]["merges"],
+                         [{"keptId": kept, "mergedIds": [d1, d2], "rule": "specialist-merge@2"}])
+        # round-robin order first (contracts 0, safety 0), then the first duplicate of the unconfirmed kept one
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
+                         [kept, shid("safety", 0, hs), d1])
+        self.assertEqual(sorted(f["id"] for f in res.findings), sorted([shid("safety", 0, hs), d1]))
+        self.assertEqual([d["subjectIds"] for d in res.drops if d["reason"] == "merged"], [[d2]])
+
     def test_more_than_the_cap_are_dropped_as_over_cap(self):
         m = self.case()
         cats = ("bug", "performance", "security", "style")
         hs = {a: [hyp(m, "src/lib.py", line, claim=f"{a} {cat} {line}", category=cat, evidence=[m.cite("src/lib.py", line)])
                   for cat in cats[2 * i:2 * i + 2] for line in range(1, 7)] for i, a in enumerate(AGENTS[:2])}
-        ids = [shid(a, n, h) for a in AGENTS[:2] for n, h in enumerate(hs[a])]
+        c_ids, l_ids = ([shid(a, n, h) for n, h in enumerate(hs[a])] for a in AGENTS[:2])
+        ids = [x for pair in zip(c_ids, l_ids) for x in pair]           # round-robin: contracts 0, logic 0, ...
         self.assertEqual(len(ids), 24)
         vs = [vfinal(k, verdict="uncertain", evidence=[]) for k in range(20)]
         scr = script(ask("contracts", 0), sfinal("contracts", 1, *hs["contracts"]),
@@ -336,14 +364,17 @@ class Tolerance(SpecRig):
                      vfinal(0, m, path="src/lib.py", line=1), vfinal(1, m, path="src/lib.py", line=1),
                      judge(w([shid("contracts", 0, hc)]), w([shid("safety", 0, hs)])))
         res, _ = self.record_v3(m, scr)
-        self.assertEqual((res.status, res.incomplete), ("completed", []))     # not a run limit
+        # disclosed: the run is partial, with one agent-failure entry for the specialist that failed
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([(i["stage"], i["reason"], i["detail"].split(":")[0]) for i in res.incomplete],
+                         [("INVESTIGATE", "agent-failure", "specialist logic")])
         agents = self.payload(res)["payload"]["agents"]
         self.assertEqual([(a["agentId"], a["status"]) for a in agents],
                          [("contracts", "completed"), ("logic", "failed"), ("safety", "completed")])
         self.assertEqual(agents[1]["error"]["code"], "provider-error")
         self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "safety"])
         rep = self.replay_v3(m, res)
-        self.assertEqual((rep.status, rep.error), ("completed", None))
+        self.assertEqual((rep.status, rep.error, rep.incomplete), ("partial", None, res.incomplete))
         self.assertEqual(len(rep.findings), 2)
 
     def test_all_specialists_failing_fails_like_v2(self):
@@ -351,6 +382,7 @@ class Tolerance(SpecRig):
         res, _ = self.record_v3(m, script(*sfail("contracts", 0), *sfail("logic", 0), *sfail("safety", 0)))
         self.assertEqual((res.status, res.error["code"]), ("failed", "provider-error"))
         self.assertEqual([i["reason"] for i in res.incomplete], ["agent-failure"])
+        self.assertEqual(self.payload(res)["payload"]["merges"], [])          # always present in v3
         v2, _ = self.record_v2(m, script(*[entry("INVESTIGATE", "investigator", "generalist", 0, a,
                                                  error=terr("provider-error", "INVESTIGATE")) for a in range(3)]),
                                eval_id="evr_" + "8" * 16)
@@ -378,24 +410,39 @@ class Tolerance(SpecRig):
         self.assertEqual([a["agentId"] for a in agents], ["contracts", "logic"])
         self.assertEqual((res.hypotheses, res.findings), ([], []))
 
-    def test_a_stage_deadline_stops_the_later_specialists_and_keeps_the_earlier_answers(self):
+    def test_time_slices_stop_each_specialist_and_fall_back_to_its_draft(self):
         m = self.case()
-        hc = self.h_contract(m)
+        hc, hl = self.h_contract(m), self.h_logic(m)
         plan = copy.deepcopy(V3_PLAN)
-        plan["budget"].update(stageCeilingsSec={"INVESTIGATE": 90}, hostStopRecording=HOST_STOP_RECORDING)
+        plan["budget"].update(stageCeilingsSec={"INVESTIGATE": 90, "VERIFY": 300}, hostStopRecording=HOST_STOP_RECORDING)
+        self.assertEqual(specialists.time_slices(90), [30, 60, 90])
+        self.assertEqual(specialists.time_slices(300), [100, 200, 300])          # the live INVESTIGATE ceiling
+        # every provider call takes 50 s: contracts' draft ends at 50 s (> its 30 s slice), logic's at 100 s (> 60 s)
         self.clock = lambda: 50.0 * (self.spies[-1].calls if self.spies else 0)
-        scr = script(sfinal("contracts", 0, hc), sfinal("contracts", 1, hc), sfinal("logic", 0), sfinal("safety", 0),
-                     vfinal(0, m, path="src/lib.py", line=1), judge(w([shid("contracts", 0, hc)])))
+        scr = script(sfinal("contracts", 0, hc), sfinal("contracts", 1, hc), sfinal("logic", 0, hl),
+                     sfinal("logic", 1, hl), sfinal("safety", 0),
+                     vfinal(0, m, path="src/lib.py", line=1), vfinal(1, m, path="src/lib.py", line=2),
+                     judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hl)])))
         res, _ = self.record_v3(m, scr, plan=plan)
         self.assertEqual(res.status, "partial")
+        self.assertEqual([(c["agentId"], c["ordinal"]) for c in inv_calls(res) if c["response"] is not None],
+                         [("contracts", 0), ("logic", 0)])                  # each stopped before its continuation
+        self.assertEqual(floors(res), [("contracts", "continue"), ("contracts", "draft"),
+                                       ("logic", "continue"), ("logic", "draft")])
         agents = self.payload(res)["payload"]["agents"]
-        self.assertEqual([a["status"] for a in agents], ["completed", "failed", "failed"])
-        self.assertEqual({a["error"]["code"] for a in agents[1:]}, {"deadline-exceeded"})
-        self.assertEqual({i["reason"] for i in res.incomplete if i["stage"] == "INVESTIGATE"}, {"deadline"})
-        self.assertEqual(len(res.findings), 1)
+        self.assertEqual([a["status"] for a in agents], ["completed", "completed", "failed"])
+        self.assertEqual(agents[2]["error"]["code"], "deadline-exceeded")       # past the stage ceiling: not started
+        stops = [e for e in events_of(res) if e["type"] == "host.stop" and e["stage"] == "INVESTIGATE"]
+        self.assertEqual([e["code"] for e in stops], ["stage-deadline"] * 3)
+        inv = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
+        self.assertEqual({i["reason"] for i in inv}, {"deadline"})
+        self.assertEqual([i["detail"].split(":")[0] for i in inv],
+                         ["specialist contracts", "specialist logic", "specialist safety"])
+        self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "logic"])
         rep = self.replay_v3(m, res, plan=plan)
         self.assertEqual((rep.status, rep.error), (res.status, None))
         self.assertEqual(rep.incomplete, res.incomplete)
+        self.assertEqual(floors(rep), floors(res))
 
     def test_an_unknown_provider_outcome_starts_no_further_specialist(self):
         m = self.case()
@@ -409,7 +456,9 @@ class Tolerance(SpecRig):
         self.assertEqual([(a["agentId"], a["status"]) for a in agents],
                          [("contracts", "completed"), ("logic", "failed"), ("safety", "failed")])
         self.assertFalse([c for c in inv_calls(res) if c["agentId"] == "safety"])     # never multiplied
-        self.assertEqual((res.status, len(res.findings)), ("completed", 1))
+        self.assertEqual((res.status, len(res.findings)), ("partial", 1))
+        self.assertEqual([(i["reason"], i["detail"].split(":")[0]) for i in res.incomplete],
+                         [("agent-failure", "specialist logic"), ("agent-failure", "specialist safety")])
 
     def test_a_systemic_failure_starts_no_further_specialist(self):
         from unittest import mock
@@ -433,7 +482,8 @@ class Tolerance(SpecRig):
                          [("logic", "failed", "contract-violation"), ("safety", "failed", "contract-violation")])
         self.assertIn("not started", agents[2]["error"]["message"])
         self.assertFalse([c for c in inv_calls(res) if c["agentId"] == "safety"])
-        self.assertEqual((res.status, len(res.findings)), ("completed", 1))
+        self.assertEqual((res.status, len(res.findings)), ("partial", 1))
+        self.assertEqual([i["reason"] for i in res.incomplete], ["agent-failure", "agent-failure"])
         self.assertEqual(V3_SYSTEMIC, ("live-calls-disabled", "model-unresolved", "contract-violation"))
 
     def test_review_md_lists_the_specialists_only_for_v3(self):
@@ -528,7 +578,7 @@ class IdentityAndReplay(SpecRig):
         self.assertEqual(identity.config_snapshot_id(spec), base)
         doc = specialists.identity_doc(V3_POLICY, V3_PLAN["budget"], identity.tool_limits(spec).max_calls)
         self.assertEqual((doc["behavior"], doc["agents"], doc["merge"]["rule"], doc["budget"]["rule"]),
-                         ("specialist-investigators@1", list(AGENTS), "specialist-merge@1", "specialist-budget-split@1"))
+                         ("specialist-investigators@1", list(AGENTS), "specialist-merge@2", "specialist-budget-split@1"))
 
     def test_plan_must_name_the_specialists(self):
         m = self.case()
@@ -540,13 +590,32 @@ class IdentityAndReplay(SpecRig):
         with self.assertRaises(PipelineError):
             self.record_v2(m, s1, plan=V3_PLAN)
 
+    def test_load_re_derives_the_merge_record_and_refuses_a_mismatch(self):
+        from unittest import mock
+        from reviewer.pipeline import runner
+        m = self.case()
+        hc = self.h_contract(m)
+        dup = hyp(m, "src/lib.py", 1, claim="cache default removed (logic view)", category="breaking-change",
+                  impact="crash", evidence=[m.cite("src/lib.py", 1)])
+        scr = script(ask("contracts", 0), sfinal("contracts", 1, hc), ask("logic", 0), sfinal("logic", 1, dup),
+                     ask("safety", 0), sfinal("safety", 1), vfinal(0, m, path="src/lib.py", line=1),
+                     judge(w([shid("contracts", 0, hc)])))
+        res, _ = self.record_v3(m, scr)
+        loaded = runner.load_result(self.out, res.run_id)
+        self.assertEqual(loaded.hypotheses, res.hypotheses)
+        with mock.patch.object(specialists, "merge", lambda hyps: []):
+            with self.assertRaises(PipelineError) as c:
+                runner.load_result(self.out, res.run_id)
+        self.assertEqual(c.exception.code, "checkpoint-invalid")
+        self.assertIn("merges", str(c.exception))
+
     def test_investigate_payload_contract(self):
         hid0 = "hyp_" + "a" * 16
         base = {"stage": "INVESTIGATE", "hypotheses": [], "agents": []}
         self.assertEqual(validate("StagePayload", base), [])
-        ok = dict(base, merges=[{"keptId": hid0, "mergedIds": ["hyp_" + "b" * 16], "rule": "specialist-merge@1"}])
+        ok = dict(base, merges=[{"keptId": hid0, "mergedIds": ["hyp_" + "b" * 16], "rule": "specialist-merge@2"}])
         self.assertEqual(validate("StagePayload", ok), [])
-        for bad in ([{"keptId": hid0, "mergedIds": [], "rule": "specialist-merge@1"}],
+        for bad in ([{"keptId": hid0, "mergedIds": [], "rule": "specialist-merge@2"}],
                     [{"keptId": hid0, "mergedIds": ["hyp_" + "b" * 16], "rule": "other@1"}]):
             self.assertNotEqual(validate("StagePayload", dict(base, merges=bad)), [])
 

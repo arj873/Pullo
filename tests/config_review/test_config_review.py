@@ -644,7 +644,7 @@ class Repository(RT.Base):
     def test_live_default_file_control_and_explicit_override_follow_per_role_models(self):
         self.default_file(toml(OPUS, HAIKU, SONNET))
         rep, m = self.live()
-        self.assertEqual((rep["status"], rep["providerCalls"]), ("completed", 9))       # SPECIALISTS-01: 3 x (ask, final)
+        self.assertEqual((rep["status"], rep["providerCalls"]), ("completed", 5))
         self.assertEqual(by_role(m.requests), {"investigator": {OPUS}, "verifier": {HAIKU}, "judge": {SONNET}})
         self.assertEqual(rep["reviewModels"]["source"], "app-default")
         rep2, m2 = self.live(toml(*MIX))
@@ -794,7 +794,7 @@ class Positive(PT.Rig):
     def test_default_file_control_and_explicit_override_follow_per_role_models(self):
         self.default_file(toml(OPUS, HAIKU, SONNET))
         rep, m = self.live_cfg()
-        self.assertEqual((rep["status"], rep["providerCalls"]), ("completed", 9))       # SPECIALISTS-01: 3 x (ask, final)
+        self.assertEqual((rep["status"], rep["providerCalls"]), ("completed", 5))
         self.assertEqual(by_role(m.requests), {"investigator": {OPUS}, "verifier": {HAIKU}, "judge": {SONNET}})
         self.assertEqual(rep["reviewModels"]["source"], "app-default")
         rep2, m2 = self.live_cfg(toml(*MIX))

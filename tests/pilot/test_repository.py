@@ -32,7 +32,6 @@ from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pipeline.helpers import tcid
 from tests.repoimport.helpers import ENV as GIT_ENV, git
 from tests.tools.helpers import make_case
-from tests.specialist_lanes import lanes
 
 AT = "2026-10-25T20:00:00Z"
 CASE = "o--r--1"
@@ -172,7 +171,7 @@ class Model:
             return self.fail_with
         body = json.loads(http_req.body)
         self.bodies.append(body)
-        content = lanes(self).next(body)
+        content = self.script[len(self.requests) - 1]
         d = {"id": f"gen-{len(self.requests)}", "model": SONNET, "provider": "Anthropic",
              "choices": [{"index": 0, "finish_reason": "stop",
                           "message": {"role": "assistant", "content": json.dumps(content)}}], "usage": USAGE}
@@ -264,19 +263,19 @@ class ProfileTests(unittest.TestCase):
                          ("VerifierTurn", "verifier.impact@v1"))
         self.assertEqual(repository_policy(True, impact_version=1),
                          RetrievalPolicy(investigator_prompt="investigator.impact@v1", verifier_prompt="verifier.impact@v1"))
-        # EXPLORE-FLOOR: impact@v2 (exploration floor), now selected explicitly; the verifier is unchanged
-        v2 = repository_profile(True, impact_version=2)["roles"]
-        self.assertEqual((v2["investigator"]["outputSchema"], v2["investigator"]["promptVersion"]),
-                         ("InvestigatorTurn", "investigator.impact@v2"))
-        self.assertEqual(repository_policy(True, impact_version=2),
-                         RetrievalPolicy(investigator_prompt="investigator.impact@v2", verifier_prompt="verifier.impact@v1"))
-        # SPECIALISTS-01: the default with retrieval is impact@v3 (specialist investigators); the verifier is unchanged
+        # EXPLORE-FLOOR: the default with retrieval is impact@v2 (exploration floor); the verifier is unchanged
         dflt = repository_profile(True)["roles"]
         self.assertEqual((dflt["investigator"]["outputSchema"], dflt["investigator"]["promptVersion"]),
-                         ("InvestigatorTurn", "investigator.impact@v3"))
+                         ("InvestigatorTurn", "investigator.impact@v2"))
         self.assertEqual(dflt["verifier"]["promptVersion"], "verifier.impact@v1")
-        self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v3",
+        self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v2",
                                                                   verifier_prompt="verifier.impact@v1"))
+        # SPECIALISTS-01: impact@v3 is selectable explicitly only (the default stays impact@v2)
+        v3 = repository_profile(True, impact_version=3)["roles"]
+        self.assertEqual(v3["investigator"]["promptVersion"], "investigator.impact@v3")
+        self.assertEqual(repository_policy(True, impact_version=3).specialists, ("contracts", "logic", "safety"))
+        self.assertEqual(repository_plan(repository_profile(True, impact_version=3))["specialists"],
+                         ["contracts", "logic", "safety"])
         for bad in (0, 4, True, "2", None):
             with self.assertRaises(ProfileError):
                 repository_profile(True, impact_version=bad)
@@ -495,12 +494,10 @@ class LiveTests(Base):
     def test_context_request_then_final_and_verifier_retrieval_end_to_end(self):
         plan = R.run_repository(self.w.options(), key_loader=self.boom)
         rep, model = self.live()
-        # SPECIALISTS-01: three specialists each ask then answer (the fake gives all three the same hypothesis; the
-        # two later ones are merged before VERIFY), then the verifier and the judge: 9 provider calls
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
-        self.assertEqual(rep["counts"], {"hypotheses": 3, "findings": 1, "verifications": 1, "drops": 2, "comments": 1})
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 5))
+        self.assertEqual(rep["counts"], {"hypotheses": 1, "findings": 1, "verifications": 1, "drops": 0, "comments": 1})
         self.assertEqual([b["response_format"]["json_schema"]["name"] for b in model.bodies],
-                         ["InvestigatorTurn"] * 6 + ["VerifierTurn", "VerifierTurn", "JudgeOutput"])
+                         ["InvestigatorTurn", "InvestigatorTurn", "VerifierTurn", "VerifierTurn", "JudgeOutput"])
         self.assertTrue(all(b["model"] == MODEL and "tools" not in b and b["provider"]["allow_fallbacks"] is False
                             for b in model.bodies))
         self.assertTrue(all(b["max_tokens"] <= max(OUTPUT_CAPS.values()) for b in model.bodies))
@@ -510,18 +507,17 @@ class LiveTests(Base):
         # the model-requested calls are in the trace, causally chained
         events = load_trace(rep["paths"]["trace"]).events
         req = [e for e in events if e["type"] == "tool.call" and "requestedBy" in e]
-        self.assertEqual([(e["agentId"], e["tool"]) for e in req], [("contracts", "read_file"), ("logic", "read_file"),
-                                                                    ("safety", "read_file"), ("verifier", "read_file")])
-        self.assertEqual(rep["retrieval"]["summary"]["hops"], 8)
+        self.assertEqual([(e["agentId"], e["tool"]) for e in req], [("generalist", "read_file"), ("verifier", "read_file")])
+        self.assertEqual(rep["retrieval"]["summary"]["hops"], 4)
         self.assertEqual(rep["coverage"]["scope"], "repository-with-omissions")
         self.assertEqual(self.loads, [str(self.w.env)])
 
     def test_report_costs_separate_the_ledger_from_the_gateway_estimate_and_no_key_leaks(self):
         rep, _ = self.live()
         rt = rep["costs"]["runtime"]
-        self.assertEqual(rt["ledgerCalls"]["thisCase"], 9)                  # SPECIALISTS-01: 6 investigator calls
-        self.assertEqual(rt["thisCase"]["accountable"]["usdMicros"], 9 * 4200)
-        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], BASELINE + 9 * 4200)
+        self.assertEqual(rt["ledgerCalls"]["thisCase"], 5)
+        self.assertEqual(rt["thisCase"]["accountable"]["usdMicros"], 5 * 4200)
+        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], BASELINE + 5 * 4200)
         self.assertIn("NOT a provider bill", rep["costs"]["gateway"]["note"])
         self.assertIn("reconciliation is root's", rep["costs"]["note"])
         self.assertIn("fork is not implemented", rep["forkAndStageReplay"])
@@ -565,7 +561,6 @@ class LiveTests(Base):
     def test_a_provider_failure_stops_after_one_attempt_without_retry_or_other_provider(self):
         m = self.model(fail_with=HttpResponse(500, {}, b"{}"))
         rep, _ = self.live(model=m)
-        # SPECIALISTS-01: an unknown provider outcome starts no further specialist, so still one attempt
         self.assertEqual((rep["ok"], len(m.requests)), (False, 1))
         self.assertNotEqual(rep["status"], "completed")
         self.assertEqual(rep["providerCalls"], 1)

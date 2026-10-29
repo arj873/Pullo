@@ -22,7 +22,7 @@ import json
 from reviewer.contracts import (check_finding_provenance, citable_tool_calls, is_turn_schema, require, terminal_payload,
                                 validate)
 from reviewer.contracts.budget import (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state,
-                                      investigation_limit, stage_deadline_exceeded)
+                                      investigation_limit, stage_ceiling, stage_deadline_exceeded)
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
@@ -119,7 +119,8 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
                           coverage=cdoc, retrieval=retrieval_run, impact=impact,
-                          specialists=inv if "merges" in (inv := artifacts["INVESTIGATE"]["payload"]) else None)
+                          specialists=(artifacts["INVESTIGATE"]["payload"]
+                                       if specialists.is_v3_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -168,6 +169,7 @@ class Engine:
         self.specialists = self.policy.specialists if self.impact else None
         self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
         self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
+        self._time_slice: tuple | None = None   # v3: (agent, slice end sec, stage ceiling sec) of the running agent
         self.guard = guard
         self._ordinals: dict[tuple, int] = {}
         self._gate_n: dict[str, int] = {}      # per-STAGE count of gate checks (host-stop@2 position); reset per stage run
@@ -280,6 +282,9 @@ class Engine:
         if stop == "soft-deadline":
             return "soft-deadline", typed_error("deadline-exceeded", "soft deadline: no new agent starts", stage=stage)
         msg = "hard run deadline reached" if stop == "hard-deadline" else f"{stage} stage ceiling reached"
+        if stop == "stage-deadline" and self._time_slice is not None and stage == "INVESTIGATE":
+            agent, end, ceiling = self._time_slice
+            msg = f"INVESTIGATE time slice of specialist {agent} reached ({end}s of the {ceiling}s stage ceiling)"
         return "deadline", typed_error("deadline-exceeded", msg, stage=stage)
 
     def _clock_stop(self, stage: str, stage_t0: float, new_agent: bool) -> str | None:
@@ -290,6 +295,9 @@ class Engine:
             return "hard-deadline"
         if stage_deadline_exceeded(stage, max(0.0, self.clock() - stage_t0), self.budget):
             return "stage-deadline"
+        if self._time_slice is not None and stage == "INVESTIGATE" \
+                and max(0.0, self.clock() - stage_t0) >= self._time_slice[1]:
+            return "stage-deadline"             # v3: this specialist's cumulative time slice (specialists.TIME_RULE)
         if state == "soft" and new_agent:
             return "soft-deadline"
         return None
@@ -474,7 +482,10 @@ class Engine:
             self.host.hooks.after_checkpoint(stage, dig)
 
     def empty(self, stage: str) -> dict:
-        return empty_payload(stage, self.run, self.plan, self.base_id, self.head_id)
+        p = empty_payload(stage, self.run, self.plan, self.base_id, self.head_id)
+        if stage == "INVESTIGATE" and self.specialists is not None:
+            p["merges"] = []                    # v3 payloads always carry the merge record
+        return p
 
     def artifact(self, stage, status, payload, error, inc) -> dict:
         i = STAGES.index(stage)
@@ -807,9 +818,12 @@ class Engine:
 
         * a replay failure, cancellation, an internal error or a spend-book failure (needs reconciliation) fails the
           stage at once, exactly as impact@v2 fails;
-        * any other end of one specialist without an answer is recorded in `agents` (status + error) and the next
-          specialist runs. Only a real run limit (a deadline or soft-deadline stop, a budget refusal) or an exhausted
-          retrieval counter marks INVESTIGATE incomplete; a provider/schema failure of one specialist does not;
+        * any other end of one specialist without an answer is recorded in `agents` (status + error), disclosed as an
+          INVESTIGATE incomplete entry (its run limit: deadline / soft-deadline / budget, an exhausted counter:
+          tool-calls-exhausted, anything else: agent-failure) and the next specialist runs; a systemic failure or an
+          unknown provider outcome starts no further specialist (each disclosed as agent-failure);
+        * each specialist also has a cumulative time slice of the INVESTIGATE stage ceiling (specialists.TIME_RULE),
+          enforced by the gate as a stage-deadline stop; a stopped specialist uses its floor draft when it has one;
         * when no specialist gave an answer or was exhausted, the stage fails with the first specialist's error, as
           the one v2 investigator would.
 
@@ -818,45 +832,58 @@ class Engine:
         tool_cum = specialists.cumulative(specialists.tool_pool(self.policy, self.budget,
                                                                 identity.tool_limits(self.spec).max_calls))
         spend_cum = specialists.cumulative(investigation_limit(self.budget))
+        ceiling = stage_ceiling(stage, self.budget)
+        slices = specialists.time_slices(ceiling)
         agents, hyps, inc = [], [], []
         first_err = None                     # (error, reason) of the first specialist that failed or was stopped
         usable = 0
         ctx = notes = None
+
+        def failed(agent, err, why):
+            agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+            inc.append(self._inc_doc(stage, why, f"specialist {agent}: {err['code']}: {err['message']}"))
+
         for i, agent in enumerate(self.specialists):
-            g = self.gate(stage, t0, new_agent=True)
-            if g is not None:
-                reason, err = g
-                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-                if err["code"] == "cancelled":
-                    return self._v3_failed(agents, err, reason)
-                first_err = first_err or (err, reason)
-                inc.append(self._inc_doc(stage, reason, f"specialist {agent} was not started: {err['message']}"))
-                continue
-            if ctx is None:
-                ctx, notes = self._cap_host_results(*self._investigate_context())
-            used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-            self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), spend_cum[i]
+            # the agent's cumulative time slice gates its start and each of its tool and model calls (the last
+            # agent's slice is the stage ceiling itself, so no extra stop exists for it)
+            self._time_slice = None if slices is None or slices[i] >= ceiling else (agent, slices[i], ceiling)
             try:
-                end, floor_inc = self._investigator_chain(stage, t0, ctx, notes, agent,
-                                                          prompts.investigator_v3_task(agent))
+                g = self.gate(stage, t0, new_agent=True)
+                if g is not None:
+                    reason, err = g
+                    if err["code"] == "cancelled":
+                        agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err),
+                                       "error": err})
+                        return self._v3_failed(agents, err, reason)
+                    failed(agent, err, reason)
+                    first_err = first_err or (err, reason)
+                    continue
+                if ctx is None:
+                    ctx, notes = self._cap_host_results(*self._investigate_context())
+                used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
+                self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), spend_cum[i]
+                try:
+                    end, floor_inc = self._investigator_chain(stage, t0, ctx, notes, agent,
+                                                              prompts.investigator_v3_task(agent))
+                finally:
+                    self._tool_share = self._spend_ceiling = None
             finally:
-                self._tool_share = self._spend_ceiling = None
+                self._time_slice = None
             inc.extend(floor_inc)
             if end.error is not None:
                 err, reason = end.error, (end.stop[0] if end.stop else None)
-                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
                 if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
+                    agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
                     return self._v3_failed(agents, err, reason)
                 limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
-                if limit is not None:            # a real run limit, not just one specialist's failed call
-                    inc.append(self._inc_doc(stage, limit, f"specialist {agent} ended without an answer "
-                                                           f"({err['code']}: {err['message']})"))
+                failed(agent, err, limit or "agent-failure")
                 first_err = first_err or (err, reason)
                 if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further specialist
                     for later in self.specialists[i + 1:]:
-                        agents.append({"agentId": later, "specialist": later, "status": "failed", "error": typed_error(
+                        failed(later, typed_error(
                             err["code"], f"not started: specialist {agent} failed with {err['code']} (systemic or "
-                            "unknown provider outcome), which must not be repeated by every specialist", stage=stage)})
+                            "unknown provider outcome), which must not be repeated by every specialist", stage=stage),
+                            "agent-failure")
                     break
             elif end.exhausted is not None:
                 agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
@@ -883,7 +910,7 @@ class Engine:
         """The v3 stage failure: as Engine._agent_failed, with every specialist's status so far."""
         if reason == "soft-deadline":
             self.set_fatal("INVESTIGATE", err, reason="soft-deadline")
-        return "failed", {"hypotheses": [], "agents": agents}, err, []
+        return "failed", {"hypotheses": [], "agents": agents, "merges": []}, err, []
 
     @property
     def coverage_record(self) -> dict | None:
@@ -930,9 +957,10 @@ class Engine:
                 for n, d in enumerate(drafts)], hyps
 
     def _v3_candidates(self) -> list:
-        """investigator.impact@v3: every completed specialist's accepted answer, in agent order then output order, as
-        ([(running index, hypothesis id, draft)]). The running index is unique across specialists."""
-        out = []
+        """investigator.impact@v3: every completed specialist's accepted answer, interleaved round-robin in specialist
+        order (contracts 0, logic 0, safety 0, contracts 1, ...), as [(running index, hypothesis id, draft)]. The
+        running index is unique across specialists."""
+        lanes = []
         for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
             if a["status"] != "completed":
                 continue
@@ -942,8 +970,9 @@ class Engine:
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
                            and (src is None or e["callId"] == src)
                            and (p := terminal_payload(e)) is not None), [])
-            out += [(hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
-                    for n, d in enumerate(drafts)]
+            lanes.append([(hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
+                          for n, d in enumerate(drafts)])
+        out = [lane[k] for k in range(max(map(len, lanes), default=0)) for lane in lanes if k < len(lane)]
         return [(i, hid, d) for i, (hid, d) in enumerate(out)]
 
     def _floor_source(self, agent: str | None = None) -> str | None:
@@ -967,33 +996,21 @@ class Engine:
         session = self.new_session(stage, VERIFIER_AGENT)
         stop = None                                   # (reason, error) once a global stop applies
         family = self.profile["roles"]["verifier"]["family"]
-        merged_into = ({m: g["keptId"] for g in self.artifacts["INVESTIGATE"]["payload"].get("merges", ())
-                        for m in g["mergedIds"]} if self.specialists is not None else {})
+        v3 = self.specialists is not None
+        merges = self.artifacts["INVESTIGATE"]["payload"].get("merges", ()) if v3 else ()
+        merged_into = {m: g["keptId"] for g in merges for m in g["mergedIds"]}
+        outcome: dict = {}                            # v3: verified hypothesis id -> it became a finding
         kept = 0
-        for n, hid, draft in cands:
-            if hid not in hyps:
-                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
-                              "detail": "investigator citation or location did not resolve against the pinned snapshots, "
-                                        "or lies outside the files this change modified"})
-                continue
-            if hid in merged_into:              # v3: a later specialist's duplicate; no verifier call is spent on it
-                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "merged",
-                              "detail": f"duplicate of {merged_into[hid]} ({specialists.MERGE_RULE}: same head path, "
-                                        "overlapping lines and same category; the earlier specialist's is kept)"})
-                continue
-            if self.specialists is not None:
-                kept += 1
-                if kept > specialists.MAX_VERIFY_CANDIDATES:
-                    drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
-                                  "detail": f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist "
-                                            "hypotheses; later ones (agent order, then output order) are not verified"})
-                    continue
+
+        def attempt(n, hid):
+            """Verify one candidate (gate, stop, verifier chain). -> True to stop the stage loop (fatal)."""
+            nonlocal stop
             if stop is None:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
             if self.fatal and self.fatal["status"] == "failed" and self.fatal["stage"] == stage:
-                break
+                return True
             if stop is not None:
                 reason, err = stop
                 inc.append(self._inc(stage, reason))
@@ -1001,16 +1018,61 @@ class Engine:
                     self.set_fatal(stage, err)
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
                               "detail": err["message"][:500]})
-                continue
+                return False
             rec, finding, drop, more = self.verify_one(session, n, hyps[hid], t0, family)
             inc.extend(more)
             if rec is None:
-                continue
+                return False
             records.append(rec)
+            outcome[hid] = finding is not None
             if finding is not None:
                 findings.append(finding)
             if drop is not None:
                 drops.append(drop)
+            return False
+
+        def over_cap(hid) -> bool:
+            nonlocal kept
+            if not v3:
+                return False
+            kept += 1
+            if kept <= specialists.MAX_VERIFY_CANDIDATES:
+                return False
+            drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
+                          "detail": f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist hypotheses; "
+                                    "later ones (round-robin specialist order) are not verified"})
+            return True
+
+        for n, hid, draft in cands:
+            if hid not in hyps:
+                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
+                              "detail": "investigator citation or location did not resolve against the pinned snapshots, "
+                                        "or lies outside the files this change modified"})
+                continue
+            if hid in merged_into:              # v3: a later specialist's duplicate, decided after its kept one
+                continue
+            if over_cap(hid):
+                continue
+            if attempt(n, hid):
+                break
+        else:
+            # v3: a kept hypothesis that yielded no finding hands VERIFY its first merged duplicate (within the cap);
+            # every other duplicate is dropped as merged, without a verifier call
+            index = {hid: n for n, hid, _ in cands}
+            for g in sorted(merges, key=lambda g: index.get(g["keptId"], len(index))):
+                dups = [m for m in g["mergedIds"] if m in hyps and m in index]
+                retry = bool(dups) and outcome.get(g["keptId"]) is False and stop is None
+                if retry and not over_cap(dups[0]):
+                    if attempt(index[dups[0]], dups[0]):
+                        break
+                    dups = dups[1:]
+                elif retry:
+                    dups = dups[1:]                  # over-cap already recorded its drop
+                for m in dups:
+                    drops.append({"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
+                                  "detail": f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
+                                            f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
+                                            "earlier specialist's is kept)"})
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
         if session.incomplete and not any(i["reason"] == session.incomplete for i in inc):

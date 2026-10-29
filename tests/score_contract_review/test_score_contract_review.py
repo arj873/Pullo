@@ -123,7 +123,7 @@ def budget_minus_live(b):
 
 # SPECIALISTS-01: root-declared deliberate StagePayload extension, the optional INVESTIGATE "merges" list
 # (investigator.impact@v3 specialist merge record). Subtracted below and pinned on its own.
-MERGES_DIGEST = "sha256:d0cc13a281b31a82e20d291bbea695f1c92f86652401a756d57c9b5705c9540c"
+MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579df0e7a22"
 
 
 def stagepayload_minus_live(sp):

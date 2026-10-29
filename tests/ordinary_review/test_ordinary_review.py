@@ -30,7 +30,6 @@ from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.openrouter import HttpResponse
 from tests.pilot.helpers import AUTH, SONNET
 from tests.repoimport.helpers import git
-from tests.specialist_lanes import lanes
 
 ROOT = Path(__file__).resolve().parents[2]
 CASE = "acme--widget--42"
@@ -133,8 +132,7 @@ class World:
 class Wire:
     """Fake OpenRouter: investigator, verifier and judge each answer at hop 0. EXPLORE-FLOOR: the pilot default
     investigator.impact@v2 treats the hop-0 investigator answer as a draft and sends one continuation, which this
-    wire answers with the same final. SPECIALISTS-01: under the default investigator.impact@v3 each of the three
-    specialists does the same (tests.specialist_lanes), so 3 x 2 + verifier + judge = 8 provider calls."""
+    wire answers with the same final (so 4 provider calls)."""
 
     def __init__(self, head_snapshot, *, fail=None, interrupt_at=None):
         self.requests, self.bodies, self.fail, self.interrupt_at = [], [], fail, interrupt_at
@@ -158,7 +156,7 @@ class Wire:
         if self.fail is not None:
             return self.fail
         self.bodies.append(json.loads(req.body))
-        content = lanes(self).next(self.bodies[-1])
+        content = self.script[len(self.requests) - 1]
         d = {"id": f"gen-o{len(self.requests)}", "model": SONNET, "provider": "Anthropic",
              "choices": [{"index": 0, "finish_reason": "stop",
                           "message": {"role": "assistant", "content": json.dumps(content)}}], "usage": USAGE}
@@ -340,18 +338,18 @@ class Composed(Base):
     def test_live_uses_the_plan_first_wire_caps_no_fallback_and_binds_the_sidecar(self):
         plan = O.run_ordinary(self.w.options(), key_loader=self.no_key)
         rep, wire = self.run_live()
-        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 8))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 4))
         self.assertEqual(plan["plan"]["firstRequest"]["bodySha256"],
                          __import__("hashlib").sha256(wire.requests[0].body).hexdigest())
         models = {r: v["model"] for r, v in rep["reviewModels"]["roles"].items()}
-        for b, role in zip(wire.bodies, ("investigator",) * 6 + ("verifier", "judge")):
+        for b, role in zip(wire.bodies, ("investigator", "investigator", "verifier", "judge")):
             self.assertEqual(b["model"], models[role])
             self.assertNotIn("tools", b)
             self.assertIs(b["provider"]["allow_fallbacks"], False)
         self.assertEqual(self.keys, [str(self.w.env)])
         rt = rep["costs"]["runtime"]
-        self.assertEqual(rt["ledgerCalls"]["thisCase"], 8)
-        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], COMMITTED + 8 * PER_CALL)
+        self.assertEqual(rt["ledgerCalls"]["thisCase"], 4)
+        self.assertEqual(rt["cumulative"]["accountable"]["usdMicros"], COMMITTED + 4 * PER_CALL)
         out = Path(self.w.out)
         on_disk = json.loads((out / "report.json").read_text())
         origin = json.loads((out / "origin.json").read_text())

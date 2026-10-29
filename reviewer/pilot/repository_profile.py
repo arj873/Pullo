@@ -5,11 +5,11 @@ the deadlines are never re-declared. `retrieval=True` switches the investigator 
 their retrieval prompts; the judge stays the plain review-cost JudgeOutput. There is no host option to widen anything.
 
 `impact=True` (the default with retrieval) selects impact mode: the PREPARE impact map and the find_references tool,
-with the same numeric caps. `impact_version` picks the investigator: 3 (the default) is investigator.impact@v3, three
-specialist investigators (contracts, logic, safety) run in turn, each a v2 investigator with its own lens paragraph,
-sharing the v2 investigator budgets (reviewer.pipeline.specialists); its Plan lists those specialists. 2 is exactly the
-EXPLORE-FLOOR profile, Plan and policy (investigator.impact@v2 with the engine-enforced exploration floor: one
-guaranteed extra prompt, not guaranteed tool use), 1 is exactly the IMPACT-01 profile and policy (investigator.impact@v1,
+with the same numeric caps. `impact_version` picks the investigator: 2 (the default) is exactly the EXPLORE-FLOOR
+profile, Plan and policy (investigator.impact@v2 with the engine-enforced exploration floor: one guaranteed extra prompt,
+not guaranteed tool use). 3 (explicit only, until measured) is investigator.impact@v3: three specialist investigators
+(contracts, logic, safety) run in turn, each a v2 investigator with its own lens paragraph, sharing the v2 investigator
+budgets (reviewer.pipeline.specialists); its Plan lists those specialists. 1 is exactly the IMPACT-01 profile and policy (investigator.impact@v1,
 same digests). The verifier is verifier.impact@v1 in all three. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
 
@@ -39,7 +39,7 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
 
 
 IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT}
-DEFAULT_IMPACT_VERSION = 3
+DEFAULT_IMPACT_VERSION = 2
 
 
 def _prompts(impact: bool, impact_version: int = DEFAULT_IMPACT_VERSION) -> tuple[str, str]:
@@ -53,7 +53,7 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
                        impact: bool = True, impact_version: int = DEFAULT_IMPACT_VERSION) -> dict:
     """`experiment` (default baseline) opts into context-check@1: only the verifier and judge prompt ids change, to the
     experiment's; models, schemas, caps, tools, timeouts and retries are the baseline's. `impact` (default on) only
-    matters with retrieval: it selects the impact investigator/verifier prompt ids (`impact_version` 3, 2 or 1)."""
+    matters with retrieval: it selects the impact investigator/verifier prompt ids (`impact_version` 2, 3 or 1)."""
     check_experiment(experiment, retrieval)
     profile = live_profile(None if models is not None else MODEL, models=models)
     profile["id"] = PROFILE_ID

@@ -1377,12 +1377,13 @@ AgentStatus = Obj(required={"agentId": Slug, "specialist": Slug,
                   optional={"error": TypedError})
 
 
-SPECIALIST_MERGE_VERSION = "specialist-merge@1"
+SPECIALIST_MERGE_VERSION = "specialist-merge@2"
 SpecialistMerge = Obj(
     required={"keptId": Id("hyp"), "mergedIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
               "rule": Const(SPECIALIST_MERGE_VERSION)},
-    description="investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path, "
-                "overlapping lines, same category). They stay in `hypotheses`; VERIFY drops them as merged.")
+    description="investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path and "
+                "category, start lines within 3). They stay in `hypotheses`; VERIFY verifies the first one only when "
+                "keptId yields no finding and drops the others as merged.")
 
 
 def _payload(stage: str, required: dict, optional: dict | None = None) -> Obj:

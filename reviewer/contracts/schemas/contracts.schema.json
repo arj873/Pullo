@@ -4498,7 +4498,7 @@
             "merges": {
               "items": {
                 "additionalProperties": false,
-                "description": "investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path, overlapping lines, same category). They stay in `hypotheses`; VERIFY drops them as merged.",
+                "description": "investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path and category, start lines within 3). They stay in `hypotheses`; VERIFY verifies the first one only when keptId yields no finding and drops the others as merged.",
                 "properties": {
                   "keptId": {
                     "pattern": "^(?:hyp_[0-9a-f]{16})$",
@@ -4515,7 +4515,7 @@
                     "uniqueItems": true
                   },
                   "rule": {
-                    "const": "specialist-merge@1"
+                    "const": "specialist-merge@2"
                   }
                 },
                 "required": [
