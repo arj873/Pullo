@@ -281,7 +281,10 @@ class ProfileTests(unittest.TestCase):
                          "investigator.impact@v4")
         self.assertEqual(repository_plan(repository_profile(True, impact_version=4))["specialists"],
                          ["contracts", "logic", "safety", "diff-sweep"])
-        for bad in (0, 5, True, "2", None):
+        # SPECIALISTS-V5-01: impact@v5 (five specialist lanes) is explicit only as well
+        self.assertEqual(repository_plan(repository_profile(True, impact_version=5))["specialists"],
+                         ["contracts", "logic", "safety", "consistency", "hygiene"])
+        for bad in (0, 6, True, "2", None):
             with self.assertRaises(ProfileError):
                 repository_profile(True, impact_version=bad)
         self.assertIsNone(repository_policy(False))

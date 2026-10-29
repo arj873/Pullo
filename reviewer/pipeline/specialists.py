@@ -61,14 +61,15 @@ def is_v3_plan(plan: dict) -> bool:
 
 
 def is_specialist_plan(plan: dict) -> bool:
-    """A Plan whose INVESTIGATE runs the specialists: impact@v3, or impact@v4 (the specialists then the diff-shard
-    sweep marker, see reviewer.pipeline.sweeps.PLAN_MARKER)."""
-    return is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
+    """A Plan whose INVESTIGATE runs the specialists: impact@v3, impact@v4 (the specialists then the diff-shard sweep
+    marker, see reviewer.pipeline.sweeps.PLAN_MARKER) or impact@v5 (five specialist lanes)."""
+    return (is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
+            or plan.get("specialists") == list(prompts.V5_AGENTS))      # impact@v5: five lanes (pipeline.lanes)
 
 
-def time_slices(ceiling_sec: int | None) -> list[int] | None:
+def time_slices(ceiling_sec: int | None, k: int = len(AGENTS)) -> list[int] | None:
     """Cumulative per-agent INVESTIGATE time ceilings (seconds since the stage started), or None without a ceiling."""
-    return None if ceiling_sec is None else cumulative(ceiling_sec)
+    return None if ceiling_sec is None else cumulative(ceiling_sec, k)
 
 
 def cumulative(total: int, k: int = len(AGENTS)) -> list[int]:

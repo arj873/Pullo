@@ -99,6 +99,20 @@ class ImpactVersionOption(TBH.Base):
         self.assertEqual(plan["budget"]["maxToolCalls"], 400)
         self.assertIn("investigator: investigator.impact@v4", B.render(rep))
 
+    def test_5_selects_the_five_specialist_lanes(self):
+        rep = self.plan(impact_version=5)
+        p = rep["plan"]
+        self.assertEqual((rep["status"], rep["ok"]), ("planned", True))
+        self.assertEqual(p["investigator"], {"impactVersion": 5, "promptVersion": "investigator.impact@v5",
+                                             "specialists": list(prompts.V5_AGENTS)})
+        self.assertEqual(p["capturedCount"], 5)                                      # one first request per lane
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V3_GOLD["benchFirst"])  # contracts: the v3 bytes
+        profile, plan, policy, ident = self.parts(impact_version=5)
+        self.assertNotEqual(digest(profile), IMPACT_V3_GOLD["profileOn"])
+        self.assertNotEqual(ident, self.parts(impact_version=4)[3])
+        self.assertEqual(plan["budget"]["maxToolCalls"], 320)
+        self.assertIn("investigator: investigator.impact@v5", B.render(rep))
+
     def test_1_selects_the_impact01_arm(self):
         p = self.plan(impact_version=1)["plan"]
         self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_GOLD["benchFirst"])
@@ -139,7 +153,7 @@ class ImpactVersionOption(TBH.Base):
 
     def test_invalid_versions_are_refused_before_ingestion_key_state_or_output(self):
         before = self.w.state_bytes()
-        bad = (0, 5, -1, 99, True, False, 2.0, "2", "v3", [3], 4.0)
+        bad = (0, 6, -1, 99, True, False, 2.0, "2", "v3", [3], 4.0)
         msgs = set()
         for v in bad:
             with self.subTest(v=v):
@@ -148,13 +162,13 @@ class ImpactVersionOption(TBH.Base):
                 with self.assertRaises(B.BenchmarkLaunchError):
                     B.run_benchmark(self.w.options(impact_version=v, store=str(self.tmp / "missing"),
                                                    cutoff_proof=str(self.tmp / "missing.json")), key_loader=self.boom)
-        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4] (or unset for the profile default)"})
+        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4, 5] (or unset for the profile default)"})
         self.assertEqual(self.refused(impact_version=3, retrieval=False),
                          "impact_version needs the retrieval profile (--retrieval on)")
         self.assertEqual(self.w.state_bytes(), before)
         self.w.seed()
         seeded = self.w.state_bytes()
-        for over in ({"impact_version": 5}, {"impact_version": True}, {"impact_version": 2, "retrieval": False}):
+        for over in ({"impact_version": 6}, {"impact_version": True}, {"impact_version": 2, "retrieval": False}):
             with self.subTest(live=over):
                 with self.assertRaises(B.BenchmarkLaunchError):
                     B.run_benchmark(self.w.live_options(**over), transport=self.model(), key_loader=self.boom)
@@ -169,9 +183,9 @@ class ImpactVersionOption(TBH.Base):
 
     def test_cli_flag_parses_the_known_versions_and_passes_them_through(self):
         ap = B._parser()
-        for v in (1, 2, 3, 4):
+        for v in (1, 2, 3, 4, 5):
             self.assertEqual(ap.parse_args(self.cli_base() + ["--impact-version", str(v)]).impact_version, v)
-        for v in ("0", "5", "v3", "two"):
+        for v in ("0", "6", "v3", "two"):
             with self.subTest(v=v), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 ap.parse_args(self.cli_base() + ["--impact-version", v])
         seen = []

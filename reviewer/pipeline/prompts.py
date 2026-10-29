@@ -385,6 +385,7 @@ def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMP
     templates = (IMPACT_V2_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V2_PROMPT
                  else IMPACT_V3_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V3_PROMPT
                  else IMPACT_V4_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V4_PROMPT
+                 else IMPACT_V5_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT
                  else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
@@ -571,6 +572,70 @@ def disposition_block(missing: list[str], earlier: dict | None) -> dict:
                                   for h in (earlier or {"hypotheses": []})["hypotheses"]]}
 
 
+# ---------------------------------------------------------------- impact mode v5: investigator.impact@v5
+#
+# The three v3 specialists with their lens texts UNCHANGED (byte for byte), plus two lanes for generic kinds of defects
+# a broad review skims: `consistency` (parallel statements, sibling code paths, helper branches under each flag) and
+# `hygiene` (state refresh, defaults, cleanup on early exit, test precision). Engine rules: reviewer.pipeline.lanes.
+# Every v1-v4 text above is unchanged; the texts below are bound into the config identity through
+# impact_template_digests(V5).
+
+INVESTIGATOR_IMPACT_V5_PROMPT = "investigator.impact@v5"
+V5_LENS_VERSION = "specialist-lenses@2"
+_V5_ONE_DEFECT = (" Give one hypothesis per defect with all of its evidence; do not report the same defect at the same "
+                  "place several times in different words.")
+V5_EXTRA_LENSES = (
+    ("consistency", (
+        "Specialist lens (consistency with parallel and sibling code): you are one of five specialist investigators who "
+        "review this change one after another with the same context and tools; the others focus on contracts and "
+        "dependents, on logic and edge cases, on failure paths and safety, and on state, defaults and test precision. "
+        "Your focus is changed code that should mirror other code. (1) Enumerate every group of repeated or parallel "
+        "statements in and around the changed lines: validation or permission checks, field-by-field mappings, copies "
+        "and conversions, serialisers and parsers, symmetric pairs (encode and decode, open and close, add and remove, "
+        "to and from) and blocks copied from nearby code. Compare each group operand by operand: a name, field, key, "
+        "index or argument that is used twice where a different one was meant, or one that no line covers. (2) For each "
+        "new or changed handler, sender, endpoint, job, command, migration or subclass, find its existing siblings (with "
+        "list_files, search_literal or find_references in the same module, registry or directory) and read them with "
+        "read_file even though they are unchanged. List the guards, flags, permission checks, opt-outs, feature "
+        "switches, limits and cleanup the siblings apply and check that the new path applies each of them or clearly "
+        "has no need to. (3) For each value the change passes to a helper, open the helper and follow every branch "
+        "that a configuration flag, setting, mode or state selects, and check that the value is valid on each branch, "
+        "not only on the default one. Report a defect only with citations of both the changed line and the sibling or "
+        "helper code that shows the mismatch, and say in mechanism which sibling or branch differs and how. A "
+        "difference that the code deliberately handles elsewhere is not a defect; a stylistic difference is not a "
+        "defect. If you see clear evidence of a defect outside your focus, report it as well; the host merges "
+        "duplicate hypotheses across specialists." + _V5_ONE_DEFECT)),
+    ("hygiene", (
+        "Specialist lens (state, defaults and test precision): you are one of five specialist investigators who review "
+        "this change one after another with the same context and tools; the others focus on contracts and dependents, "
+        "on logic and edge cases, on failure paths and safety, and on consistency with parallel and sibling code. Your "
+        "focus is small but concrete defects that broad reviews skim. (1) Loops, polls and retries whose condition or "
+        "exit reads state that the body never refreshes or re-reads, counters or deadlines that never advance, and "
+        "retries that repeat the same failing input. (2) Wrong initial or default values: a variable, field, parameter "
+        "default or configuration default that is wrong for the first iteration, the empty case or the unset case. "
+        "(3) Resources, locks, temporary state or partial writes that are not released or rolled back on an early "
+        "return, a break or an exception path that the change adds. (4) Tests that the change adds or edits which "
+        "cannot fail or test the wrong thing: assertions that are always true or compare a value with itself, "
+        "assertions on the wrong object, an expected exception caught by a type so broad that the test passes for a "
+        "different failure, mocks that replace the code under test, and calls or awaits that are missing so the "
+        "assertion never runs. A test that merely could check more is not a defect. Report such "
+        "defects even when their severity is low (P2), but only as concrete, verifiable defects with cited lines and a "
+        "statement of the wrong behaviour they cause or hide. Never report style, naming, formatting, missing comments, "
+        "general refactoring or a wish for more tests. If you see clear evidence of a defect outside your focus, report "
+        "it as well; the host merges duplicate hypotheses across specialists." + _V5_ONE_DEFECT)),
+)
+V5_AGENTS = SPECIALIST_AGENTS + tuple(a for a, _ in V5_EXTRA_LENSES)
+IMPACT_V5_TEMPLATES = {**IMPACT_V3_TEMPLATES, "lensesV5": [[a, t] for a, t in V5_EXTRA_LENSES]}
+
+
+def specialist_task(agent: str) -> str:
+    """The task of one specialist lane: the v3 lens tasks unchanged, the v5 lanes' lenses appended the same way."""
+    lens = dict(V5_EXTRA_LENSES).get(agent)
+    if lens is None:
+        return investigator_v3_task(agent)
+    return INVESTIGATOR_IMPACT_V2_TASK + " " + lens
+
+
 # ---------------------------------------------------------------- opt-in experiment: context-check@1
 #
 # A prompt-only arm on the EXISTING VerifierTurn / JudgeOutput schemas. It is selected only by an explicit prompt id on
@@ -639,7 +704,7 @@ def verifier_task(prompt_version: str) -> str:
 def investigator_task(prompt_version: str) -> str:
     """The retrieval investigator task for a policy prompt id (impact mode v1/v2 or the frozen retrieval@2 text).
     investigator.impact@v3 has one task per specialist: investigator_v3_task(agent)."""
-    if prompt_version in (INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT):
+    if prompt_version in (INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT):
         raise ValueError(f"{prompt_version} has one task per specialist; use investigator_v3_task(agent) "
                          "(and SWEEP_TASK for a v4 diff-shard sweep)")
     if prompt_version == INVESTIGATOR_IMPACT_V2_PROMPT:

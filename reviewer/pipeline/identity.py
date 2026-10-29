@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import prompts, repocov, retrieval, specialists, sweeps
+from . import lanes, prompts, repocov, retrieval, specialists, sweeps
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -157,7 +157,9 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
-        if pol.specialists is not None:          # investigator.impact@v3/@v4 only => v1/v2 run ids are unchanged
+        if pol.five_lanes:                       # investigator.impact@v5 only => v1-v4 run ids are unchanged
+            extra["impact"]["specialists"] = lanes.identity_doc(pol, spec.plan["budget"], lim.max_calls)
+        elif pol.specialists is not None:        # investigator.impact@v3/@v4 only => v1/v2 run ids are unchanged
             extra["impact"]["specialists"] = specialists.identity_doc(pol, spec.plan["budget"], lim.max_calls)
         if pol.diff_sweep:                       # investigator.impact@v4 only => v1/v2/v3 run ids are unchanged
             extra["impact"]["sweep"] = sweeps.identity_doc(pol, spec.plan["budget"], lim.max_calls)

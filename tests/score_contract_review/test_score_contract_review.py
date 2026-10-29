@@ -128,6 +128,9 @@ MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579
 # SHARD-COVERAGE-01 (declared for root acceptance): deliberate additive extensions for investigator.impact@v4 diff-shard
 # sweeps: the optional INVESTIGATE "sweep" (SweepCoverage) and the TraceEvent variants "sweep.disposition" and
 # "investigate.coverage". Subtracted below and pinned on their own; LIVE_TRACEEVENT_DIGEST is repinned.
+# SPECIALISTS-V5-01 (declared for root acceptance): the optional INVESTIGATE "collapses" list (impact@v5 near-duplicate
+# cap record). Subtracted below and pinned on its own.
+COLLAPSES_DIGEST = "sha256:4b85a22d7e890badc87c20cd9f2fcf8db1f4550ac82e81bf806c35cd4a3bd831"
 SWEEP_PAYLOAD_DIGEST = "sha256:5c4cf79577bdaed3f0eca43e32481bfd376e9fad77a8af75a6a2427c092a8fc9"
 SWEEP_COVERAGE_DEF_DIGEST = "sha256:2171ba69959becaf36cef2553d5d5dcfa50b20cc197c6e382074c73ed5135a18"
 SWEEP_VARIANT_DIGESTS = {"sweep.disposition": "sha256:00f881788c603c8640139bafc05d13b8ae8303b4d4793497f9ff620e6f643279",
@@ -141,6 +144,8 @@ def stagepayload_minus_live(sp):
     del inv[0]["properties"]["merges"]
     assert "sweep" in inv[0]["properties"] and "sweep" not in inv[0]["required"]
     del inv[0]["properties"]["sweep"]
+    assert "collapses" in inv[0]["properties"] and "collapses" not in inv[0]["required"]
+    del inv[0]["properties"]["collapses"]
     return sp
 
 
@@ -312,6 +317,7 @@ class L1L2Compatibility(Base):
         inv = next(v for v in REGISTRY["StagePayload"].to_json()["oneOf"]
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(C.digest(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
+        self.assertEqual(C.digest(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
         self.assertEqual(C.digest(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)
