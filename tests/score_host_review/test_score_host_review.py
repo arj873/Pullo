@@ -6,6 +6,9 @@ import unittest
 from tests.score_host_review.common import CFG, EVR, EVR2, OPUS, ROOT, S, SCOPE, SENT, URL, Env
 from reviewer.runtime import RuntimeLedger
 from reviewer.runtime.catalog import worst_case_router_micros
+from reviewer.runtime.scoring_budget import SCORING_CATEGORY_CAP_MAX
+
+NEAR_CAP = SCORING_CATEGORY_CAP_MAX - 300_000          # prior scoring spend: phase 1/2 fit, the 12-pair set does not
 
 NAMES = lambda t: [b["response_format"]["json_schema"]["name"] for b in t.bodies]  # noqa: E731
 
@@ -32,11 +35,11 @@ class Boundaries(Env):
         self.assertEqual(len(pairs), 12)
         # independent exact worst case of the 12 wire bodies actually sent (compact JSON bytes, body's own max_tokens)
         W = sum(worst_case_router_micros(b["model"], len(json.dumps(b, separators=(",", ":"), ensure_ascii=False).encode()), b["max_tokens"]) for b in pairs)
-        refused = self.run_with_prior(7_700_000)
+        refused = self.run_with_prior(NEAR_CAP)
         self.assertEqual(refused["fitRefusal"], "scoring-cap")
-        c4 = self.ledger.totals("scoring")["committedUsdMicros"] - 7_700_000        # actual committed by the 4 phase-1/2 calls
+        c4 = self.ledger.totals("scoring")["committedUsdMicros"] - NEAR_CAP        # actual committed by the 4 phase-1/2 calls
         self.assertGreater(c4, 0)
-        edge = 8_000_000 - c4 - W
+        edge = SCORING_CATEGORY_CAP_MAX - c4 - W
         self.assertGreater(edge, 0)
         ok = self.run_with_prior(edge)                                              # exactly fits -> admitted, 12 pairs sent
         self.assertTrue(ok["complete"], ok["fitRefusal"])
@@ -92,8 +95,8 @@ class Boundaries(Env):
         self.run_with_prior(0)
         pairs = [b for b in self.transport.bodies if b["response_format"]["json_schema"]["name"] == "ScorePair"]
         W = sum(worst_case_router_micros(b["model"], len(json.dumps(b, separators=(",", ":"), ensure_ascii=False).encode()), b["max_tokens"]) for b in pairs)
-        self.run_with_prior(7_700_000)
-        c4 = self.ledger.totals("scoring")["committedUsdMicros"] - 7_700_000
+        self.run_with_prior(NEAR_CAP)
+        c4 = self.ledger.totals("scoring")["committedUsdMicros"] - NEAR_CAP
 
         def run(review):
             self.setUp()

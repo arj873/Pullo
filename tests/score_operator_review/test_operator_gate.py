@@ -52,7 +52,7 @@ class Positive(Fixture):
 
     def test_budget_constants_pinned(self):
         from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
-        self.assertEqual((H.PER_RUN_MAX, SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (4_000_000, 8_000_000, 20_000_000))
+        self.assertEqual((H.PER_RUN_MAX, SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (4_000_000, 16_000_000, 20_000_000))
 
     def test_competitor_title_and_blank_pullo_title_refused(self):
         from reviewer.score_render import adapt

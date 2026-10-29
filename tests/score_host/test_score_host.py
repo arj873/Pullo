@@ -14,9 +14,10 @@ from pathlib import Path
 from reviewer.benchmark.model import Golden, RawComment, ScorerCase, ToolReview
 from reviewer.contracts.budget import authorization_digest
 from reviewer.gateway import SpendBook, trusted_authorization
+from reviewer.runtime.scoring_budget import SCORING_CATEGORY_CAP_MAX
 from reviewer import score_host as S
 from reviewer.runtime import RuntimeLedger, Secret
-from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS
+from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS, worst_case_router_micros
 from reviewer.score_config import load_score_config
 from tests.score_gateway import helpers as H
 
@@ -66,11 +67,27 @@ class Env(unittest.TestCase):
         b = baseline or S.LaunchBaseline(tuple(declared if declared is not None else [(case.url, t) for t in tools]),
                                          cfg.digest, tuple(sorted(cfg.prompt_sha256.items())), sc, al)
         self.transport = transport or S.CaptureTransport()
-        return S.ScoreHost(cfg, b, units, profile_ref="pullo-score@1", price=PRICE, auth=h, book=self.book, ledger=self.ledger,
+        return S.ScoreHost(cfg, b, units, profile_ref="pullo-score@2", price=PRICE, auth=h, book=self.book, ledger=self.ledger,
                            key=KEY, transport=self.transport, store_dir=self.store, eval_run_id=evr, clock=NOW, run_ceiling=run_ceiling)
 
     def intents(self):
         return [json.loads(x) for x in self.ledger_path.read_text().splitlines() if '"intent"' in x] if self.ledger_path.exists() else []
+
+
+class PairCapFit(Env):
+    def test_complete_set_fit_uses_the_1024_pair_cap(self):
+        rep = self.host().execute_offline()
+        self.assertTrue(rep["complete"])
+        pairs = [b for b in self.transport.bodies if b["response_format"]["json_schema"]["name"] == "ScorePair"]
+        self.assertEqual(len(pairs), 12)
+        self.assertEqual({b["max_tokens"] for b in pairs}, {1024})
+        sizes = [len(json.dumps(b, separators=(",", ":"), ensure_ascii=False).encode()) for b in pairs]
+        w1024 = sum(worst_case_router_micros(OPUS, n, 1024) for n in sizes)
+        w256 = sum(worst_case_router_micros(OPUS, n, 256) for n in sizes)
+        self.assertEqual(rep["fitTotals"]["adapterWorstCaseUsdMicros"], w1024)
+        out = ALLOWED_ROUTER_MODELS[OPUS]["output"]
+        self.assertEqual(w1024 - w256, 12 * (768 * out // 1_000_000))                 # exactly 768 more output tokens per pair
+        self.assertEqual(rep["fitTotals"]["pairs"], 12)
 
 
 class Composition(Env):
@@ -119,10 +136,10 @@ class Composition(Env):
         self.assertFalse((self.store / f"{h.run_id}.documents.json").exists())
 
     def test_complete_set_does_not_fit_sends_zero_pairs(self):
-        # known scoring spend 7.7M: extraction+dedup fit, the exact worst-case 12-pair set exceeds the 8M scoring sub-cap
+        # known scoring spend = cap - 0.3M: extraction+dedup fit, the exact worst-case 12-pair set exceeds the scoring sub-cap
         L = RuntimeLedger(self.ledger_path, 50_000_000)
         self.assertIsNone(L.admit("old", 1, model=OPUS, **SCOPE))
-        L.finish("old", outcome="processed", routerCostUsdMicros=7_700_000, tokenPricedUsdMicros=7_700_000,
+        L.finish("old", outcome="processed", routerCostUsdMicros=SCORING_CATEGORY_CAP_MAX - 300_000, tokenPricedUsdMicros=SCORING_CATEGORY_CAP_MAX - 300_000,
                  upstreamInferenceCostUsdMicros=None, isByok=None)
         h = self.host()
         rep = h.execute_offline()

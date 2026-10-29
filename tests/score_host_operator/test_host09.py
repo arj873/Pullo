@@ -48,7 +48,7 @@ class Canary(Fixture):
         self.assertEqual((rep["probeCalls"], rep["probes"], rep["canaryOk"]), ({"extractor": 1, "deduper": 1, "matcher": 1}, {"extractor": "ok", "deduper": "ok", "matcher": "ok"}, True))
         self.assertEqual((rep["realScoring"], rep["headline"]), (False, None))
         self.assertEqual({b["model"] for b in self.cap.bodies}, {"anthropic/claude-opus-5.5"})
-        self.assertEqual([b["max_tokens"] for b in self.cap.bodies], [8000, 4000, 256])           # same per-role caps as the campaign
+        self.assertEqual([b["max_tokens"] for b in self.cap.bodies], [8000, 4000, 1024])           # same per-role caps as the campaign
         for b in self.cap.bodies:
             for k in ("temperature", "top_p", "top_k", "reasoning", "effort", "route", "fallbacks", "tools"):
                 self.assertNotIn(k, b)

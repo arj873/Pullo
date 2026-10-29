@@ -17,8 +17,13 @@ from .benchmark import score_prompts as P
 
 SCHEMA = "pullo-score-config@1"
 MODEL = "anthropic/claude-opus-5.5"
-# Policy maxima (score-policy: tighter is allowed, wider is refused).
-MAX_OUTPUT = {"extract": 8000, "dedup": 4000, "pair": 256}
+# Policy maxima (score-policy: tighter is allowed, wider is refused). Opus 5.5 reasoning tokens count against max_tokens:
+# the pair cap was 256 until 2026-10-29, when 3 of 492 real pair calls stopped at finish_reason "length" with 255-256
+# reasoning tokens and no JSON. It is 1024 since (profile pullo-score@2); extract and dedup are unchanged.
+MAX_OUTPUT = {"extract": 8000, "dedup": 4000, "pair": 1024}
+# The ScoreProfile version. Bumped with any change to the profile caps so traces/witnesses of another cap never match.
+PROFILE_VERSION = 2
+PROFILE_REF = f"pullo-score@{PROFILE_VERSION}"
 MAX_TIMEOUT_SEC = 600
 MAX_LIMITS = {"max_candidates_per_tool_case": 200, "max_pairs_per_tool_case": 2000, "max_calls_per_score_run": 2002}
 EXACT_LIMITS = {"skip_dedup_below": 2, "min_extract_chars": 20}
@@ -61,7 +66,7 @@ class ScoreConfig:
     def digest(self) -> str:
         return "sha256:" + hashlib.sha256(json.dumps(self.canonical(), sort_keys=True).encode()).hexdigest()
 
-    def profile(self, price: dict, *, profile_id: str = "pullo-score", version: int = 1) -> dict:
+    def profile(self, price: dict, *, profile_id: str = "pullo-score", version: int = PROFILE_VERSION) -> dict:
         """ScoreProfile document. Params carry ONLY the output cap: no temperature/top_p/top_k/effort, never null."""
         roles = {}
         for stage, role in P.ROLE_OF.items():

@@ -24,7 +24,7 @@ assert Path(A.__file__).resolve().is_relative_to(Path(SRC).resolve()), "producer
 ROOT = Path(SRC)
 CONFIG = ROOT / "pullo-score.toml"
 CFG = load_score_config(CONFIG)
-REF = "pullo-score@1"
+REF = "pullo-score@2"
 URL = "https://example.invalid/case/9"
 LONG = "Independent invented comment long enough to extract: "
 # bench.extract@v3 answers segment ranges, so every invented comment carries one line (= one segment) per fragment the

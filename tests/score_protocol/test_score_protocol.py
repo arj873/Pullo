@@ -28,7 +28,7 @@ CONFIG = ROOT / "pullo-score.toml"
 CFG = load_score_config(CONFIG)
 PRICE = H.PROFILE["roles"]["extractor"]["price"]
 PROFILE = CFG.profile(PRICE)
-REF = "pullo-score@1"
+REF = "pullo-score@2"
 SENT = "SENTINEL_RAW_TEXT_7f3a"
 LONG = "This comment is long enough to be extracted: "
 JUDGE = {"model": "anthropic/claude-opus-5.5", "extractionPrompt": P.VERSIONS["extract"], "dedupPrompt": P.VERSIONS["dedup"],
@@ -79,7 +79,7 @@ def two_cands(request, ordinal):          # bench.extract@v3 references: the who
 
 class Config(unittest.TestCase):
     def test_file_loads_and_is_exactly_the_policy(self):
-        self.assertEqual(CFG.max_output, {"extract": 8000, "dedup": 4000, "pair": 256})
+        self.assertEqual(CFG.max_output, {"extract": 8000, "dedup": 4000, "pair": 1024})
         self.assertEqual((CFG.max_candidates, CFG.max_pairs, CFG.max_calls, CFG.skip_dedup_below, CFG.min_extract_chars), (200, 2000, 2002, 2, 20))
         self.assertEqual(CFG.digest, load_score_config(CONFIG).digest)
 
@@ -91,7 +91,8 @@ class Config(unittest.TestCase):
                "policy not omit": base.replace('policy = "omit"', 'policy = "default"'),
                "widened extract": base.replace("max_output_tokens = 8000", "max_output_tokens = 8001"),
                "bool cap": base.replace("max_output_tokens = 4000", "max_output_tokens = true"),
-               "zero cap": base.replace("max_output_tokens = 256", "max_output_tokens = 0"),
+               "zero cap": base.replace("max_output_tokens = 1024", "max_output_tokens = 0"),
+               "widened pair": base.replace("max_output_tokens = 1024", "max_output_tokens = 1025"),
                "wide timeout": base.replace("timeout_sec = 60", "timeout_sec = 601"),
                "wide candidates": base.replace("max_candidates_per_tool_case = 200", "max_candidates_per_tool_case = 201"),
                "wide pairs": base.replace("max_pairs_per_tool_case = 2000", "max_pairs_per_tool_case = 2001"),
@@ -105,6 +106,29 @@ class Config(unittest.TestCase):
             with self.subTest(name), self.assertRaises(ScoreConfigError) as cm:
                 parse_score_config(text)
             self.assertNotIn("8001", str(cm.exception))                      # fixed text, no value echo
+
+    def test_pair_cap_1024_loads_wider_refused_and_versioned(self):
+        # Opus 5.5 reasoning tokens count against max_tokens; 256 let real pair calls stop at finish_reason "length".
+        from reviewer import score_config as SC
+        from reviewer import score_host as SH
+        self.assertEqual(SC.MAX_OUTPUT, {"extract": 8000, "dedup": 4000, "pair": 1024})
+        base = CONFIG.read_text()
+        self.assertIn("[caps.pair]\nmax_output_tokens = 1024\n", base)
+        self.assertEqual(parse_score_config(base).max_output["pair"], 1024)
+        for wide in (1025, 2048, 4096):
+            with self.subTest(wide=wide), self.assertRaises(ScoreConfigError) as cm:
+                parse_score_config(base.replace("max_output_tokens = 1024", f"max_output_tokens = {wide}"))
+            self.assertEqual(str(cm.exception), "an output cap is malformed or widened")
+        old = parse_score_config(base.replace("max_output_tokens = 1024", "max_output_tokens = 256"))   # tighter stays legal
+        self.assertEqual(old.max_output["pair"], 256)
+        self.assertNotEqual(old.digest, CFG.digest)                                                     # but is a different config
+        m = PROFILE["roles"]["matcher"]
+        self.assertEqual((m["params"], m["caps"]["maxOutputTokens"]), ({"maxOutputTokens": 1024}, 1024))
+        self.assertEqual((PROFILE["id"], PROFILE["version"], SC.PROFILE_REF), ("pullo-score", 2, "pullo-score@2"))
+        self.assertEqual({r: PROFILE["roles"][r]["caps"]["maxOutputTokens"] for r in ("extractor", "deduper")}, {"extractor": 8000, "deduper": 4000})
+        # golden pins: any later cap/profile/policy change must update these explicitly
+        self.assertEqual(CFG.digest, "sha256:531809f94508f4471aa51d37a4ad48f4e1a87d3751597932b65aeea8ec728b69")
+        self.assertEqual(SH.policy_digest(), "2508ee10258a81cc34cee118122be861673c1d2fafffbe1187004b41f9d1d3a2")   # binds the 16M scoring cap (user, 2026-10-29)
 
     def test_tighter_values_are_allowed(self):
         t = CONFIG.read_text().replace("max_output_tokens = 8000", "max_output_tokens = 4000").replace("max_candidates_per_tool_case = 200", "max_candidates_per_tool_case = 50")
@@ -440,7 +464,7 @@ class Pairs(unittest.TestCase):
         order = [(g, k) for g, k, _ in plans[0].requests]
         self.assertEqual(order, [("g-real-1", "k0001"), ("g-real-1", "k0002"), ("g-real-2", "k0001"), ("g-real-2", "k0002")])
         self.assertEqual(json.loads(plans[0].requests[1][2]["messages"][1]["content"]), {"candidate": f"{LONG}item 2", "reference": "gold one " + SENT})
-        self.assertEqual(plans[0].requests[0][2]["params"], {"maxOutputTokens": 256})
+        self.assertEqual(plans[0].requests[0][2]["params"], {"maxOutputTokens": 1024})
 
     def test_literal_duplicate_texts_keep_distinct_pairs(self):
         m = A.build_mapping(case(), "toolA", "u")

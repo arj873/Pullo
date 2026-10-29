@@ -28,7 +28,7 @@ from reviewer.runtime import RuntimeLedger, Secret, schemas
 from reviewer.runtime.catalog import worst_case_router_micros
 from reviewer.runtime.openrouter import HttpResponse, MAX_REQUEST_BYTES, OpenRouterProvider
 from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
-from reviewer.score_config import ScoreConfig
+from reviewer.score_config import MAX_OUTPUT, PROFILE_REF, ScoreConfig
 
 PER_RUN_MAX = 4_000_000
 CANARY_TTL_HOURS = 24
@@ -86,8 +86,10 @@ class LaunchBaseline:
 
 
 def policy_digest() -> str:
-    """Pinned scoring policy constants (model, omitted sampling, run/scoring/aggregate/total ceilings)."""
+    """Pinned scoring policy constants (model, omitted sampling, per-stage output-cap maxima, profile version,
+    run/scoring/aggregate/total ceilings)."""
     return hashlib.sha256(canonical({"model": "anthropic/claude-opus-5.5", "sampling": "omit", "perRun": PER_RUN_MAX,
+                                     "maxOutput": dict(MAX_OUTPUT), "profile": PROFILE_REF,
                                      "scoring": SCORING_CATEGORY_CAP_MAX, "aggregate": SCORING_AGGREGATE_CEILING_MAX,
                                      "total": 50_000_000, "retries": 0, "fallbacks": 0})).hexdigest()
 
@@ -191,6 +193,7 @@ class ScoreHost:
         units = tuple(units)
         self.cfg, self.baseline, self.units = cfg, baseline, units
         self.profile_ref, self.profile = profile_ref, cfg.profile(price)
+        _need(profile_ref == f"{self.profile['id']}@{self.profile['version']}", "profile-ref-mismatch")   # e.g. an @1 ref on the @2 profile
         self.auth, self.book, self.ledger, self.key, self.transport = auth, book, ledger, key, transport
         self.store = Path(store_dir)
         self.evr, self.case_id, self.repeat, self.clock = eval_run_id, eval_case_id, repeat, clock
