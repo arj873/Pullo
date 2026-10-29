@@ -1,4 +1,9 @@
-"""The four fixed read-only operations. Pure functions of (view, limits, normalized args).
+"""The fixed read-only operations. Pure functions of (view, limits, normalized args).
+
+The four base tools, plus impact mode's `find_references` (model-requestable, whole-word, regex-free) and the
+host-only `impact_scan` pre-pass (definition heuristics from reviewer.impactmap). Both scans use the same file, byte
+and wall caps as search_literal; they skip decoding a verified file whose bytes contain none of the names (speed
+only: such a file cannot match).
 
 Every file read goes through snapshot.read_verified, so the bytes are checked against the pinned
 manifest hash on EVERY read. Text is redacted (contracts redact) before it is split into lines,
@@ -17,7 +22,10 @@ from dataclasses import dataclass, field
 from reviewer.contracts.redaction import redact
 from reviewer.contracts.snapshot import SnapshotError, read_verified
 
+from reviewer import impactmap as impact
+
 from . import policy
+from .words import word_hits
 from .view import View
 
 
@@ -101,17 +109,25 @@ def _add(total: dict, counts: dict) -> None:
 
 def load_text(ctx: Ctx, side: str, path: str):
     """-> (layer, lines, counts, None) or (layer|None, None, {}, Outcome) explaining why not."""
+    layer, data, fail = load_bytes(ctx, side, path)
+    if fail is not None:
+        return layer, None, {}, fail
+    return decode_text(layer, path, data)
+
+
+def load_bytes(ctx: Ctx, side: str, path: str):
+    """The verified bytes of a pinned file: -> (layer, data, None) or (layer|None, None, Outcome)."""
     found = ctx.view.find(side, path)
     if found is None:
-        return None, None, {}, Outcome(
+        return None, None, Outcome(
             "unavailable", completeness="approximate" if ctx.view.approximate else "exact",
             notice=(f"{path!r} is not in the {side} snapshot view. {ctx.note()}").strip())
     layer, entry = found
     if entry["type"] == "symlink":
-        return layer, None, {}, DENIED
+        return layer, None, DENIED
     if entry["size"] > ctx.limits.max_file_bytes:
-        return layer, None, {}, Outcome("unavailable", layers=[layer.name],
-                                        notice=f"{path!r} is {entry['size']} bytes; limit is {ctx.limits.max_file_bytes}.")
+        return layer, None, Outcome("unavailable", layers=[layer.name],
+                                    notice=f"{path!r} is {entry['size']} bytes; limit is {ctx.limits.max_file_bytes}.")
     full = os.path.join(layer.root, path)
     try:
         st = os.stat(full, follow_symlinks=False)
@@ -120,9 +136,14 @@ def load_text(ctx: Ctx, side: str, path: str):
         data = read_verified(layer.root, layer.manifest, path, max_bytes=ctx.limits.max_file_bytes)
     except (SnapshotError, OSError):
         ctx.tampered = True
-        return layer, None, {}, Outcome(
+        return layer, None, Outcome(
             "error", layers=[layer.name],
             notice=f"{path!r} no longer matches its pinned snapshot; nothing was read from it.")
+    return layer, data, None
+
+
+def decode_text(layer, path: str, data: bytes):
+    """Verified bytes -> (layer, redacted lines, counts, None) or (layer, None, {}, Outcome)."""
     if b"\x00" in data[:8192]:
         return layer, None, {}, Outcome("unavailable", layers=[layer.name], notice=f"{path!r} is binary; text not shown.")
     try:
@@ -453,3 +474,265 @@ def diff(ctx: Ctx, a: dict) -> Outcome:
     notes = [f"{skipped} diff line(s) not shown (cap or over-long)." if trunc else "", ctx.note()]
     return Outcome("partial" if trunc else "ok", ev, "approximate" if ctx.view.omitted else "exact", trunc, " ".join(x for x in notes if x),
                    counts_total, [l.name for l in layers])
+
+
+# ---------------------------------------------------------------- whole-word reference scans (impact mode)
+
+def _ref_scan(ctx: Ctx, side: str, prefix: str, names: list, keep, wall_s: float | None, max_chars: int, source: str,
+              exclude=lambda p, n, names: False):
+    """Scan every permitted text file under `prefix` of `side` in path order for whole-word matches of `names`,
+    within the same file/byte/wall caps as search_literal (plus `wall_s`). `keep(path, line, names)` decides whether
+    a hit is materialized as resolved code evidence (bounded by the caller). -> (hits, kept, stats):
+    hits = [(path, line, [names])] for every counted hit, kept = {(path, line): evidence}."""
+    lim = ctx.limits
+    files = sorted(((p, layer) for layer in ctx.view.layers(side) for p in layer._index
+                    if policy.permitted(p) and _in_prefix(p, prefix)), key=lambda t: t[0])
+    st = {"candidates": len(files), "visited": 0, "scanned": 0, "skippedBig": 0, "skippedText": 0, "failed": 0,
+          "symlinks": 0, "longLines": 0, "stop": None}
+    hits, kept, counts_total = [], {}, {}
+    t_scan = ctx.clock()
+    caps = [w for w in (lim.search_wall_s, wall_s) if w is not None]
+    for p, layer in files:
+        e = layer.entry(p)
+        if e["type"] == "symlink":
+            st["symlinks"] += 1
+            continue
+        if ctx.expired():
+            st["stop"] = "deadline"
+            break
+        if caps and ctx.clock() - t_scan >= min(caps):
+            st["stop"] = "search time cap"
+            break
+        if e["size"] > lim.max_file_bytes:
+            st["skippedBig"] += 1
+            continue
+        if st["visited"] >= lim.max_search_files:
+            st["stop"] = "search file cap"
+            break
+        if st["scanned"] + e["size"] > lim.max_search_scan_bytes:
+            st["stop"] = "search byte cap"
+            break
+        st["visited"] += 1
+        st["scanned"] += e["size"]
+        lyr, data, fail = load_bytes(ctx, side, p)          # verified against the pinned manifest, as every read
+        if fail is None and not any(nm.encode("utf-8") in data for nm in names) and b"\x00" not in data[:8192]:
+            continue        # no symbol bytes at all: nothing to show, so skip decoding and redaction (speed only)
+        lyr, lines, counts, fail = (lyr, None, {}, fail) if fail is not None else decode_text(lyr, p, data)
+        if fail is not None:
+            st["failed" if fail.status == "error" else "skippedText"] += 1
+            continue
+        _add(counts_total, counts)
+        blob = "\n".join(lines)
+        here = [nm for nm in names if nm in blob]           # cheap substring prefilter first
+        if not here:
+            continue
+        for n, ln in enumerate(lines, 1):
+            on_line = word_hits(ln, here)
+            if not on_line or exclude(p, n, on_line):
+                continue
+            if len(ln) > max_chars:
+                st["longLines"] += 1
+                continue
+            hits.append((p, n, on_line))
+            if keep(p, n, on_line):
+                item = _code_evidence(ctx, lyr, p, n, n, lines, source)
+                if item is None:
+                    st["failed"] += 1
+                    continue
+                hdr = impact.enclosing_header(p, lines, n)
+                kept[(p, n)] = (item, hdr)
+    if st["failed"]:
+        ctx.tampered = True
+    return hits, kept, st, counts_total
+
+
+def _scan_notes(st: dict, ctx: Ctx) -> list[str]:
+    notes = []
+    if st["stop"]:
+        notes.append(f"Scan stopped early ({st['stop']}); counts are lower bounds: {st['visited']} of "
+                     f"{st['candidates']} candidate file(s) visited, later files in path order were not searched.")
+    if st["skippedBig"] or st["skippedText"]:
+        notes.append(f"{st['skippedBig']} oversized and {st['skippedText']} binary/non-UTF-8 file(s) skipped.")
+    if st["symlinks"]:
+        notes.append(f"{st['symlinks']} symlink(s) in scope were not searched (links are never followed).")
+    if st["failed"]:
+        notes.append(f"{st['failed']} file(s) failed pinned-snapshot verification and were skipped.")
+    if st["longLines"]:
+        notes.append(f"{st['longLines']} match(es) on over-long lines counted but not shown.")
+    if ctx.note():
+        notes.append(ctx.note())
+    return notes
+
+
+def _hdr(h) -> str:
+    return "" if h is None else f" in `{h[1]}` (L{h[0]})"
+
+
+def _group_keep(limit: int):
+    """keep() that materializes the first `limit` hits of each display group (production code, tests, other):
+    files are scanned in path order, so these are exactly the hits the (group, path, line) order can show first."""
+    seen: dict = {}
+
+    def keep(p, n, names):
+        group, want = impact.ref_sort_key(p, n)[0], False
+        for nm in names:
+            seen[(group, nm)] = seen.get((group, nm), 0) + 1
+            want = want or seen[(group, nm)] <= limit
+        return want
+    return keep
+
+
+def find_references(ctx: Ctx, a: dict) -> Outcome:
+    """Whole-word identifier references of one symbol, paginated by `offset` in (code, tests, other; path; line)
+    order. Item 0 is the listing (path:line and enclosing definition per item); items 1.. are the matching lines as
+    resolved code evidence (citable)."""
+    side, sym, prefix = a["side"], a["symbol"], a["path_prefix"]
+    lim = ctx.limits
+    limit, offset = min(a["limit"], lim.max_search_results), a["offset"]
+    hits, kept, st, counts = _ref_scan(ctx, side, prefix, [sym], _group_keep(offset + limit), None,
+                                       lim.max_line_chars, "find_references")
+    order = sorted(hits, key=lambda h: impact.ref_sort_key(h[0], h[1]))
+    total, files = len(order), len({h[0] for h in order})
+    page = [h for h in order[offset:offset + limit] if (h[0], h[1]) in kept]
+    lang_rows, ev, used = [], [], 0
+    for h in page:
+        item, hdr = kept[(h[0], h[1])]
+        d = impact.def_on_line(impact.language_of(h[0]), item["excerpt"])
+        tag = " (definition)" if d is not None and d[0] == sym else ""
+        row = f"[{len(ev) + 1}] {h[0]}:{h[1]}{tag}{_hdr(hdr)}"
+        if used + len(row) + len(item["excerpt"]) + 2 > lim.max_output_chars - 600:
+            break
+        used += len(row) + len(item["excerpt"]) + 2
+        lang_rows.append(row)
+        ev.append(item)
+    shown = len(ev)
+    complete_scan = st["stop"] is None and not st["failed"]
+    where = f" under {prefix}/" if prefix else ""
+    head = (f"# references to `{sym}` ({side}, whole word{where}): {total}{'' if complete_scan else '+'} line(s) in "
+            f"{files} file(s); references {offset + 1 if shown else 0}-{offset + shown} of that order (code, tests, other "
+            f"files) shown below as result items [1]-[{shown}]")
+    listing = "\n".join([head] + lang_rows)[:7_900]
+    evidence = [{"kind": "tool-result", "excerpt": listing, "source": "find_references", "toolCallId": ctx.tcid}] + ev
+    notes = []
+    more = offset + shown < total
+    if more and shown:
+        nxt = {"side": side, "symbol": sym, "path_prefix": prefix, "limit": a["limit"], "offset": offset + shown}
+        notes.append("Next page: find_references " + json.dumps(nxt, ensure_ascii=False))
+    elif offset and not shown and total:
+        notes.append(f"Offset {offset} is past the last of {total} reference(s).")
+    notes += _scan_notes(st, ctx)
+    complete = complete_scan and not more and offset == 0 and not (st["skippedBig"] or st["skippedText"]
+                                                                   or st["symlinks"] or st["longLines"])
+    trunc = {"shown": shown, "total": total} if (more or offset) and complete_scan else None
+    status = "error" if st["failed"] and not ev else ("ok" if complete and total else
+                                                     ("empty" if complete else "partial"))
+    return Outcome(status, evidence, "exact" if complete and not ctx.view.approximate else "approximate", trunc,
+                   " ".join(notes), counts, [l.name for l in ctx.view.layers(side)],
+                   "deadline" if st["stop"] == "deadline" else None)
+
+
+IMPACT_HEADER = ("# impact map ({side}): {n} changed symbol(s) analysed of {found} found in {files_ch} changed "
+                 "file(s); {refs}{plus} reference(s) in {rfiles} file(s) outside the changed lines; {shown} shown; "
+                 "truncated: {trunc}")
+
+
+def impact_scan(ctx: Ctx, a: dict) -> Outcome:
+    """Host-only pre-pass (never offered to a model): definitions the change touches, and their whole-word
+    references in the head snapshot outside the changed lines. Item 0 is the impact map; items 1.. are the shown
+    reference lines as resolved code evidence."""
+    lim = ctx.limits
+    b, h = _changed_index(ctx.view, "base"), _changed_index(ctx.view, "head")
+    changed = [p for p in sorted(set(b) | set(h))
+               if p not in b or p not in h or b[p]["sha256"] != h[p]["sha256"]]
+    syms, head_changed, skipped_files = [], {}, 0
+    for p in changed[:impact.MAX_CHANGED_FILES]:
+        if impact.language_of(p) is None:
+            continue
+        texts = {}
+        for side, idx in (("base", b), ("head", h)):
+            if p not in idx:
+                texts[side] = None
+                continue
+            _, lines, _, fail = load_text(ctx, side, p)
+            if fail is not None:
+                texts[side] = False
+                continue
+            texts[side] = lines
+        if texts["base"] is False or texts["head"] is False:
+            skipped_files += 1
+            continue
+        found, hc = impact.file_symbols(p, texts["base"], texts["head"])
+        syms += found
+        head_changed[p] = hc
+    skipped_files += max(0, len(changed) - impact.MAX_CHANGED_FILES)
+    selected, rest = impact.select(syms)
+    own = {(s.path, s.line) for s in selected if s.side == "head"}
+    by_name = {s.name: s for s in selected}
+
+    def exclude(p, n, names):
+        return n in head_changed.get(p, ()) or (p, n) in own
+
+    shown_cap = impact.MAX_REFS_PER_SYMBOL_SHOWN
+    hits, kept, st, counts = (([], {}, {"stop": None, "failed": 0, "skippedBig": 0, "skippedText": 0, "symlinks": 0,
+                                        "longLines": 0, "visited": 0, "candidates": 0}, {}) if not selected else
+                              _ref_scan(ctx, "head", "", list(by_name), _group_keep(shown_cap), impact.SCAN_WALL_S,
+                                        impact.MAX_REF_LINE_CHARS, "impact_scan", exclude))
+    per = {s.name: [] for s in selected}
+    for hit in hits:
+        for nm in hit[2]:
+            if nm in per:
+                per[nm].append(hit)
+    rows, ev, used = [], [], 0
+    all_files = {hit[0] for hit in hits}
+    total_refs = sum(len(v) for v in per.values())
+    full = False
+    for s in selected:
+        refs = sorted(per[s.name], key=lambda x: impact.ref_sort_key(x[0], x[1]))
+        files = {r[0] for r in refs}
+        where = f"{'base ' if s.side == 'base' else ''}{s.path}:{s.line}"
+        rows.append(f"## {s.name} ({s.kind}, {impact.STATUS_TEXT[s.status]}) defined {where}: `{s.text}`")
+        common = " - very common name, many matches are probably unrelated" if len(refs) > impact.COMMON_REFS else ""
+        shown_here = 0
+        for r in refs:
+            if shown_here >= shown_cap or len(ev) >= impact.MAX_REFS_SHOWN or full:
+                break
+            got = kept.get((r[0], r[1]))
+            if got is None:
+                continue
+            item, hdr = got
+            row = f"  [{len(ev) + 1}] {r[0]}:{r[1]}{_hdr(hdr)}"
+            if used + len(row) + len(item["excerpt"]) + 2 > lim.max_output_chars - 2_000:
+                full = True
+                break
+            used += len(row) + len(item["excerpt"]) + 2
+            rows.append(row)
+            ev.append(item)
+            shown_here += 1
+        rows.insert(len(rows) - shown_here, f"  {len(refs)} reference(s) in {len(files)} file(s); {shown_here} shown"
+                    + common + ("" if refs else " (none outside the changed lines: check dynamic or string uses)"))
+    if rest:
+        names = ", ".join(s.name for s in rest[:30])
+        rows.append(f"## not analysed (symbol cap {impact.MAX_SYMBOLS}): {names}"
+                    + (f" (+{len(rest) - 30} more)" if len(rest) > 30 else "") + "; use find_references for these")
+    if skipped_files:
+        rows.append(f"## {skipped_files} changed file(s) not analysed (unreadable, binary or over the file cap)")
+    if not selected:
+        rows.append("No changed definitions were detected by the heuristics (documentation, data or unsupported "
+                    "languages). Check dependents of the change yourself with find_references and read_file.")
+    scan_partial = st["stop"] is not None or bool(st["failed"])
+    truncated = bool(rest) or skipped_files > 0 or scan_partial or len(ev) < total_refs
+    header = IMPACT_HEADER.format(side="head", n=len(selected), found=len(selected) + len(rest),
+                                  files_ch=len(changed), refs=total_refs, plus="+" if scan_partial else "",
+                                  rfiles=len(all_files), shown=len(ev), trunc="yes" if truncated else "no")
+    guide = ("Heuristic map from definition regexes and whole-word matches (names can collide; dynamic, reflective "
+             "and string-built uses are missed). Item [n] below is result item n, the exact referencing line.")
+    listing = "\n".join([header, guide] + rows)
+    if len(listing) > 7_900:
+        listing = listing[:7_850].rsplit("\n", 1)[0] + "\n(listing cut at the size cap)"
+    evidence = [{"kind": "tool-result", "excerpt": listing, "source": "impact_scan", "toolCallId": ctx.tcid}] + ev
+    notes = _scan_notes(st, ctx)
+    status = "error" if st["failed"] and not ev else ("partial" if truncated else "ok")
+    return Outcome(status, evidence, "approximate" if truncated or ctx.view.approximate else "exact",
+                   {"shown": len(ev), "total": total_refs} if len(ev) < total_refs and not scan_partial else None,
+                   " ".join(notes), counts, [l.name for l in ctx.view.layers("head")],
+                   "deadline" if st["stop"] == "deadline" else None)

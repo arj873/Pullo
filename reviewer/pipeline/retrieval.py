@@ -22,6 +22,7 @@ from reviewer.contracts.severity import TRUSTED_TOOL_STATUSES
 from reviewer.tools import TOOLS, ArgError, ToolCall, normalize
 from reviewer.tools.ops import Outcome
 
+from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -68,6 +69,12 @@ class RetrievalPolicy:
             if k not in _NUMERIC or isinstance(v, bool) or not isinstance(v, int) or v > getattr(self, k):
                 raise ValueError(f"retrieval policy {k!r}: overrides may only lower a numeric limit")
         return dataclasses.replace(self, **kw)
+
+    @property
+    def impact(self) -> bool:
+        """Impact mode (impact map in PREPARE, find_references, impact prompts) is selected by the investigator
+        prompt id alone; every other id keeps the frozen retrieval@2 behaviour byte for byte."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_PROMPT
 
     def to_doc(self) -> dict:
         return {"version": RETRIEVAL_VERSION, **dataclasses.asdict(self)}
@@ -139,7 +146,7 @@ def excerpt_chars(ev: dict) -> int:
 def host_call(session, rq: dict, notice: str, status: str = "denied") -> ToolCall:
     """A logged result for a request the host will not run (policy cap). Same shape as the tools layer's own
     denied/unavailable results, appended to the session so ordinals and ids stay unique."""
-    tool = rq["tool"] if rq["tool"] in TOOLS else "unknown-tool"
+    tool = rq["tool"] if rq["tool"] in getattr(session, "tools", TOOLS) else "unknown-tool"
     args = {"rejected": True}
     ordinal = len(session.calls)
     result = Outcome(status, notice=notice).result()
@@ -206,7 +213,8 @@ class Chain:
 
     def _find_duplicate(self, rq: dict) -> str | None:
         try:
-            norm = normalize(rq["tool"], rq["args"], self.session.limits) if rq["tool"] in TOOLS else None
+            norm = (normalize(rq["tool"], rq["args"], self.session.limits)
+                    if rq["tool"] in getattr(self.session, "tools", TOOLS) else None)
         except ArgError:
             return None
         if norm is None:

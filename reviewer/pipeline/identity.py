@@ -17,6 +17,7 @@ from reviewer.contracts.canonical import (CANONICAL_VERSION, config_digest, dige
                                           idempotency_key_local, profile_digest, run_id)
 from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTION_VERSION
 from reviewer.tools import Limits
+from reviewer import impactmap as impact_mod
 
 from . import prompts, repocov, retrieval
 from .errors import PipelineError
@@ -36,6 +37,10 @@ RETRIEVAL_BEHAVIOR = "retrieval-pipeline@2"
 # Behaviour of the opt-in context-check prompt arm that is not in a template digest (task selection by prompt id, the
 # unchanged deterministic fallback wording). Bound only when the experiment is selected.
 EXPERIMENT_BEHAVIOR = "context-check-arm@1"
+# Behaviour of impact mode that is not in a template digest: the PREPARE impact_scan pre-pass (symbol extraction rules,
+# reference scan, map format and its place first in the investigator context), the find_references tool, the
+# impact-coverage disclosure. Bound only when impact mode is selected, so every other run id is unchanged.
+IMPACT_BEHAVIOR = "impact-pipeline@1"
 RECEIPT_SCHEMA = "run-receipt@1"
 
 
@@ -72,6 +77,12 @@ def retrieval_policy(spec):
     return spec.host.retrieval or retrieval.RetrievalPolicy()
 
 
+def impact_mode(spec) -> bool:
+    """Impact mode: the retrieval policy names the impact investigator prompt and the investigator is a Turn role."""
+    pol = retrieval_policy(spec)
+    return pol is not None and pol.impact and "investigator" in turn_roles(spec.profile)
+
+
 def tool_limits(spec) -> Limits:
     """The trusted ToolSession limits: the host's, else the full-repository profile for imports, else legacy."""
     if spec.host.tool_limits is not None:
@@ -94,6 +105,11 @@ def check_retrieval_inputs(spec) -> None:
             if spec.profile["roles"][r]["promptVersion"] != want[r]:
                 raise PipelineError("invalid-input", f"profile {r}.promptVersion must equal the retrieval policy's "
                                     f"{want[r]!r}")
+    if turns:
+        p = retrieval_policy(spec)
+        if p.verifier_prompt == prompts.VERIFIER_IMPACT_PROMPT and not p.impact:
+            raise PipelineError("invalid-input", "the impact verifier prompt needs the impact investigator prompt "
+                                f"({prompts.INVESTIGATOR_IMPACT_PROMPT})")
     if spec.imports is not None and spec.coverage is not None:
         raise PipelineError("invalid-input", "repository imports and a partial historical coverage are exclusive")
     if experiment_id(spec) != prompts.EXPERIMENT_BASELINE and "verifier" not in turns:
@@ -119,6 +135,9 @@ def config_snapshot_id(spec) -> str:
         extra["retrieval"] = {"behavior": RETRIEVAL_BEHAVIOR, "policy": pol.to_doc(), "turnRoles": turn_roles(spec.profile),
                               "prompts": prompts.retrieval_template_digests(),
                               "effective": retrieval.effective_limits(pol, spec.plan["budget"], lim.max_calls)}
+    if impact_mode(spec):                        # absent unless selected => every other run id is unchanged
+        extra["impact"] = {"behavior": IMPACT_BEHAVIOR, "templates": prompts.impact_template_digests(),
+                           "limits": impact_mod.LIMITS_DOC}
     exp = experiment_id(spec)
     if exp != prompts.EXPERIMENT_BASELINE:       # absent for the baseline => default ids unchanged by this experiment
         extra["experiment"] = {"id": exp, "behavior": EXPERIMENT_BEHAVIOR, "tasks": prompts.experiment_task_digests(),

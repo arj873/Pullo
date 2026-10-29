@@ -135,3 +135,4 @@ class RunResult:
     resumed_from: str | None = None
     gateway_report: dict | None = None
     retrieval: dict | None = None        # retrieval summary re-derived from the trace (None for legacy profiles)
+    impact: dict | None = None           # impact-coverage@1 re-derived from the trace (None unless impact mode)

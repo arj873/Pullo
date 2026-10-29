@@ -114,7 +114,7 @@ class Selector(unittest.TestCase):
             self.assertNotEqual(digest(base), digest(arm))
         pb, pa = repository_policy(True).to_doc(), repository_policy(True, ARM).to_doc()
         self.assertEqual(pa.pop("verifier_prompt"), CTX)
-        self.assertEqual(pb.pop("verifier_prompt"), "verifier.refute@v4")
+        self.assertEqual(pb.pop("verifier_prompt"), "verifier.impact@v1")      # IMPACT-01: pilot default
         self.assertEqual(pa, pb)
 
     def test_baseline_template_digest_sets_never_contain_the_experimental_text(self):
@@ -351,7 +351,7 @@ class Bench(TBH.Base):
         """Report truthfulness (H1 repro): experiment.verifierPrompt/judgePrompt must equal the profile the run used.
         `experiment_report` now takes that profile (VERIFY-CONTEXT-03); the repro passes the profile in force and pins
         the ids so agreement with a wrong profile cannot pass."""
-        want = {True: ("verifier.refute@v4", "judge.wording@v1"), False: ("verifier.refute@v1", "judge.wording@v1")}
+        want = {True: ("verifier.impact@v1", "judge.wording@v1"), False: ("verifier.refute@v1", "judge.wording@v1")}
         for retrieval in (True, False):
             with self.subTest(retrieval=retrieval):
                 cfg = resolve_config()
@@ -452,7 +452,7 @@ class Bench(TBH.Base):
         users = [json.loads(next(m["content"] for m in b["messages"] if m["role"] == "user")) for b in model.bodies]
         self.assertEqual([u["task"] for u in users[2:4]], [prompts.VERIFIER_CONTEXT_CHECK_TASK] * 2)
         self.assertEqual(users[4]["task"], prompts.JUDGE_FACT_TASK)
-        self.assertEqual(users[0]["task"], prompts.INVESTIGATOR_RETRIEVE_TASK)
+        self.assertEqual(users[0]["task"], prompts.INVESTIGATOR_IMPACT_TASK)       # IMPACT-01: pilot default
         self.assertIs(rep["experiment"]["audited"], False)
         trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
         ok = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "rp-ok"), replay_trace=trace,

@@ -24,7 +24,7 @@ from reviewer.gateway import Recorder, TraceError, bytes_digest, load_trace
 from reviewer.tools import Limits
 
 from . import coverage as cov_mod
-from . import identity, repocov, retrieval, stagereplay
+from . import identity, impactcov, repocov, retrieval, stagereplay
 from .compare import first_difference, split_recording
 from .engine import Engine, render_outputs
 from .errors import PipelineError
@@ -337,9 +337,11 @@ def _finalize(spec, run, rd, eng, recorder, gw, consumed=()) -> RunResult:
     # a resumed replay consumed its earlier stages in the interrupted process: account for them explicitly
     report["priorStageModelCalls"] = eng.expected_unconsumed
     report["unconsumedRecordedCalls"] -= eng.expected_unconsumed
+    changed = {f["path"] for f in eng.artifacts["PREPARE"]["payload"]["files"]} if "PREPARE" in eng.artifacts else set()
     receipt = build_receipt(spec, final, eng.digests, tdigest, outputs, cost, latency, report,
                             eng.resumed_from, eng.needs_reconciliation, events=events,
-                            coverage=eng.coverage_record, guard=eng.guard)
+                            coverage=eng.coverage_record, guard=eng.guard,
+                            impact=impactcov.summarize(events, changed) if eng.impact else None)
     if spec.stage_replay is not None:
         receipt["stageReplay"] = {
             "fromStage": spec.stage_replay.from_stage, "replayOf": final["replayOf"],
@@ -408,7 +410,7 @@ def retrieval_section(spec, events: list, guard=None) -> dict | None:
 
 
 def build_receipt(spec, final, digests, tdigest, outputs, cost, latency, gw_report, resumed_from, recon, *,
-                  events, coverage=None, guard=None) -> dict:
+                  events, coverage=None, guard=None, impact=None) -> dict:
     backend = spec.backend
     ident = identity.engine_identity()
     rsec = retrieval_section(spec, events, guard)
@@ -430,6 +432,7 @@ def build_receipt(spec, final, digests, tdigest, outputs, cost, latency, gw_repo
                                               "priorStageModelCalls")},
         **({} if coverage is None else {"coverageDigest": digest(coverage)}),
         **({} if rsec is None else {"retrieval": rsec}),
+        **({} if impact is None else {"impact": impact}),       # impact-coverage@1, impact mode only
         "resumedFrom": resumed_from, "needsReconciliation": bool(recon),
         "limits": ["hashes detect inconsistent edits and equality with a trusted pin; they do not authenticate a "
                    "maliciously rewritten whole trace", "synthetic pricing is not provider spend"]}
@@ -453,7 +456,7 @@ def assemble(rd, final, artifacts, events, receipt, cost, latency, *, idempotent
         trace_path=str(rd.path / "trace.jsonl"), trace_digest=receipt["traceDigest"], receipt=receipt,
         receipt_path=str(rd.path / "receipt.json"), comments_path=str(rd.path / "comments.json"),
         review_path=str(rd.path / "review.md"), idempotent=idempotent, resumed_from=resumed_from,
-        gateway_report=gateway_report, retrieval=receipt.get("retrieval"))
+        gateway_report=gateway_report, retrieval=receipt.get("retrieval"), impact=receipt.get("impact"))
 
 
 def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResult:
