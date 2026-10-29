@@ -69,12 +69,12 @@ class Fake:
         return [r for _, r, *_ in self.log]
 
 
-def span(cid, start, end):
-    return {"sourceCommentId": cid, "start": start, "end": end}
+def rng(cid, start, end):
+    return {"sourceCommentId": cid, "startSegment": start, "endSegment": end}
 
 
-def two_cands(request, ordinal):          # bench.extract@v3 references: "This" in c001 and the whitespace " " in c002
-    return {"candidates": [span("c001", 0, 4), span("c002", 4, 5)]}
+def two_cands(request, ordinal):          # bench.extract@v3 references: the whole (one-segment) comments c001 and c002
+    return {"candidates": [rng("c001", 1, 1), rng("c002", 1, 1)]}
 
 
 class Config(unittest.TestCase):
@@ -173,7 +173,7 @@ class Rendering(unittest.TestCase):
         sysmsg, user = f.log[0][4]["messages"]
         self.assertNotIn("IGNORE", sysmsg["content"])
         self.assertEqual(sysmsg["content"], P.SYSTEM["extract"])
-        self.assertEqual(json.loads(user["content"])["comments"][0]["text"], inj)
+        self.assertEqual("".join(x["text"] for x in json.loads(user["content"])["comments"][0]["segments"]), inj)
 
     def test_missing_tool_review_is_a_typed_missing_not_a_silent_skip(self):
         with self.assertRaises(BenchmarkError):
@@ -188,16 +188,16 @@ class Extraction(unittest.TestCase):
 
     def test_short_text_is_explicit_no_extraction_without_a_call(self):
         c = case(bodies={("toolA", 1): "a", ("toolA", 2): "b", ("toolA", 3): "c"})
-        f = Fake(extract={"candidates": [span("c001", 0, 1)]})
+        f = Fake(extract={"candidates": [rng("c001", 1, 1)]})
         e = A.run_extract(f, CFG, REF, A.build_mapping(c, "toolA", "u"))
         self.assertEqual((e.status, e.candidates, f.log), ("no-extraction", (), []))
 
     def test_valid_extraction_keeps_whitespace_duplicates_and_real_source_ids(self):
-        bodies = {("toolA", 1): LONG + "dup", ("toolA", 2): "dup" + LONG, ("toolA", 3): "  \n\t " + LONG}
-        e, _ = self.run_ex({"candidates": [span("c001", len(LONG), len(LONG) + 3), span("c002", 0, 3), span("c003", 0, 5)]}, bodies)
+        bodies = {("toolA", 1): LONG + "\ndup\n", ("toolA", 2): "dup\n" + LONG, ("toolA", 3): "  \n\t \n" + LONG}
+        e, _ = self.run_ex({"candidates": [rng("c001", 2, 2), rng("c002", 1, 1), rng("c003", 1, 1)]}, bodies)
         self.assertEqual(e.status, "ok")
         self.assertEqual([c["id"] for c in e.candidates], ["k0001", "k0002", "k0003"])
-        self.assertEqual([c["text"] for c in e.candidates], ["dup", "dup", "  \n\t "])
+        self.assertEqual([c["text"] for c in e.candidates], ["dup\n", "dup\n", "  \n\t \n" + LONG])   # exact bytes, leading blank lines kept
         self.assertEqual([c["src"] for c in e.candidates], ["real-toolA-1", "real-toolA-2", "real-toolA-3"])
 
     def test_empty_list_is_valid_zero_candidates(self):
@@ -205,72 +205,133 @@ class Extraction(unittest.TestCase):
         self.assertEqual((e.status, e.candidates), ("ok", ()))
 
     def test_invalid_shapes_are_extraction_invalid(self):
-        good = span("c001", 0, 1)
-        n = len(f"{LONG}item 1")
-        for name, out in {"empty span": {"candidates": [{**good, "end": 0}]}, "reversed": {"candidates": [span("c001", 5, 2)]},
-                          "negative start": {"candidates": [span("c001", -1, 2)]}, "end past text": {"candidates": [span("c001", 0, n + 1)]},
-                          "start past text": {"candidates": [span("c001", n, n + 1)]},
-                          "bool start": {"candidates": [{**good, "start": False}]}, "bool end": {"candidates": [{**good, "end": True}]},
-                          "float end": {"candidates": [{**good, "end": 1.0}]}, "string start": {"candidates": [{**good, "start": "0"}]},
-                          "none end": {"candidates": [{**good, "end": None}]}, "unknown source": {"candidates": [{**good, "sourceCommentId": "c999"}]},
+        good = rng("c001", 1, 1)
+        bodies = {("toolA", 1): "Line one.\nLine two.\nLine three.\n"}            # c001 has exactly 3 segments
+        for name, out in {"zero start": {"candidates": [rng("c001", 0, 1)]}, "reversed": {"candidates": [rng("c001", 3, 2)]},
+                          "negative start": {"candidates": [rng("c001", -1, 2)]}, "end past last": {"candidates": [rng("c001", 1, 4)]},
+                          "start past last": {"candidates": [rng("c001", 4, 4)]},
+                          "bool start": {"candidates": [{**good, "startSegment": True}]}, "bool end": {"candidates": [{**good, "endSegment": True}]},
+                          "float end": {"candidates": [{**good, "endSegment": 1.0}]}, "string start": {"candidates": [{**good, "startSegment": "1"}]},
+                          "none end": {"candidates": [{**good, "endSegment": None}]}, "unknown source": {"candidates": [{**good, "sourceCommentId": "c999"}]},
                           "real id as source": {"candidates": [{**good, "sourceCommentId": "real-toolA-1"}]},
                           "non-string id": {"candidates": [{**good, "sourceCommentId": 1}]},
                           "copied text key": {"candidates": [{**good, "text": "T"}]}, "v2 copy shape": {"candidates": [{"sourceCommentId": "c001", "text": "t"}]},
+                          "char-offset shape": {"candidates": [{"sourceCommentId": "c001", "start": 0, "end": 1}]},
                           "extra candidate key": {"candidates": [{**good, "x": 1}]}, "extra top key": {"candidates": [], "x": 1},
-                          "missing end": {"candidates": [{"sourceCommentId": "c001", "start": 0}]},
-                          "not a list": {"candidates": "no"}, "not object": ["x"], "null": None, "missing id": {"candidates": [{"start": 0, "end": 1}]},
-                          "one bad among good": {"candidates": [good, span("c002", 0, 10_000)]}}.items():
+                          "missing end": {"candidates": [{"sourceCommentId": "c001", "startSegment": 1}]},
+                          "not a list": {"candidates": "no"}, "not object": ["x"], "null": None, "missing id": {"candidates": [{"startSegment": 1, "endSegment": 1}]},
+                          "one bad among good": {"candidates": [good, rng("c002", 1, 2)]}}.items():
             with self.subTest(name):
-                e, _ = self.run_ex(out)
+                e, _ = self.run_ex(out, bodies)
                 self.assertEqual((e.status, e.candidates), ("extraction-invalid", ()))
+        e, _ = self.run_ex({"candidates": [rng("c001", 1, 3), rng("c001", 3, 3), rng("c001", 2, 2)]}, bodies)
+        self.assertEqual((e.status, [c["text"] for c in e.candidates]), ("ok", ["Line one.\nLine two.\nLine three.\n", "Line three.\n", "Line two.\n"]))
 
     def test_oversize_is_not_truncated(self):
-        e, _ = self.run_ex({"candidates": [span("c001", 0, 1)] * 201})
+        e, _ = self.run_ex({"candidates": [rng("c001", 1, 1)] * 201})
         self.assertEqual((e.status, e.candidates), ("oversize", ()))
-        e, _ = self.run_ex({"candidates": [span("c001", 0, 1)] * 200})
+        e, _ = self.run_ex({"candidates": [rng("c001", 1, 1)] * 200})
         self.assertEqual((e.status, len(e.candidates)), ("ok", 200))
 
-    def test_v3_candidate_text_is_the_trusted_slice_never_model_text(self):
-        body = "Title line\n\nFirst finding: x is off by one.\nSecond finding: é ünïcode → 漢字 counts code points.\n"
+    def test_v3_candidate_text_is_the_exact_joined_segments_never_model_text(self):
+        body = "Title line\n\nFirst finding: x is off by one.\nSecond finding: é ünïcode → 漢字 stays exact.\n"
         bodies = {("toolA", 1): body, ("toolA", 2): LONG + "two", ("toolA", 3): LONG + "three"}
-        ls = P.line_starts(body)
-        spans = [span("c001", 0, len(body)), span("c001", ls[2], ls[3]), span("c001", ls[3], len(body)),
-                 span("c002", len(LONG), len(LONG) + 3), span("c003", 0, 1)]
-        e, f = self.run_ex({"candidates": spans}, bodies)
+        segs = P.segments(body)
+        self.assertEqual(segs, ["Title line\n\n", "First finding: x is off by one.\n", "Second finding: é ünïcode → 漢字 stays exact.\n"])
+        ranges = [rng("c001", 1, 3), rng("c001", 2, 2), rng("c001", 2, 3), rng("c002", 1, 1), rng("c003", 1, 1)]
+        e, f = self.run_ex({"candidates": ranges}, bodies)
         self.assertEqual(e.status, "ok")
-        texts = {"c001": body, "c002": LONG + "two", "c003": LONG + "three"}
-        self.assertEqual([c["text"] for c in e.candidates], [texts[s["sourceCommentId"]][s["start"]:s["end"]] for s in spans])
-        self.assertEqual(e.candidates[2]["text"], "Second finding: é ünïcode → 漢字 counts code points.\n")
+        self.assertEqual([c["text"] for c in e.candidates], [body, segs[1], segs[1] + segs[2], LONG + "two", LONG + "three"])
+        for c in e.candidates[:3]:
+            self.assertIn(c["text"], body)                                                 # an exact substring by construction
         self.assertEqual([c["id"] for c in e.candidates], ["k0001", "k0002", "k0003", "k0004", "k0005"])
         self.assertEqual([c["src"] for c in e.candidates], ["real-toolA-1"] * 3 + ["real-toolA-2", "real-toolA-3"])
-        # the model's reply carries no text; the request presents length and lineStarts that index the exact text string
-        comments = json.loads(f.log[0][4]["messages"][1]["content"])["comments"]
-        self.assertEqual(comments[0], {"id": "c001", "length": len(body), "lineStarts": ls, "text": body})
-        self.assertEqual([body[i - 1] for i in ls[1:]], ["\n"] * (len(ls) - 1))
+        comments = json.loads(f.log[0][4]["messages"][1]["content"])["comments"]           # segments only; no separate full text
+        self.assertEqual(comments[0], {"id": "c001", "segments": [{"n": n, "text": t} for n, t in enumerate(segs, 1)]})
 
     def test_v3_request_and_schema_shape(self):
         e, f = self.run_ex({"candidates": []})
         r = f.log[0][4]
-        self.assertEqual((r["role"], r["promptVersion"], r["outputSchema"]), ("extractor", "bench.extract@v3", "ScoreExtractionSpans"))
+        self.assertEqual((r["role"], r["promptVersion"], r["outputSchema"]), ("extractor", "bench.extract@v3", "ScoreExtractionSegments"))
         self.assertEqual(P.VERSIONS, {"extract": "bench.extract@v3", "dedup": "bench.dedup@v2", "pair": "bench.pair@v2"})
-        self.assertEqual(PROFILE["roles"]["extractor"]["outputSchema"], "ScoreExtractionSpans")
+        self.assertEqual(PROFILE["roles"]["extractor"]["outputSchema"], "ScoreExtractionSegments")
         self.assertEqual(PROFILE["roles"]["extractor"]["promptVersion"], "bench.extract@v3")
         sysmsg = r["messages"][0]["content"]
-        for need in ("Never copy", "half-open", "lineStarts", "length", "start", "end"):
+        for need in ("Never copy", "segment numbers only", "startSegment", "endSegment", "inclusive", "n starts at 1"):
             self.assertIn(need, sysmsg)
         self.assertNotIn("copied faithfully", sysmsg)
         data = json.loads(r["messages"][1]["content"])
-        self.assertTrue(all(set(c) == {"id", "length", "lineStarts", "text"} and c["length"] == len(c["text"]) for c in data["comments"]))
+        for c in data["comments"]:
+            self.assertEqual(set(c), {"id", "segments"})
+            self.assertEqual([s["n"] for s in c["segments"]], list(range(1, len(c["segments"]) + 1)))
+            self.assertTrue(all(set(s) == {"n", "text"} for s in c["segments"]))
 
-    def test_v3_whitespace_only_and_end_equal_length_are_valid(self):
-        bodies = {("toolA", 1): "   \n" + LONG}
-        e, _ = self.run_ex({"candidates": [span("c001", 0, 4), span("c001", 4, 4 + len(LONG))]}, bodies)
-        self.assertEqual((e.status, [c["text"] for c in e.candidates]), ("ok", ["   \n", LONG]))
+    def test_v3_whitespace_only_comment_is_one_exact_segment(self):
+        bodies = {("toolA", 1): "   \n\t", ("toolA", 2): LONG}
+        e, _ = self.run_ex({"candidates": [rng("c001", 1, 1), rng("c002", 1, 1)]}, bodies)
+        self.assertEqual((e.status, [c["text"] for c in e.candidates]), ("ok", ["   \n\t", LONG]))
 
     def test_provider_failure_has_a_fixed_class_and_no_model_text(self):
         e, _ = self.run_ex(Res(error={"code": "provider-timeout", "message": SENT}))
         self.assertEqual((e.status, e.error, e.calls), ("provider-failure", "provider-timeout", 1))
         self.assertNotIn(SENT, repr(e))
+
+
+class Segmentation(unittest.TestCase):
+    """bench.extract@v3 host segmentation: deterministic, lossless, never inside code."""
+
+    SAMPLES = ("", "x", "\n", "\n\n\n", "  \n\t", "a\nb", "a\n\n\nb\n", "\n\nlead blank lines\nthen text\n\n",
+               "trailing no newline", "Ünïcödé → 漢字 😀 line.\nSecond 😀 line.",
+               "```python\nx = 1. Not a sentence split\n```\n" + "Prose. " * 60,
+               "CRLF line\r\nnext line\r\n", "\u2028 is not a line break here\x0bnor this\n")
+
+    def test_lossless_and_deterministic(self):
+        long_para = " ".join(f"Sentence {i} is here. It continues with `a. B` code and e.g. lowercase." for i in range(30))
+        for t in self.SAMPLES + (long_para, long_para + "\n\n" + long_para):
+            with self.subTest(t=t[:30]):
+                segs = P.segments(t)
+                self.assertEqual("".join(segs), t)
+                self.assertEqual(segs, P.segments(t))
+                self.assertTrue(all(segs))                                                   # no empty segment
+                self.assertTrue(all(s.strip() for s in segs) or len(segs) == 1)            # blank lines are not numbered
+        self.assertEqual(P.segments(""), [])
+        self.assertEqual(P.segments("  \n\t"), ["  \n\t"])
+
+    def test_empty_lines_merge_into_the_previous_segment_or_lead_the_first(self):
+        self.assertEqual(P.segments("a\n\n\nb\n"), ["a\n\n\n", "b\n"])
+        self.assertEqual(P.segments("\n\nfirst\n  \nsecond"), ["\n\nfirst\n  \n", "second"])
+        self.assertEqual(P.segments("\u2028x\x0by\rz\n"), ["\u2028x\x0by\rz\n"])          # only "\n" splits lines
+
+    def test_long_lines_split_at_sentence_boundaries_only(self):
+        unit = "This is a sentence. "
+        line = unit * 15 + "Ends here.\n"
+        segs = P.segments(line)
+        self.assertEqual(segs, [unit] * 15 + ["Ends here.\n"])
+        short = unit * 5 + "Ends.\n"                                                         # <= MAX_LINE: never split
+        self.assertLessEqual(len(short), P.MAX_LINE)
+        self.assertEqual(P.segments(short), [short])
+        for boundary in ("? ", "! "):
+            t = ("Why" + boundary) * 50 + "End"
+            self.assertEqual(P.segments(t), ["Why" + boundary] * 50 + ["End"])
+        mixed = "A. " + "word " * 60 + "x. lower. 9 digit. `tick` after. B"           # split only before uppercase/digit/backtick
+        self.assertEqual(P.segments(mixed), ["A. " + "word " * 60 + "x. lower. ", "9 digit. ", "`tick` after. ", "B"])
+        self.assertEqual(P.segments("x" * 300 + ".Next. done"), ["x" * 300 + ".Next. done"])     # no space / lowercase: no split
+
+    def test_never_splits_inside_inline_code_or_fenced_blocks(self):
+        inline = "Start `" + "x. Y " * 60 + "` done. Tail"
+        self.assertEqual(P.segments(inline), ["Start `" + "x. Y " * 60 + "` done. ", "Tail"])
+        fenced = "```\n" + "a. B " * 80 + "\n```\n" + "After. Done"
+        self.assertEqual(P.segments(fenced), ["```\n", "a. B " * 80 + "\n", "```\n", "After. Done"])
+        fence_line = "```js " + "x. Y " * 60 + "\n"
+        self.assertEqual(P.segments(fence_line), [fence_line])
+
+    def test_long_single_paragraph_bot_comment(self):
+        para = ("**Potential issue.** The handler returns early. `cleanup()` is skipped. 3 callers depend on it. "
+                "Consider moving the release into a finally block, e.g. around line 12. ") * 4
+        segs = P.segments(para)
+        self.assertGreater(len(segs), 4)
+        self.assertEqual("".join(segs), para)
+        self.assertTrue(all(len(s) <= P.MAX_LINE for s in segs))
 
 
 class Dedup(unittest.TestCase):
@@ -335,7 +396,7 @@ class Pairs(unittest.TestCase):
         self.assertEqual(over, ())
         order = [(g, k) for g, k, _ in plans[0].requests]
         self.assertEqual(order, [("g-real-1", "k0001"), ("g-real-1", "k0002"), ("g-real-2", "k0001"), ("g-real-2", "k0002")])
-        self.assertEqual(json.loads(plans[0].requests[1][2]["messages"][1]["content"]), {"candidate": " ", "reference": "gold one " + SENT})
+        self.assertEqual(json.loads(plans[0].requests[1][2]["messages"][1]["content"]), {"candidate": f"{LONG}item 2", "reference": "gold one " + SENT})
         self.assertEqual(plans[0].requests[0][2]["params"], {"maxOutputTokens": 256})
 
     def test_literal_duplicate_texts_keep_distinct_pairs(self):
@@ -400,7 +461,7 @@ class HostGate(unittest.TestCase):
     def test_one_failing_tool_blocks_every_pair_and_reservation_is_never_asked(self):
         calls = []
         pair_f = Fake(pair={"match": True, "confidence": 1})
-        c, ms, exts, dds = self.phases(("toolA", "toolB"), lambda t: two_cands if t == "toolA" else {"candidates": [span("zzz", 0, 1)]})
+        c, ms, exts, dds = self.phases(("toolA", "toolB"), lambda t: two_cands if t == "toolA" else {"candidates": [rng("zzz", 1, 1)]})
         g = A.gate(exts, dds)
         self.assertFalse(g.ok)
         self.assertEqual({(f[0], f[2], f[3]) for f in g.failures}, {("toolB", "extract", "extraction-invalid"), ("toolB", "dedup", "unsent")})
@@ -515,8 +576,8 @@ class GatewayComposition(unittest.TestCase):
     def test_gateway_failure_unit_blocks_before_any_pair(self):
         c = case(("toolA", "toolB"))
         ms = [A.build_mapping(c, t, "u001-t0" + ("1" if t == "toolA" else "2")) for t in ("toolA", "toolB")]
-        entries = [("extractor", 0, "response", H.response("extractor", {"candidates": [span("c001", 0, 4)]}), ms[0].agent),
-                   ("extractor", 0, "response", H.response("extractor", {"candidates": [span("nope", 0, 1)]}), ms[1].agent)]
+        entries = [("extractor", 0, "response", H.response("extractor", {"candidates": [rng("c001", 1, 1)]}), ms[0].agent),
+                   ("extractor", 0, "response", H.response("extractor", {"candidates": [rng("nope", 1, 1)]}), ms[1].agent)]
         with tempfile.TemporaryDirectory() as tmp:
             gw, rec, prov, seen = self.gateway(tmp, H.script(entries))
             exts = [A.run_extract(gw.call, CFG, REF, m) for m in ms]
@@ -593,7 +654,7 @@ class Corrections(unittest.TestCase):
         g = A.gate(es, ds, [(m.tool, m.case_url) for m in ms])
         asked = []
         reserve = lambda p: asked.append(1) or True
-        _, ms2, es2, ds2 = self.full(("toolA",), extract=lambda r, o: {"candidates": [span("c001", 5, 12)]})
+        _, ms2, es2, ds2 = self.full(("toolA",), extract=lambda r, o: {"candidates": [rng("c001", 1, 1), rng("c003", 1, 1)]})
         foreign, _ = A.plan_pairs(CFG, REF, list(zip(ms2, es2)))
         for name, ps in (("dropped plan", plans[:1]), ("duplicated plan", plans + plans[:1]), ("foreign plan", (plans[0], foreign[0])),
                          ("hand-built plan", (plans[0], A.PairPlan(plans[1].mapping, plans[1].extraction, plans[1].requests))), ("empty", ())):

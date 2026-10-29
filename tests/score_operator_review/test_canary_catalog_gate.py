@@ -55,7 +55,7 @@ class Gate(Fixture):
         ev_before = sorted(p.name for p in (self.tmp / "evidence").iterdir())
         rc, rep, _ = self.run_paid("canary", base)
         self.assertEqual(rc, 0, rep)
-        self.assertEqual([x["response_format"]["json_schema"]["name"] for x in self.cap.bodies], ["ScoreExtractionSpans", "ScoreDedup", "ScorePair"])
+        self.assertEqual([x["response_format"]["json_schema"]["name"] for x in self.cap.bodies], ["ScoreExtractionSegments", "ScoreDedup", "ScorePair"])
         self.assertEqual((rep["canaryOk"], rep["probeCalls"], rep["canary"]), (True, {"extractor": 1, "deduper": 1, "matcher": 1}, True))
         self.assertEqual(self.calls, {"key": 1, "transport": 1})
         self.assertEqual(sorted(p.name for p in (self.tmp / "evidence").iterdir()), ev_before)      # no receipt written

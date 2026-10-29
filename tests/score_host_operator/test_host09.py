@@ -44,7 +44,7 @@ class Canary(Fixture):
         rc, rep, _ = self.canary()
         self.assertEqual(rc, 0, rep)
         names = [x["response_format"]["json_schema"]["name"] for x in self.cap.bodies]
-        self.assertEqual(names, ["ScoreExtractionSpans", "ScoreDedup", "ScorePair"])                    # 3 calls, never the old 4-call all-pairs loop
+        self.assertEqual(names, ["ScoreExtractionSegments", "ScoreDedup", "ScorePair"])                    # 3 calls, never the old 4-call all-pairs loop
         self.assertEqual((rep["probeCalls"], rep["probes"], rep["canaryOk"]), ({"extractor": 1, "deduper": 1, "matcher": 1}, {"extractor": "ok", "deduper": "ok", "matcher": "ok"}, True))
         self.assertEqual((rep["realScoring"], rep["headline"]), (False, None))
         self.assertEqual({b["model"] for b in self.cap.bodies}, {"anthropic/claude-opus-5.5"})
@@ -89,7 +89,7 @@ class Canary(Fixture):
         self.assertEqual(rc, 0, rep)
 
     def test_failed_or_invalid_probe_stops_and_writes_no_evidence(self):
-        for stage_fail, want_bodies, want in (("ScoreExtractionSpans", 1, {"extractor": "failed", "deduper": "unsent", "matcher": "unsent"}),
+        for stage_fail, want_bodies, want in (("ScoreExtractionSegments", 1, {"extractor": "failed", "deduper": "unsent", "matcher": "unsent"}),
                                               ("ScoreDedup", 2, {"extractor": "ok", "deduper": "failed", "matcher": "unsent"}),
                                               ("ScorePair", 3, {"extractor": "ok", "deduper": "ok", "matcher": "failed"})):
             self.setUp()
@@ -98,7 +98,7 @@ class Canary(Fixture):
             def respond(body, f=stage_fail):
                 n = body["response_format"]["json_schema"]["name"]
                 if n == f:
-                    return {"groups": [[0], [0]]} if n == "ScoreDedup" else {"candidates": "bad"} if n == "ScoreExtractionSpans" else {"match": "yes"}
+                    return {"groups": [[0], [0]]} if n == "ScoreDedup" else {"candidates": "bad"} if n == "ScoreExtractionSegments" else {"match": "yes"}
                 return base(body)
             rc, rep, _ = self.canary(respond)
             self.assertEqual(rc, 0, rep)

@@ -12,12 +12,12 @@ candidate findings from a tool's review (EXTRACT), group duplicates (DEDUP) and 
   kind=score; entities._review_cost_event_ok) are the two shared definitions that change.
 - The contract allowlist (SCORE_MODELS) is NOT a permission to call anything. Live use still needs the
   operator's SpendAuthorization, the runtime catalog and the host. Retries and repairs are fixed at zero.
-- The extractor answers `ScoreExtractionSpans` (bench.extract@v3): a source comment id and half-open character
-  offsets [start, end) into that comment's text. It never copies text; the producer slices the trusted comment text
-  locally. The older copy shape `ScoreExtraction` (model-written `text`, bench.extract@v1/v2) stays defined so
+- The extractor answers `ScoreExtractionSegments` (bench.extract@v3): a source comment id and an inclusive, 1-based
+  range of the host's numbered segments of that comment (score_prompts.segments). It never copies text; the producer
+  joins the trusted segments locally, so the candidate is an exact substring of the comment by construction. The older copy shape `ScoreExtraction` (model-written `text`, bench.extract@v1/v2) stays defined so
   historical documents still validate, but it is no longer legal for any score role. No output schema has a
   reasoning, explanation or error text field, and nothing here copies model text into an error or incomplete record.
-  Local semantic validators (offset range, partition, ids, counts, finiteness) remain mandatory in the producer.
+  Local semantic validators (segment range, partition, ids, counts, finiteness) remain mandatory in the producer.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from .stages import RUN_STATUSES, STAGE_STATUSES
 
 SCORE_STAGES = ("EXTRACT", "DEDUP", "MATCH")
 SCORE_ROLES = ("extractor", "deduper", "matcher")
-SCORE_ROLE_SCHEMA = {"extractor": "ScoreExtractionSpans", "deduper": "ScoreDedup", "matcher": "ScorePair"}
+SCORE_ROLE_SCHEMA = {"extractor": "ScoreExtractionSegments", "deduper": "ScoreDedup", "matcher": "ScorePair"}
 SCORE_ROLE_STAGE = {"extractor": "EXTRACT", "deduper": "DEDUP", "matcher": "MATCH"}
 SCORE_OUTPUT_SCHEMAS = tuple(SCORE_ROLE_SCHEMA.values())
 # Literal on purpose: contracts cannot import the runtime catalog. A test pins SCORE_MODELS to the catalog's
@@ -57,21 +57,14 @@ ScoreExtraction = define("ScoreExtraction", Obj(
                 "whitespace-only non-empty strings."))
 
 
-def _spans_ok(d):
-    for n, c in enumerate(d["candidates"]):
-        if c["start"] >= c["end"]:
-            yield f".candidates[{n}]", "start must be < end (half-open, non-empty span)"
-
-
-ScoreExtractionSpans = define("ScoreExtractionSpans", Obj(
+ScoreExtractionSegments = define("ScoreExtractionSegments", Obj(
     required={"candidates": Arr(Obj(required={"sourceCommentId": Str(min_len=1, max_len=200),
-                                             "start": Int(0, 10**6), "end": Int(1, 10**6)}),
+                                             "startSegment": Int(1, 10**6), "endSegment": Int(1, 10**6)}),
                                 max_items=1000)},
-    invariants=[Invariant("span-order", "every span is non-empty: start < end", _spans_ok)],
     description="Candidate findings of one tool's review BY REFERENCE (bench.extract@v3): each names a source comment "
-                "id and the half-open Unicode code point offsets [start, end) of the finding inside that comment's "
-                "text as supplied. No model-written text. The upper bound (end <= len(text)) and the id lookup are "
-                "local producer checks against the trusted comment text."))
+                "id and the inclusive 1-based range startSegment..endSegment of that comment's numbered segments. No "
+                "model-written text. Order (start <= end), the upper bound (<= segment count) and the id lookup are "
+                "local producer checks against the trusted segmentation, so they classify as extraction-invalid."))
 ScoreDedup = define("ScoreDedup", Obj(
     required={"groups": Arr(Arr(Int(0, 10**6), min_items=1, max_items=1000), max_items=1000)},
     description="Groups of 0-based candidate indices judged duplicates. Partition checks are local."))

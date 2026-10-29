@@ -143,8 +143,9 @@ class CaptureTransport:
     def _default(body):
         name = body["response_format"]["json_schema"]["name"]
         data = json.loads(body["messages"][-1]["content"])
-        if name == "ScoreExtractionSpans":             # one whole-comment span per non-empty comment (bench.extract@v3)
-            return {"candidates": [{"sourceCommentId": c["id"], "start": 0, "end": c["length"]} for c in data["comments"] if c["length"]]}
+        if name == "ScoreExtractionSegments":          # one whole-comment range per non-empty comment (bench.extract@v3)
+            return {"candidates": [{"sourceCommentId": c["id"], "startSegment": 1, "endSegment": len(c["segments"])}
+                                   for c in data["comments"] if c["segments"]]}
         if name == "ScoreDedup":
             return {"groups": [[c["index"]] for c in data["candidates"]]}
         return {"match": False, "confidence": 0.5}

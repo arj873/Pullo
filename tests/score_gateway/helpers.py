@@ -24,9 +24,9 @@ SENTINEL = "SENTINEL_MODEL_TEXT_91c2"
 USAGE = {"uncachedInputTokens": 100, "cachedInputTokens": 0, "cacheWriteInputTokens": 0, "outputTokens": 10,
          "reasoningTokens": None}
 ROLE_STAGE = {"extractor": "EXTRACT", "deduper": "DEDUP", "matcher": "MATCH"}
-OUT = {"extractor": {"candidates": [{"sourceCommentId": "c1", "start": 0, "end": 1}]},
+OUT = {"extractor": {"candidates": [{"sourceCommentId": "c1", "startSegment": 1, "endSegment": 1}]},
        "deduper": {"groups": [[0]]}, "matcher": {"match": True, "confidence": 0.5}}
-SCHEMA = {"extractor": "ScoreExtractionSpans", "deduper": "ScoreDedup", "matcher": "ScorePair"}
+SCHEMA = {"extractor": "ScoreExtractionSegments", "deduper": "ScoreDedup", "matcher": "ScorePair"}
 AUTH_DOC = {"schema": "spend-authorization@1", "id": "score-invented-auth", "issuedBy": "operator",
             "providers": ["anthropic"], "models": [MODEL], "maxUsdMicrosPerRun": 4_000_000,
             "maxUsdMicrosTotal": 10_000_000, "expiresAt": "2099-01-01T00:00:00Z", "purpose": "invented offline test"}

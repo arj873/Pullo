@@ -67,7 +67,7 @@ class ScoreConfig:
         for stage, role in P.ROLE_OF.items():
             roles[role] = {"provider": "anthropic", "model": MODEL, "family": "anthropic", "resolved": True,
                            "promptVersion": P.VERSIONS[stage],
-                           "outputSchema": {"extractor": "ScoreExtractionSpans", "deduper": "ScoreDedup", "matcher": "ScorePair"}[role],
+                           "outputSchema": {"extractor": "ScoreExtractionSegments", "deduper": "ScoreDedup", "matcher": "ScorePair"}[role],
                            "params": {"maxOutputTokens": self.max_output[stage]},
                            "caps": {"maxOutputTokens": self.max_output[stage], "timeoutSec": self.timeout_sec[stage],
                                     "maxRetries": 0, "maxRepairs": 0},

@@ -3019,15 +3019,15 @@
       ],
       "type": "object"
     },
-    "ScoreExtractionSpans": {
+    "ScoreExtractionSegments": {
       "additionalProperties": false,
-      "description": "Candidate findings of one tool's review BY REFERENCE (bench.extract@v3): each names a source comment id and the half-open Unicode code point offsets [start, end) of the finding inside that comment's text as supplied. No model-written text. The upper bound (end <= len(text)) and the id lookup are local producer checks against the trusted comment text.",
+      "description": "Candidate findings of one tool's review BY REFERENCE (bench.extract@v3): each names a source comment id and the inclusive 1-based range startSegment..endSegment of that comment's numbered segments. No model-written text. Order (start <= end), the upper bound (<= segment count) and the id lookup are local producer checks against the trusted segmentation, so they classify as extraction-invalid.",
       "properties": {
         "candidates": {
           "items": {
             "additionalProperties": false,
             "properties": {
-              "end": {
+              "endSegment": {
                 "maximum": 1000000,
                 "minimum": 1,
                 "type": "integer"
@@ -3037,16 +3037,16 @@
                 "minLength": 1,
                 "type": "string"
               },
-              "start": {
+              "startSegment": {
                 "maximum": 1000000,
-                "minimum": 0,
+                "minimum": 1,
                 "type": "integer"
               }
             },
             "required": [
               "sourceCommentId",
-              "start",
-              "end"
+              "startSegment",
+              "endSegment"
             ],
             "type": "object"
           },
@@ -3057,10 +3057,7 @@
       "required": [
         "candidates"
       ],
-      "type": "object",
-      "x-invariants": [
-        "span-order: every span is non-empty: start < end"
-      ]
+      "type": "object"
     },
     "ScorePair": {
       "additionalProperties": false,
@@ -3255,7 +3252,7 @@
                   ]
                 },
                 "outputSchema": {
-                  "const": "ScoreExtractionSpans"
+                  "const": "ScoreExtractionSegments"
                 },
                 "params": {},
                 "price": {
@@ -3500,7 +3497,7 @@
         },
         "outputSchema": {
           "enum": [
-            "ScoreExtractionSpans",
+            "ScoreExtractionSegments",
             "ScoreDedup",
             "ScorePair"
           ]

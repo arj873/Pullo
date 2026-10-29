@@ -36,7 +36,7 @@
       "fallbacks": [],
       "family": "anthropic",
       "model": "anthropic/claude-opus-5.5",
-      "outputSchema": "ScoreExtractionSpans",
+      "outputSchema": "ScoreExtractionSegments",
       "params": {
         "temperature": 0
       },

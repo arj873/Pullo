@@ -26,7 +26,7 @@ timeout_sec = 60
 
 [prompts]
 extract_version = "bench.extract@v3"
-extract_sha256 = "0551eefdd609ab209c19b1008541699605cda042fd28559a6cad6ab4a512b9be"
+extract_sha256 = "f8c800e133582e42c30a34519c626f37ac4929181d8065642f6edb74760e997f"
 dedup_version = "bench.dedup@v2"
 dedup_sha256 = "9c94b0c03cab34dc5425034cc57169eca853fd38a07bb3b9acd06d9664e9dbe9"
 pair_version = "bench.pair@v2"

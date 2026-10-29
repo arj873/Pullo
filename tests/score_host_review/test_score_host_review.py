@@ -113,7 +113,7 @@ class Chronology(Env):
         h = self.host(tools=("c-tool", "b-tool", "a-tool"))
         r = h.execute_offline()
         n = NAMES(self.transport)
-        self.assertEqual(n, ["ScoreExtractionSpans"] * 3 + ["ScoreDedup"] * 3 + ["ScorePair"] * 18)
+        self.assertEqual(n, ["ScoreExtractionSegments"] * 3 + ["ScoreDedup"] * 3 + ["ScorePair"] * 18)
         self.assertTrue(r["complete"])
         ik = [i["callKey"] for i in self.intents()]
         self.assertEqual(len(ik), len(set(ik)))
@@ -129,7 +129,7 @@ class Chronology(Env):
         self.assertIsNone(r["headline"])
 
     def test_zero_candidate_declared_units_complete_and_empty_declared_refused(self):
-        t = S.CaptureTransport(lambda b: {"candidates": []} if b["response_format"]["json_schema"]["name"] == "ScoreExtractionSpans" else None)
+        t = S.CaptureTransport(lambda b: {"candidates": []} if b["response_format"]["json_schema"]["name"] == "ScoreExtractionSegments" else None)
         r = self.host(transport=t).execute_offline()                                # valid extraction with zero candidates for every declared unit
         self.assertTrue(r["complete"], r["gate"])
         self.assertNotIn("ScorePair", NAMES(t))
@@ -157,7 +157,7 @@ class PinsLockReplay(Env):
         inner = t._default
 
         def respond(b):
-            if "ScoreExtractionSpans" == b["response_format"]["json_schema"]["name"] and not h2:
+            if "ScoreExtractionSegments" == b["response_format"]["json_schema"]["name"] and not h2:
                 h2["x"] = self.host(transport=S.CaptureTransport(), evr=EVR2)
                 try:
                     h2["x"].execute_offline()

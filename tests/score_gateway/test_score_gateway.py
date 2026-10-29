@@ -382,7 +382,7 @@ class Script(unittest.TestCase):
 
 class Diagnostics(Base):
     def test_sentinel_stays_in_trusted_trace_only(self):
-        out = {"candidates": [{"sourceCommentId": H.SENTINEL, "start": 0, "end": 1}]}      # v3: the id is the only model-written string
+        out = {"candidates": [{"sourceCommentId": H.SENTINEL, "startSegment": 1, "endSegment": 1}]}      # v3: the id is the only model-written string
         sc = H.script([("extractor", 0, "response", H.response("extractor", output=out))])
         gw, rec, _, _ = H.live(self.tmp, sc)
         res = gw.call("EXTRACT", "extractor", "s1", 0, H.request("extractor"))

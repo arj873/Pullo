@@ -1,14 +1,14 @@
 {
   "candidates": [
     {
-      "end": 24,
+      "endSegment": 3,
       "sourceCommentId": "c001",
-      "start": 0
+      "startSegment": 1
     },
     {
-      "end": 4,
+      "endSegment": 2,
       "sourceCommentId": "c002",
-      "start": 3
+      "startSegment": 2
     }
   ]
 }
