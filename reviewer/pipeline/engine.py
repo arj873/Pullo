@@ -967,7 +967,8 @@ class Engine:
         if not usable:
             return self._v3_failed(agents, *first_err)
         if self.five:                            # impact@v5: merge in lane order, then the near-duplicate cap
-            merges = specialists.merge(hyps, list(self.specialists))
+            merges = (lanes.cross_merge(hyps) if self.cross      # impact@v7: merge only true near-duplicates
+                      else specialists.merge(hyps, list(self.specialists)))
             payload = {"hypotheses": hyps, "agents": agents, "merges": merges,
                        "collapses": lanes.collapse(hyps, merges)}
             return ("partial" if inc else "completed"), payload, None, inc
@@ -1439,7 +1440,10 @@ class Engine:
                     dups = dups[1:]                  # over-cap already recorded its drop
                 for m in dups:
                     drops.append({"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
-                                  "detail": f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
+                                  "detail": f"duplicate of {g['keptId']} ({lanes.CROSS_MERGE_RULE}: a near-duplicate "
+                                            "claim at an overlapping spot, same head path and category; the earlier "
+                                            "lane's is kept)" if g["rule"] == lanes.CROSS_MERGE_RULE else
+                                            f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
                                             f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
                                             "earlier specialist's is kept)"})
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":

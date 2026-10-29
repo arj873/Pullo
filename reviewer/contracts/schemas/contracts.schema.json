@@ -4703,7 +4703,10 @@
                     "uniqueItems": true
                   },
                   "rule": {
-                    "const": "specialist-merge@2"
+                    "enum": [
+                      "specialist-merge@2",
+                      "cross-model-merge@1"
+                    ]
                   }
                 },
                 "required": [

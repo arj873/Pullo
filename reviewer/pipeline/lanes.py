@@ -60,7 +60,7 @@ from __future__ import annotations
 import re as _re
 
 from reviewer.contracts.budget import investigation_limit, stage_ceiling
-from reviewer.contracts.entities import NEAR_DUP_VERSION
+from reviewer.contracts.entities import CROSS_MERGE_VERSION, NEAR_DUP_VERSION
 
 from . import prompts, retrieval, specialists, sweeps
 
@@ -230,13 +230,21 @@ def identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls
 # twice gpt-6.1-terra's input and 2.4x its output rate, so at ~$0.16 per gpt-6.1-terra investigator call an alternate
 # call is ~$0.35: about one call plus the exploration-floor continuation per alternate lane.
 #
-# Merge, near-duplicate cap and VERIFY are the v5 rules over the eight lanes in V7_AGENTS order: an alternate lane's
-# hypothesis that duplicates an earlier lane's (same head path and category, start lines within 3) is merged into it, so
-# what the alternate model adds to VERIFY is what the v5 lanes did not propose; VERIFY takes each lane's candidates by
+# Merge (CROSS_MERGE_RULE, every cross-lane merge of a v7 run): a later lane's hypothesis is merged into an earlier lane's
+# kept one only when the v3 merge predicate holds (same head path and category, start lines within 3) AND the two are
+# near-duplicates by the v5 test (overlapping location ranges, claim Jaccard >= NEAR_DUP_SIMILARITY, identical
+# distinctive tokens). A distinct defect at a nearby line - exactly where a second model's different findings land - is
+# kept and verified on its own; a true restatement is still merged (verified only if the kept one yields no finding).
+# The near-duplicate cap and VERIFY are the v5 rules over the eight lanes in V7_AGENTS order; VERIFY takes each lane's candidates by
 # value, round-robin across all eight lanes (a lane's best before anyone's second), cap verify_cap(8) = 40 (spend binds
 # first). The verifier model is unchanged.
 
 CROSS_BEHAVIOR = prompts.CROSS_MODEL_VERSION
+CROSS_MERGE_RULE = CROSS_MERGE_VERSION
+CROSS_MERGE_TEXT = ("lane order then output order; a later lane's hypothesis merges into the first kept hypothesis of an "
+                    "earlier lane with the same head path and category, |line - line| <= MERGE_LINE_WINDOW, overlapping "
+                    "location ranges, claim word-set Jaccard >= NEAR_DUP_SIMILARITY and identical distinctive tokens; "
+                    "otherwise it is kept (and verified on its own)")
 CROSS_BUDGET_RULE = "cross-model-budget-split@1"
 V7_AGENTS = prompts.V7_AGENTS
 ALT_AGENTS = prompts.V7_ALT_AGENTS
@@ -249,6 +257,21 @@ CROSS_BUDGET_TEXT = ("K = 8 lanes in V7_AGENTS order (the five v5 lanes, then th
                      "with S = INVESTIGATE spend when the first alternate lane started, alt = ALT_SPEND_BP and v7top = "
                      "min(investigation_limit, V7_INVESTIGATE_SPEND_BP) of the ceiling; per-agent caps unchanged; "
                      "VERIFY keeps the JUDGE reserve")
+
+
+def cross_duplicate(a: dict, b: dict) -> bool:
+    """The impact@v7 merge predicate: the v3 merge predicate AND the v5 near-duplicate test."""
+    return specialists.duplicate(a, b) and overlaps(a, b) and similar(a, b)
+
+
+def cross_merge(hypotheses: list[dict]) -> list[dict]:
+    """impact@v7 merges ([{keptId, mergedIds, rule: CROSS_MERGE_RULE}]) over the eight lanes in V7_AGENTS order."""
+    return specialists.merge(hypotheses, list(V7_AGENTS), predicate=cross_duplicate, rule=CROSS_MERGE_RULE)
+
+
+def lane_merge(plan: dict, hypotheses: list[dict]) -> list[dict]:
+    """The merge record a v5 or v7 Plan's INVESTIGATE artifact must carry."""
+    return cross_merge(hypotheses) if is_v7_plan(plan) else specialists.merge(hypotheses, list(AGENTS))
 
 
 def is_v7_plan(plan: dict) -> bool:
@@ -319,7 +342,8 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
             "altLanes": {a: prompts.lens_of(a) for a in ALT_AGENTS},
             "alternateInvestigator": None if alt is None else {k: alt[k] for k in ("provider", "model", "family")},
             "budget": cross_budget_doc(policy, budget, tool_max_calls),
-            "merge": {"rule": specialists.MERGE_RULE, "lineWindow": specialists.MERGE_LINE_WINDOW},
+            "merge": {"rule": CROSS_MERGE_RULE, "text": CROSS_MERGE_TEXT, "lineWindow": specialists.MERGE_LINE_WINDOW,
+                      "similarity": NEAR_DUP_SIMILARITY},
             "nearDuplicates": {"rule": NEAR_DUP_RULE, "text": NEAR_DUP_TEXT, "similarity": NEAR_DUP_SIMILARITY,
                                "cap": NEAR_DUP_CAP},
             "verify": {"rule": VERIFY_RULE, "text": VERIFY_TEXT, "maxCandidates": verify_cap(len(V7_AGENTS)),

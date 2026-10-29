@@ -126,7 +126,8 @@ def budget_minus_live(b):
 
 # SPECIALISTS-01: root-declared deliberate StagePayload extension, the optional INVESTIGATE "merges" list
 # (investigator.impact@v3 specialist merge record). Subtracted below and pinned on its own.
-MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579df0e7a22"
+# TOURNAMENT-V7 S2 (declared for root acceptance): SpecialistMerge.rule also admits "cross-model-merge@1" (impact@v7).
+MERGES_DIGEST = "sha256:55e653f1b217273ee76eccd512df9bfdea48f7afe034e8f7d6a3577243430fe3"
 # SHARD-COVERAGE-01 (declared for root acceptance): deliberate additive extensions for investigator.impact@v4 diff-shard
 # sweeps: the optional INVESTIGATE "sweep" (SweepCoverage) and the TraceEvent variants "sweep.disposition" and
 # "investigate.coverage". Subtracted below and pinned on their own; LIVE_TRACEEVENT_DIGEST is repinned.

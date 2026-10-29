@@ -1460,9 +1460,13 @@ AgentStatus = Obj(required={"agentId": Slug, "specialist": Slug,
 
 
 SPECIALIST_MERGE_VERSION = "specialist-merge@2"
+# investigator.impact@v7 (TOURNAMENT-V7 S2): a cross-lane merge also needs the near-duplicate similarity (overlapping
+# location ranges, claim word-set Jaccard >= 0.5, identical distinctive tokens), so a distinct defect a second model
+# finds near an earlier lane's hypothesis is kept and verified on its own (reviewer.pipeline.lanes.cross_merge).
+CROSS_MERGE_VERSION = "cross-model-merge@1"
 SpecialistMerge = Obj(
     required={"keptId": Id("hyp"), "mergedIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
-              "rule": Const(SPECIALIST_MERGE_VERSION)},
+              "rule": Enum(SPECIALIST_MERGE_VERSION, CROSS_MERGE_VERSION)},
     description="investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path and "
                 "category, start lines within 3). They stay in `hypotheses`; VERIFY verifies the first one only when "
                 "keptId yields no finding and drops the others as merged.")

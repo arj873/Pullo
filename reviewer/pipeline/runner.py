@@ -520,7 +520,7 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
     if specialists.is_specialist_plan(tplan):    # impact@v3/@v4: the merge record is re-derived
         try:
             again = (specialists.merge(inv["hypotheses"], sweeps.merge_order(inv["agents"])) if sweeps.is_v4_plan(tplan)
-                     else specialists.merge(inv["hypotheses"], lanes.lane_order(tplan)) if lanes.lane_order(tplan)
+                     else lanes.lane_merge(tplan, inv["hypotheses"]) if lanes.lane_order(tplan)
                      else specialists.merge(inv["hypotheses"]))
         except KeyError:
             again = None

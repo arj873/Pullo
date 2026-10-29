@@ -130,12 +130,15 @@ class CrossRig(LaneRig):
 
     def e2e(self, m):
         hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
-        dup = dict(hu, claim="clamp passes hi where lo belongs")       # same path/category/line: merged into hu
-        main, alt = self.lanes8(contracts=[hc], consistency=[hu], **{"logic.alt": [hio], "consistency.alt": [dup]})
+        dup = dict(hu, claim="clamp swaps lo and hi values")            # a true restatement of hu: merged into it
+        near = dict(hu, claim="max gets hi as its first argument so every input above lo is returned as hi")
+        main, alt = self.lanes8(contracts=[hc], consistency=[hu],
+                                **{"logic.alt": [hio], "consistency.alt": [dup], "hygiene.alt": [near]})
         main += [vfinal(0, m, path="src/app/core.py", line=3), vfinal(1, m, path="src/app/util.py", line=2),
-                 vfinal(2, m, path="src/app/io.py", line=2),
-                 judge(w([shid("contracts", 0, hc)]), w([shid("consistency", 0, hu)]), w([shid("logic.alt", 0, hio)]))]
-        return script(*main), script(*alt), (hc, hu, hio, dup)
+                 vfinal(2, m, path="src/app/io.py", line=2), vfinal(3, m, path="src/app/util.py", line=2),
+                 judge(w([shid("contracts", 0, hc)]), w([shid("consistency", 0, hu)]), w([shid("logic.alt", 0, hio)]),
+                       w([shid("hygiene.alt", 0, near)]))]
+        return script(*main), script(*alt), (hc, hu, hio, dup, near)
 
 
 # ---------------------------------------------------------------- configuration and role/model resolution
@@ -347,6 +350,24 @@ class Rules(unittest.TestCase):
         with self.assertRaises(ValueError):
             prompts.investigator_task(INV7)
 
+    def test_v7_merges_only_true_near_duplicates_across_lanes(self):
+        from tests.pipeline.test_lanes_v5 import H
+        kept = H(1, "consistency", "util.py", 10, claim="clamp swaps lo and hi")
+        same = H(2, "consistency.alt", "util.py", 10, claim="clamp swaps lo and hi values")
+        other = H(3, "logic.alt", "util.py", 11, end=12, claim="max gets hi first so inputs above lo come back as hi")
+        apart = H(4, "hygiene.alt", "util.py", 12, claim="clamp swaps lo and hi")             # within 3, no overlap
+        field = H(5, "hygiene.alt", "util.py", 10, claim="clamp swaps `lo` and hi")           # other distinctive token
+        hs = [kept, same, other, apart, field]
+        # the inherited v3 rule would merge every one of them into `kept`
+        self.assertEqual(specialists.merge(hs, list(ALL))[0]["mergedIds"], [h["id"] for h in hs[1:]])
+        self.assertEqual(lanes.cross_merge(hs), [{"keptId": kept["id"], "mergedIds": [same["id"]],
+                                                  "rule": "cross-model-merge@1"}])
+        self.assertEqual(lanes.lane_merge(V7_PLAN, hs), lanes.cross_merge(hs))
+        self.assertEqual(lanes.lane_merge(V5_PLAN, hs[:1]), specialists.merge(hs[:1], list(LANES)))
+        merges = {"stage": "INVESTIGATE", "hypotheses": [], "agents": [], "merges": lanes.cross_merge(hs)}
+        self.assertEqual(validate("StagePayload", merges), [])
+        self.assertTrue(lanes.cross_duplicate(kept, same) and not lanes.cross_duplicate(kept, other))
+
     def test_budget_split_on_the_pilot(self):
         from reviewer.pilot import repository_profile as RP
         p = RP.repository_profile(True, resolve_config(ROOT / "pullo-terra.toml").models, impact_version=7)
@@ -375,7 +396,7 @@ class Rules(unittest.TestCase):
 class EndToEnd(CrossRig):
     def test_eight_lanes_on_two_models_with_merge_and_verify(self):
         m = self.big()
-        main, alt, (hc, hu, hio, dup) = self.e2e(m)
+        main, alt, (hc, hu, hio, dup, near) = self.e2e(m)
         res, spy = self.record_v7(m, main, alt)
         self.assertEqual(res.status, "completed", res.incomplete)
         self.assertEqual(validate_trace(events_of(res)), [])
@@ -396,12 +417,16 @@ class EndToEnd(CrossRig):
         self.assertEqual([a["agentId"] for a in pay["agents"]], list(ALL))
         self.assertEqual(pay["merges"], [{"keptId": shid("consistency", 0, hu), "mergedIds": [shid("consistency.alt", 0,
                                                                                                     dup)],
-                                          "rule": specialists.MERGE_RULE}])
+                                          "rule": lanes.CROSS_MERGE_RULE}])
         alt_h = [h for h in pay["hypotheses"] if h["specialist"] == "logic.alt"]
         self.assertEqual([h["modelFamily"] for h in alt_h], ["synthetic"])
+        # the distinct alternate-model defect next to hu (same file, category and line, another claim) is kept and
+        # verified on its own in the first round; the true restatement is merged and dropped after hu was confirmed
         self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
-                         [shid("contracts", 0, hc), shid("consistency", 0, hu), shid("logic.alt", 0, hio)])
-        self.assertEqual(sorted(f["specialist"] for f in res.findings), ["consistency", "contracts", "logic.alt"])
+                         [shid("contracts", 0, hc), shid("consistency", 0, hu), shid("logic.alt", 0, hio),
+                          shid("hygiene.alt", 0, near)])
+        self.assertEqual(sorted(f["specialist"] for f in res.findings),
+                         ["consistency", "contracts", "hygiene.alt", "logic.alt"])
         vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
         self.assertEqual([d["subjectIds"] for d in vpay["drops"] if d["reason"] == "merged"],
                          [[shid("consistency.alt", 0, dup)]])
@@ -421,7 +446,7 @@ class EndToEnd(CrossRig):
             self.assertEqual(rep.receipt["artifactDigests"][st], res.receipt["artifactDigests"][st], st)
         self.assertEqual([h["id"] for h in rep.hypotheses], [h["id"] for h in res.hypotheses])
         self.assertEqual(runner.load_result(self.out, res.run_id).hypotheses, res.hypotheses)
-        with mock.patch.object(specialists, "merge", lambda hyps, agents=None: []):
+        with mock.patch.object(lanes, "cross_merge", lambda hyps: []):          # the v7 merge is re-derived on load
             with self.assertRaises(PipelineError) as c:
                 runner.load_result(self.out, res.run_id)
         self.assertEqual(c.exception.code, "checkpoint-invalid")
