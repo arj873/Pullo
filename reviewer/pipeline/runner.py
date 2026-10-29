@@ -24,7 +24,7 @@ from reviewer.gateway import Recorder, TraceError, bytes_digest, load_trace
 from reviewer.tools import Limits
 
 from . import coverage as cov_mod
-from . import identity, impactcov, repocov, retrieval, stagereplay
+from . import identity, impactcov, repocov, retrieval, specialists, stagereplay
 from .compare import first_difference, split_recording
 from .engine import Engine, render_outputs
 from .errors import PipelineError
@@ -64,8 +64,11 @@ def validate_spec(spec: ReviewSpec) -> None:
     if (plan["version"], plan["tier"], plan["triage"]) != (1, "standard", "fixed-rule@1") \
             or prof["tier"] != "standard" or prof["triage"] != "fixed-rule@1":
         raise PipelineError("invalid-input", "first slice runs only the fixed standard Plan v1 (fixed-rule@1)")
-    if plan["specialists"] != ["generalist"]:
-        raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
+    if plan["specialists"] != identity.plan_specialists(spec):
+        if identity.plan_specialists(spec) == ["generalist"]:
+            raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
+        raise PipelineError("invalid-input", "investigator.impact@v3 needs Plan.specialists "
+                            f"{identity.plan_specialists(spec)} (the specialist investigators, in run order)")
     host = spec.host
     if not (isinstance(host.attempt, int) and not isinstance(host.attempt, bool) and 1 <= host.attempt <= 1000):
         raise PipelineError("invalid-input", "attempt must be an integer >= 1")
@@ -501,6 +504,17 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
         if art["inputDigest"] != (None if prev is None else artifact_digest(prev)):
             raise PipelineError("checkpoint-invalid", f"{st} artifact is not chained")
         artifacts[st] = prev = art
+    inv = artifacts["INVESTIGATE"]["payload"]
+    if specialists.is_v3_plan(artifacts["TRIAGE"]["payload"]["plan"]):    # impact@v3: the merge record is re-derived
+        try:
+            again = specialists.merge(inv["hypotheses"])
+        except KeyError:
+            again = None
+        if inv.get("merges") != again:
+            raise PipelineError("checkpoint-invalid", "INVESTIGATE merges are not what the merge rule gives for its "
+                                "hypotheses")
+    elif "merges" in inv:
+        raise PipelineError("checkpoint-invalid", "INVESTIGATE merges in a run without specialist investigators")
     for name, key in (("comments.json", "comments.json"), ("review.md", "review.md"), ("run.json", "run.json")):
         data = rd.read(name)
         if data is None or _sha(data) != receipt["outputs"].get(key):

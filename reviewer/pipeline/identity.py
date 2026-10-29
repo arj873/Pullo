@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import prompts, repocov, retrieval
+from . import prompts, repocov, retrieval, specialists
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -95,6 +95,15 @@ def tool_limits(spec) -> Limits:
     return Limits.full_repository() if spec.imports is not None else Limits()
 
 
+def plan_specialists(spec) -> list[str]:
+    """The Plan.specialists the selected investigator needs: the v3 specialist ids, else the one generalist."""
+    pol = retrieval_policy(spec)
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.specialists is not None \
+            and "investigator" in turn_roles(spec.profile):
+        return list(pol.specialists)
+    return ["generalist"]
+
+
 def check_retrieval_inputs(spec) -> None:
     """Policy/profile/imports consistency (before any provider could be contacted)."""
     turns = turn_roles(spec.profile)
@@ -147,6 +156,8 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
+        if pol.specialists is not None:          # investigator.impact@v3 only => v1/v2 run ids are unchanged
+            extra["impact"]["specialists"] = specialists.identity_doc(pol, spec.plan["budget"], lim.max_calls)
     exp = experiment_id(spec)
     if exp != prompts.EXPERIMENT_BASELINE:       # absent for the baseline => default ids unchanged by this experiment
         extra["experiment"] = {"id": exp, "behavior": EXPERIMENT_BEHAVIOR, "tasks": prompts.experiment_task_digests(),

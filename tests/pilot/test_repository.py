@@ -270,7 +270,13 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(dflt["verifier"]["promptVersion"], "verifier.impact@v1")
         self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v2",
                                                                   verifier_prompt="verifier.impact@v1"))
-        for bad in (0, 3, True, "2", None):
+        # SPECIALISTS-01: impact@v3 is selectable explicitly only (the default stays impact@v2)
+        v3 = repository_profile(True, impact_version=3)["roles"]
+        self.assertEqual(v3["investigator"]["promptVersion"], "investigator.impact@v3")
+        self.assertEqual(repository_policy(True, impact_version=3).specialists, ("contracts", "logic", "safety"))
+        self.assertEqual(repository_plan(repository_profile(True, impact_version=3))["specialists"],
+                         ["contracts", "logic", "safety"])
+        for bad in (0, 4, True, "2", None):
             with self.assertRaises(ProfileError):
                 repository_profile(True, impact_version=bad)
         self.assertIsNone(repository_policy(False))

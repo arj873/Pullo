@@ -123,6 +123,27 @@ def budget_minus_live(b):
     return b
 
 
+# SPECIALISTS-01: root-declared deliberate StagePayload extension, the optional INVESTIGATE "merges" list
+# (investigator.impact@v3 specialist merge record). Subtracted below and pinned on its own.
+MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579df0e7a22"
+
+
+def stagepayload_minus_live(sp):
+    sp = copy.deepcopy(sp)
+    inv = [v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE"]
+    assert len(inv) == 1 and "merges" in inv[0]["properties"] and "merges" not in inv[0]["required"]
+    del inv[0]["properties"]["merges"]
+    return sp
+
+
+def investigate_merges(sp):
+    return next(v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")["properties"]["merges"]
+
+
+def minus_live(name, d):
+    return budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload" else d
+
+
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
     for kind in ("host.stop", "retrieval.floor"):
@@ -246,9 +267,9 @@ class Compatibility(Base):
                 continue
             with self.subTest(name):
                 cur = REGISTRY[name].to_json()
-                self.assertEqual(dig(budget_minus_live(cur) if name == "Budget" else cur), want)
+                self.assertEqual(dig(minus_live(name, cur)), want)
         changed = sorted(n for n, want in BASELINE_DEF_DIGESTS.items() if dig(REGISTRY[n].to_json()) != want)
-        self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget")))   # + LIVE-DEADLINE-04 Budget delta
+        self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget", "StagePayload")))   # + LIVE-DEADLINE-04 Budget, SPECIALISTS-01 merges
 
     def test_live_stage_budget_and_host_stop_shapes_are_pinned_independently(self):
         self.assertEqual(dig(REGISTRY["Budget"].to_json()), LIVE_BUDGET_DIGEST)
@@ -257,6 +278,7 @@ class Compatibility(Base):
         self.assertEqual(dig(host_stop_variant(te)), LIVE_HOST_STOP_DIGEST)
         floor = next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "retrieval.floor")
         self.assertEqual(dig(floor), FLOOR_VARIANT_DIGEST)
+        self.assertEqual(dig(investigate_merges(REGISTRY["StagePayload"].to_json())), MERGES_DIGEST)
 
     def test_TraceEvent_differs_only_by_the_cost_variant_invariant(self):
         te = copy.deepcopy(REGISTRY["TraceEvent"].to_json())
@@ -295,7 +317,7 @@ class Compatibility(Base):
         for name, want in BASELINE_DEF_DIGESTS.items():
             if name not in self.CHANGED_LEGACY_DEFS:
                 got = bundle["$defs"][name]
-                self.assertEqual(dig(budget_minus_live(got) if name == "Budget" else got), want, name)
+                self.assertEqual(dig(minus_live(name, got)), want, name)
                 self.assertEqual(dig(got), dig(REGISTRY[name].to_json()), name)       # and the current registry
             else:
                 self.assertEqual(dig(bundle["$defs"][name]), dig(REGISTRY[name].to_json()), name)

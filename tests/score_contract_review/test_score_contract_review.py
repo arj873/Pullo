@@ -121,6 +121,27 @@ def budget_minus_live(b):
     return b
 
 
+# SPECIALISTS-01: root-declared deliberate StagePayload extension, the optional INVESTIGATE "merges" list
+# (investigator.impact@v3 specialist merge record). Subtracted below and pinned on its own.
+MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579df0e7a22"
+
+
+def stagepayload_minus_live(sp):
+    sp = copy.deepcopy(sp)
+    inv = [v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE"]
+    assert len(inv) == 1 and "merges" in inv[0]["properties"] and "merges" not in inv[0]["required"]
+    del inv[0]["properties"]["merges"]
+    return sp
+
+
+def investigate_merges(sp):
+    return next(v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")["properties"]["merges"]
+
+
+def minus_live(name, d):
+    return budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload" else d
+
+
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
     for kind in ("host.stop", "retrieval.floor"):
@@ -264,7 +285,7 @@ class Base(unittest.TestCase):
 # ============================================================ L1 / L2: compatibility against the frozen baseline
 class L1L2Compatibility(Base):
     def test_every_baseline_def_except_the_two_declared_changed_defs_is_byte_identical(self):
-        got = [[n, C.digest(budget_minus_live(REGISTRY[n].to_json()) if n == "Budget" else REGISTRY[n].to_json())]
+        got = [[n, C.digest(minus_live(n, REGISTRY[n].to_json()))]
                for n in OLD_DEF_NAMES - CHANGED_DEFS]
         self.assertEqual(len(got), 39)
         self.assertEqual(combined(got), OLD_DEFS_COMBINED)
@@ -277,6 +298,7 @@ class L1L2Compatibility(Base):
         self.assertEqual(C.digest(host_stop_variant(te)), LIVE_HOST_STOP_DIGEST)
         floor = next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "retrieval.floor")
         self.assertEqual(C.digest(floor), FLOOR_VARIANT_DIGEST)
+        self.assertEqual(C.digest(investigate_merges(REGISTRY["StagePayload"].to_json())), MERGES_DIGEST)
 
     def test_CostRecord_changes_only_by_appending_score_to_kind(self):
         cr = REGISTRY["CostRecord"].to_json()
@@ -300,7 +322,7 @@ class L1L2Compatibility(Base):
         bundle = loads_strict((ROOT / "reviewer/contracts/schemas/contracts.schema.json").read_bytes())
         self.assertEqual(bundle["$id"], "reviewer-contracts-s0a-contracts@7")
         self.assertEqual(set(bundle["$defs"]), OLD_DEF_NAMES | NEW_DEF_NAMES)
-        got = [[n, C.digest(budget_minus_live(bundle["$defs"][n]) if n == "Budget" else bundle["$defs"][n])]
+        got = [[n, C.digest(minus_live(n, bundle["$defs"][n]))]
                for n in OLD_DEF_NAMES - CHANGED_DEFS]
         self.assertEqual(combined(got), OLD_DEFS_COMBINED)
         for n in ("Budget", "TraceEvent", "CostRecord"):                    # and the current registry, exactly

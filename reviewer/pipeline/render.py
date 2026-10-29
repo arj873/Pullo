@@ -72,7 +72,8 @@ def summary_line(status: str, comments: list, incomplete: list, error: dict | No
 
 def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete: list, error: dict | None,
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
-              coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None) -> str:
+              coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
+              specialists: dict | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -124,6 +125,19 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
                 f"- find_references calls: {impact['findReferencesCalls']}",
                 "- The impact map is a heuristic (definition patterns and whole-word matches): names can collide and "
                 "dynamic, reflective or string-built uses are missed. Dependents not opened were not reviewed.", ""]
+    if specialists is not None:     # investigator.impact@v3 only (the INVESTIGATE payload has `merges`): bytes unchanged else
+        n = {a["agentId"]: 0 for a in specialists["agents"]}
+        for h in specialists["hypotheses"]:
+            n[h["specialist"]] = n.get(h["specialist"], 0) + 1
+        out += ["## Specialist investigators", ""]
+        for a in specialists["agents"]:
+            err = a.get("error")
+            out.append(f"- {a['agentId']}: {a['status']}" + (f" (`{err['code']}`)" if err else "")
+                       + f"; {n.get(a['agentId'], 0)} resolved hypothesis(es)")
+        merged = sum(len(m["mergedIds"]) for m in specialists["merges"])
+        out += [f"- Duplicates merged across specialists before verification: {merged}",
+                "- A specialist that did not complete did not review its focus; its share of the review is missing.",
+                ""]
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

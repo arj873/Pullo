@@ -78,6 +78,15 @@ IMPACT_V2_GOLD = {
     "policy": "sha256:d80e2c255d0a6247abe4d739a72566066155069d846e4b707ddb0d34694913f9",
     "benchFirst": "12e1dd884534981660e421fbbbcdce5b5d7ea3f4dfb10aab633b443b619cb915",
 }
+# SPECIALISTS-01: investigator.impact@v3 (three specialist investigators) is selectable explicitly only
+# (impact_version=3); the defaults above stay impact@v2. Its prompt id, contracts-lens first task and Plan specialists
+# differ; numeric limits, models, verifier and judge are unchanged.
+IMPACT_V3_GOLD = {
+    "profileOn": "sha256:0959087c4958b516e6fb984d611b9535ec46d6325047e54290586d41ec98367a",
+    "policy": "sha256:5913eba11ee09a1ecf782dff5b8efb75d8d9d3ea9879f931802b9e27d779392f",
+    "plan": "sha256:9244e9a26da37d0b807fff9731d4499e843123b3d558b70a89aa5e246bf433d8",
+    "benchFirst": "7b79ed6e702b5d04b6cebf0e1127d7a9ddb4840213ba29cfe894f1a84a0d2928",
+}
 
 UTIL = "def close_stream():\n    return None\n\ndef is_open():\n    return True\n"
 BASE_U, HEAD_U = {**BASE, "src/util.py": UTIL}, {**HEAD, "src/util.py": UTIL}
@@ -156,6 +165,15 @@ class DefaultUnchanged(Base_):
         self.assertEqual(digest(repository_plan(repository_profile(True, ms))), GOLD["plan"])
         self.assertEqual(repository_policy(True).digest, IMPACT_V2_GOLD["policy"])
         self.assertEqual(profile_digest(repository_profile(False, ms, impact=True)), GOLD["profileOff"])
+        # explicit impact_version=2 is the default, byte for byte
+        self.assertEqual(profile_digest(repository_profile(True, ms, impact_version=2)), IMPACT_V2_GOLD["profileOn"])
+        self.assertEqual(repository_policy(True, impact_version=2).digest, IMPACT_V2_GOLD["policy"])
+        # SPECIALISTS-01 (explicit impact_version=3 only): new pins; only its plan names the specialists
+        v3 = repository_profile(True, ms, impact_version=3)
+        self.assertEqual(profile_digest(v3), IMPACT_V3_GOLD["profileOn"])
+        self.assertEqual(digest(repository_plan(v3)), IMPACT_V3_GOLD["plan"])
+        self.assertEqual(repository_plan(v3)["specialists"], ["contracts", "logic", "safety"])
+        self.assertEqual(repository_policy(True, impact_version=3).digest, IMPACT_V3_GOLD["policy"])
 
     def test_baseline_run_requests_tasks_comment_and_config_identity_equal_the_pre_change_values(self):
         m = self.case()
@@ -431,6 +449,58 @@ class Selector(TBH.Base):
         self.assertNotEqual(v2["configIdentityDigest"], p["configIdentityDigest"])
         self.assertEqual({k: v2[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")},
                          {k: p[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")})
+
+    def test_impact_v3_selected_explicitly_has_its_own_first_request_policy_and_profile(self):
+        """SPECIALISTS-01: impact@v3 only by explicit selection; its plan pins are new, the v2 default is unchanged."""
+        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=3)       # noqa: E731
+        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=3)         # noqa: E731
+        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
+            p = self.plan()["plan"]
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V3_GOLD["benchFirst"])
+        self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_V3_GOLD["policy"])
+        self.assertEqual(p["profileDigest"], IMPACT_V3_GOLD["profileOn"])
+        self.assertEqual(p["capturedCount"], 3)                         # one first request per specialist
+        v2 = self.plan()["plan"]
+        self.assertEqual(v2["firstRequest"]["bodySha256"], IMPACT_V2_GOLD["benchFirst"])
+        self.assertNotEqual(v2["configIdentityDigest"], p["configIdentityDigest"])
+        self.assertEqual({k: v2[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")},
+                         {k: p[k] for k in ("runCeilingUsdMicros", "outputCaps", "models")})
+
+    def test_live_v3_runs_three_specialists_and_replays_strictly(self):
+        """SPECIALISTS-01: one end-to-end explicit impact@v3 benchmark run with the fake wire (each specialist replays
+        the one-investigator script: tests.specialist_lanes) and its strict, keyless replay."""
+        from tests.pilot.test_repository import Model
+        from tests.specialist_lanes import lanes
+
+        class LaneModel(Model):
+            def __call__(self, http_req):
+                self.requests.append(http_req)
+                body = json.loads(http_req.body)
+                self.bodies.append(body)
+                content = lanes(self).next(body)
+                d = {"id": f"gen-{len(self.requests)}", "model": MODEL, "provider": "Anthropic",
+                     "choices": [{"index": 0, "finish_reason": "stop",
+                                  "message": {"role": "assistant", "content": json.dumps(content)}}],
+                     "usage": __import__("tests.pilot.test_repository", fromlist=["USAGE"]).USAGE}
+                return __import__("reviewer.runtime.openrouter", fromlist=["HttpResponse"]).HttpResponse(
+                    200, {}, json.dumps(d).encode())
+        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=3)       # noqa: E731
+        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=3)         # noqa: E731
+        model = LaneModel(self.w.imports["head"].snapshot_id)
+        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
+            rep, _ = self.live(model)
+            self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
+            tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
+            self.assertEqual(tasks[0:6:2], [prompts.investigator_v3_task(a) for a in prompts.SPECIALIST_AGENTS])
+            self.assertEqual(rep["counts"]["comments"], 1)
+            trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
+            o = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "replay-v3"), replay_trace=trace,
+                               trace_digest=pin)
+            rr = B.run_benchmark(o, key_loader=self.boom)
+        self.assertEqual((rr["status"], rr["replay"]["liveCalls"], rr["replay"]["replayedCalls"]), ("completed", 0, 9))
+        with self.assertRaises(PipelineError):                     # a v3 recording never replays under the v2 default
+            B.run_benchmark(self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "replay-v2"),
+                                           replay_trace=trace, trace_digest=pin), key_loader=self.boom)
 
     def test_plan_reports_the_selected_arm_and_binds_it_without_changing_the_first_request_or_ceiling(self):
         base, exp = self.plan(), self.plan(experiment="context-check@1")

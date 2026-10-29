@@ -1377,6 +1377,15 @@ AgentStatus = Obj(required={"agentId": Slug, "specialist": Slug,
                   optional={"error": TypedError})
 
 
+SPECIALIST_MERGE_VERSION = "specialist-merge@2"
+SpecialistMerge = Obj(
+    required={"keptId": Id("hyp"), "mergedIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
+              "rule": Const(SPECIALIST_MERGE_VERSION)},
+    description="investigator.impact@v3 only: hypotheses of later specialists that duplicate keptId (same head path and "
+                "category, start lines within 3). They stay in `hypotheses`; VERIFY verifies the first one only when "
+                "keptId yields no finding and drops the others as merged.")
+
+
 def _payload(stage: str, required: dict, optional: dict | None = None) -> Obj:
     return Obj(required={"stage": Const(stage), **required}, optional=optional or {})
 
@@ -1388,7 +1397,8 @@ StagePayload = define("StagePayload", Union("stage", {
                                     "files": Arr(DiffFile, max_items=100_000)}),
     "TRIAGE": _payload("TRIAGE", {"plan": Plan}),
     "INVESTIGATE": _payload("INVESTIGATE", {"hypotheses": Arr(Hypothesis, max_items=1000),
-                                            "agents": Arr(AgentStatus, max_items=100)}),
+                                            "agents": Arr(AgentStatus, max_items=100)},
+                            {"merges": Arr(SpecialistMerge, max_items=1000)}),
     "VERIFY": _payload("VERIFY", {"findings": Arr(Finding, max_items=1000),
                                   "verifications": Arr(VerificationRecord, max_items=1000),
                                   "drops": Arr(DropRecord, max_items=1000)}),
