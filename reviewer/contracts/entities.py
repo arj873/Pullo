@@ -1444,14 +1444,15 @@ SpecialistMerge = Obj(
                 "keptId yields no finding and drops the others as merged.")
 
 
-NEAR_DUP_VERSION = "near-duplicate-cap@1"
+NEAR_DUP_VERSION = "near-duplicate-cap@2"
 NearDuplicateCollapse = Obj(
     required={"keptIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
               "collapsedIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
               "rule": Const(NEAR_DUP_VERSION)},
-    description="investigator.impact@v5 only: a group of near-duplicate hypotheses (same head path and category, start "
-                "lines within 2 of the group's anchor) capped to its best-evidenced members (keptIds). collapsedIds "
-                "stay in `hypotheses`; VERIFY drops them as merged without a verifier call.")
+    description="investigator.impact@v5 only: a group of true near-duplicate hypotheses (same head path and category, "
+                "overlapping location ranges and similar claim text) capped to its best-evidenced member(s) (keptIds). "
+                "collapsedIds (best first) stay in `hypotheses`; VERIFY verifies the first one when no kept member "
+                "yields a finding and drops the others as merged without a verifier call.")
 
 
 def _payload(stage: str, required: dict, optional: dict | None = None) -> Obj:

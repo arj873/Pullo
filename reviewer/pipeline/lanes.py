@@ -23,15 +23,23 @@ spend reaches the JUDGE reserve (sweeps.JUDGE_RESERVE_BP, $0.30 of $4); the rest
 Merge (unchanged rule specialists.MERGE_RULE, agent order V5_AGENTS): a later lane's hypothesis at the same head path,
 same category and start line within 3 of an earlier lane's kept one is merged into it.
 
-Near-duplicate cap (NEAR_DUP_RULE, v5 only). After the merge, the kept hypotheses (every lane, own duplicates included)
-are grouped by head path and category; a group anchors at its first start line (in line order, then INVESTIGATE order)
-and takes every later one whose start line is at most NEAR_DUP_WINDOW lines away (no chaining, so a long block of
-parallel lines is not one group). A group keeps at most NEAR_DUP_CAP hypotheses: the best evidenced (distinct cited
-paths, then cited items, then a stated mechanism, then reach, then suspected severity), ties in INVESTIGATE order. The
-others are recorded in the INVESTIGATE payload `collapses` and VERIFY drops them as `merged` with this rule, without a
-verifier call. The v1-v4 merge behaviour is untouched.
+Near-duplicate cap (NEAR_DUP_RULE, v5 only). It collapses only TRUE near-duplicates: the same claim told again at the
+same spot. After the merge, two kept hypotheses (any lanes) are near-duplicates when they have the same head path and
+category, their location ranges [line, endLine] overlap, and their claim texts are similar (word-set Jaccard >=
+NEAR_DUP_SIMILARITY over lower-case words of 3+ letters). Distinct defects on adjacent lines (a mapping block with a
+wrong field on lines 10, 11 and 12) do not overlap and are never collapsed. Groups anchor at the first hypothesis in
+line order, then INVESTIGATE order; a group keeps NEAR_DUP_CAP (the best evidenced: distinct cited paths, then cited
+items, then a stated mechanism, then reach, then suspected severity; ties in INVESTIGATE order); the others are
+recorded in the INVESTIGATE payload `collapses` (collapsedIds best first). Fallback: when no kept member of a group
+yields a finding, VERIFY verifies the best collapsed member (within the cap), as the merge rule retries a duplicate;
+every other collapsed member is dropped as `merged` with this rule, without a verifier call. The v1-v4 merge behaviour
+is untouched.
 
-VERIFY (VERIFY_RULE). Candidates round-robin across the five lanes; the cap is min(MAX_VERIFY_CANDIDATES_V5, 20 +
+VERIFY (VERIFY_RULE). Each lane's candidates are ordered by value first (suspectedSeverity P0 before P1 before P2,
+then the stated confidence, highest first, then output order), then taken round-robin across the five lanes, so a
+lane's most valuable hypothesis is verified before anyone's second. On a large diff it is SPEND, not the cap, that
+binds: at about $0.07-0.10 per verified candidate, the JUDGE reserve stops VERIFY after roughly 15 candidates; the
+rest are dropped as `budget` and disclosed. The cap is min(MAX_VERIFY_CANDIDATES_V5, 20 +
 VERIFY_CANDIDATES_PER_LANE * (K - 3)) = 28; the verifier ToolSession is renewed every sweeps.VERIFY_SESSION_CANDIDATES
 verified candidates (verifier, verifier-02, ...), as in v4.
 
@@ -40,6 +48,8 @@ started inside its slice may end after it; the gate stops the lane before its ne
 """
 
 from __future__ import annotations
+
+import re as _re
 
 from reviewer.contracts.budget import investigation_limit, stage_ceiling
 from reviewer.contracts.entities import NEAR_DUP_VERSION
@@ -55,8 +65,8 @@ V3_LANES = len(specialists.AGENTS)
 
 LANE_TOOL_CALLS = 20                  # the v3 lane size (60 / 3)
 INVESTIGATE_SPEND_BP = 5500           # INVESTIGATE may reach 55% of the run ceiling; VERIFY + JUDGE keep >= 45%
-NEAR_DUP_WINDOW = 2                   # start lines at most this far from the group's anchor
-NEAR_DUP_CAP = 2                      # hypotheses kept per (path, category, window) group
+NEAR_DUP_SIMILARITY = 0.5             # claim word-set Jaccard for two hypotheses at an overlapping spot
+NEAR_DUP_CAP = 1                      # hypotheses kept per group of true near-duplicates (the rest: collapsed)
 VERIFY_CANDIDATES_PER_LANE = 4
 MAX_VERIFY_CANDIDATES_V5 = 40
 _SEVERITY = {"P0": 2, "P1": 1, "P2": 0}
@@ -65,11 +75,13 @@ BUDGET_TEXT = ("K lanes in V5_AGENTS order; lane i: tool calls < pool*(i+1)//K w
                "run_tool_calls, maxToolCalls), spend < top*(i+1)//K with top = min(investigation_limit, "
                "INVESTIGATE_SPEND_BP of the ceiling), time C*(i+1)//K s; per-agent caps unchanged; VERIFY keeps the "
                "JUDGE reserve")
-NEAR_DUP_TEXT = ("after the merge, kept hypotheses grouped by head path and category, anchored at the first start line "
-                 "(line order, then INVESTIGATE order), members within NEAR_DUP_WINDOW lines of the anchor; keep the "
-                 "NEAR_DUP_CAP best evidenced (distinct cited paths, cited items, mechanism, reach, severity; ties: "
-                 "INVESTIGATE order); the rest -> collapses, VERIFY drops them as merged")
-VERIFY_TEXT = ("round-robin across the lanes; cap min(MAX_VERIFY_CANDIDATES_V5, 20 + VERIFY_CANDIDATES_PER_LANE*(K-3)); "
+NEAR_DUP_TEXT = ("after the merge, kept hypotheses with the same head path and category whose location ranges overlap "
+                 "the group anchor's (first in line order, then INVESTIGATE order) and whose claim word sets have "
+                 "Jaccard >= NEAR_DUP_SIMILARITY form a group; keep the NEAR_DUP_CAP best evidenced (distinct cited "
+                 "paths, cited items, mechanism, reach, severity; ties: INVESTIGATE order); the rest -> collapses "
+                 "(best first); VERIFY verifies the best collapsed member when no kept member yields a finding, and "
+                 "drops the others as merged")
+VERIFY_TEXT = ("lanes ordered by suspectedSeverity, confidence, output order; round-robin across the lanes; cap min(MAX_VERIFY_CANDIDATES_V5, 20 + VERIFY_CANDIDATES_PER_LANE*(K-3)); "
                "a new verifier session every sweeps.VERIFY_SESSION_CANDIDATES verified candidates")
 
 
@@ -99,6 +111,31 @@ def evidence_score(h: dict) -> tuple:
             int(bool(h.get("reach"))), _SEVERITY.get(h["suspectedSeverity"], 0))
 
 
+def claim_words(text: str) -> frozenset:
+    return frozenset(_re.findall(r"[a-z0-9_]{3,}", text.lower()))
+
+
+def similar(a: dict, b: dict) -> bool:
+    wa, wb = claim_words(a["claim"]), claim_words(b["claim"])
+    return bool(wa | wb) and len(wa & wb) / len(wa | wb) >= NEAR_DUP_SIMILARITY
+
+
+def overlaps(a: dict, b: dict) -> bool:
+    la, lb = a["location"], b["location"]
+    return la["line"] <= lb.get("endLine", lb["line"]) and lb["line"] <= la.get("endLine", la["line"])
+
+
+def near_duplicate(anchor: dict, h: dict) -> bool:
+    return (anchor["location"]["path"] == h["location"]["path"] and anchor["category"] == h["category"]
+            and overlaps(anchor, h) and similar(anchor, h))
+
+
+def value_key(d: dict, n: int) -> tuple:
+    """VERIFY order inside one v5 lane: higher suspected severity, then higher stated confidence, then output order."""
+    c = d.get("confidence")
+    return (-_SEVERITY.get(d.get("suspectedSeverity"), 0), -(c if isinstance(c, (int, float)) else 0), n)
+
+
 def collapse(hypotheses: list[dict], merges: list[dict]) -> list[dict]:
     """-> [{keptIds, collapsedIds, rule}] for the INVESTIGATE artifact (only groups that collapsed something).
     `hypotheses` are in INVESTIGATE order (lane order, then output order)."""
@@ -112,13 +149,13 @@ def collapse(hypotheses: list[dict], merges: list[dict]) -> list[dict]:
     for key in sorted(by_key):
         rest = sorted(by_key[key], key=lambda h: (h["location"]["line"], pos[h["id"]]))
         while rest:
-            anchor = rest[0]["location"]["line"]
-            group = [h for h in rest if h["location"]["line"] - anchor <= NEAR_DUP_WINDOW]
-            rest = [h for h in rest if h["location"]["line"] - anchor > NEAR_DUP_WINDOW]
+            anchor = rest[0]
+            group = [anchor] + [h for h in rest[1:] if near_duplicate(anchor, h)]
+            rest = [h for h in rest if h not in group]
             if len(group) > NEAR_DUP_CAP:
                 best = sorted(group, key=lambda h: (tuple(-x for x in evidence_score(h)), pos[h["id"]]))
                 keep = sorted(best[:NEAR_DUP_CAP], key=lambda h: pos[h["id"]])
-                drop = sorted(best[NEAR_DUP_CAP:], key=lambda h: pos[h["id"]])
+                drop = best[NEAR_DUP_CAP:]                     # best first: the fallback verifies drop[0]
                 groups.append((pos[keep[0]["id"]], {"keptIds": [h["id"] for h in keep],
                                                     "collapsedIds": [h["id"] for h in drop], "rule": NEAR_DUP_RULE}))
     return [g for _, g in sorted(groups, key=lambda t: t[0])]
@@ -140,7 +177,7 @@ def identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls
     return {"behavior": LANES_BEHAVIOR, "lensVersion": prompts.V5_LENS_VERSION, "v3LensVersion":
             prompts.SPECIALIST_LENS_VERSION, "agents": list(AGENTS), "budget": budget_doc(policy, budget, tool_max_calls),
             "merge": {"rule": specialists.MERGE_RULE, "lineWindow": specialists.MERGE_LINE_WINDOW},
-            "nearDuplicates": {"rule": NEAR_DUP_RULE, "text": NEAR_DUP_TEXT, "window": NEAR_DUP_WINDOW,
+            "nearDuplicates": {"rule": NEAR_DUP_RULE, "text": NEAR_DUP_TEXT, "similarity": NEAR_DUP_SIMILARITY,
                                "cap": NEAR_DUP_CAP},
             "verify": {"rule": VERIFY_RULE, "text": VERIFY_TEXT, "maxCandidates": verify_cap(len(AGENTS)),
                        "perLane": VERIFY_CANDIDATES_PER_LANE, "sessionCandidates": sweeps.VERIFY_SESSION_CANDIDATES,

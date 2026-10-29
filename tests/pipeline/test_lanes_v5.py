@@ -126,11 +126,12 @@ class LaneRig(DiffShardRig):
 
 # ---------------------------------------------------------------- pure rules
 
-def H(n, agent, path, line, cat="bug", paths=1, items=1, sev="P1", mech=True):
+def H(n, agent, path, line, cat="bug", paths=1, items=1, sev="P1", mech=True, claim="field total is read twice",
+      end=None):
     ev = [{"kind": "code", "path": f"{path}" if i == 0 else f"other{i}.py"} for i in range(paths)]
     ev += [{"kind": "code", "path": path} for _ in range(items - paths)]
-    h = {"id": f"hyp_{n:016x}", "specialist": agent, "category": cat, "suspectedSeverity": sev,
-         "location": {"path": path, "line": line}, "evidence": ev}
+    h = {"id": f"hyp_{n:016x}", "specialist": agent, "category": cat, "suspectedSeverity": sev, "claim": claim,
+         "location": {"path": path, "line": line, **({"endLine": end} if end else {})}, "evidence": ev}
     if mech:
         h["mechanism"] = "m"
     return h
@@ -154,24 +155,36 @@ class Rules(unittest.TestCase):
         self.assertEqual(specialists.time_slices(300), [100, 200, 300])                  # the v3 default is unchanged
         self.assertEqual(specialists.cumulative(60), [20, 40, 60])
 
-    def test_near_duplicate_cap_groups_anchored_windows_and_keeps_the_best_evidenced(self):
-        hs = [H(1, "logic", "a.py", 10), H(2, "logic", "a.py", 11, paths=2), H(3, "logic", "a.py", 12),
-              H(4, "logic", "a.py", 13), H(5, "logic", "a.py", 14), H(6, "logic", "a.py", 10, cat="security"),
-              H(7, "hygiene", "a.py", 10, items=3), H(8, "logic", "b.py", 10)]
+    def test_distinct_defects_on_adjacent_lines_are_never_collapsed(self):
+        # the gate's case: one lane, one category, three different wrong-field bugs on lines 10/11/12 of one mapping block
+        hs = [H(1, "consistency", "map.py", 10, claim="user.email is assigned from the name field"),
+              H(2, "consistency", "map.py", 11, claim="user.phone copies the email value"),
+              H(3, "consistency", "map.py", 12, claim="address is filled from billing instead of shipping")]
+        self.assertEqual(lanes.collapse(hs, []), [])
+        # even with similar wording, non-overlapping lines are different spots
+        same = [H(n, "consistency", "map.py", 10 + n, claim="field total is read twice") for n in range(3)]
+        self.assertEqual(lanes.collapse(same, []), [])
+
+    def test_true_near_duplicates_collapse_to_the_best_evidenced_with_best_first_fallback_order(self):
+        hs = [H(1, "logic", "a.py", 10, claim="the loop skips the first item of items"),
+              H(2, "logic", "a.py", 10, paths=2, claim="the loop skips the first item"),
+              H(3, "logic", "a.py", 9, end=11, items=3, claim="loop skips the first item of the list"),
+              H(4, "logic", "a.py", 10, claim="the timeout is never refreshed inside the retry"),   # same spot, other claim
+              H(5, "logic", "a.py", 10, cat="security", claim="the loop skips the first item"),     # other category
+              H(6, "hygiene", "b.py", 10, claim="the loop skips the first item")]                  # other file
         got = lanes.collapse(hs, [])
-        # a.py/bug: anchor 10 -> {10, 11, 12, 10(h7)}: keep h2 (2 paths) and h7 (3 items); 13 anchors {13, 14}: <= cap
-        self.assertEqual(got, [{"keptIds": [hs[1]["id"], hs[6]["id"]], "collapsedIds": [hs[0]["id"], hs[2]["id"]],
-                                "rule": "near-duplicate-cap@1"}])
+        self.assertEqual(got, [{"keptIds": [hs[1]["id"]], "collapsedIds": [hs[2]["id"], hs[0]["id"]],
+                                "rule": "near-duplicate-cap@2"}])
         self.assertEqual(lanes.collapse(list(hs), []), got)                               # deterministic
-        # a merged (cross-lane) hypothesis is decided by the merge and never by the cap
-        merged = [{"keptId": hs[1]["id"], "mergedIds": [hs[6]["id"]], "rule": specialists.MERGE_RULE}]
-        got2 = lanes.collapse(hs, merged)
-        self.assertEqual(got2[0]["keptIds"], [hs[0]["id"], hs[1]["id"]])
-        self.assertEqual(got2[0]["collapsedIds"], [hs[2]["id"]])
-        # ties go to INVESTIGATE order; severity and mechanism count
-        t = [H(1, "logic", "c.py", 5, mech=False), H(2, "logic", "c.py", 5), H(3, "logic", "c.py", 6, sev="P0", mech=False)]
-        self.assertEqual(lanes.collapse(t, [])[0]["collapsedIds"], [t[0]["id"]])
-        self.assertEqual(lanes.collapse(hs[:2], []), [])                                  # under the cap: nothing
+        merged = [{"keptId": hs[1]["id"], "mergedIds": [hs[2]["id"]], "rule": specialists.MERGE_RULE}]
+        self.assertEqual(lanes.collapse(hs, merged)[0]["collapsedIds"], [hs[0]["id"]])   # the merge decides first
+        self.assertTrue(lanes.similar({"claim": "Loop skips first item"}, {"claim": "the loop skips the first item"}))
+        self.assertFalse(lanes.similar({"claim": "a b"}, {"claim": "c d"}))
+
+    def test_value_order_inside_a_lane(self):
+        ds = [{"suspectedSeverity": "P2"}, {"suspectedSeverity": "P0"}, {"suspectedSeverity": "P1", "confidence": 0.2},
+              {"suspectedSeverity": "P1", "confidence": 0.9}, {"suspectedSeverity": "P1"}]
+        self.assertEqual(sorted(range(5), key=lambda n: lanes.value_key(ds[n], n)), [1, 3, 2, 4, 0])
 
     def test_lane_tasks_keep_the_v3_lenses_and_add_two(self):
         for a in ("contracts", "logic", "safety"):
@@ -187,9 +200,10 @@ class Rules(unittest.TestCase):
                   "every branch that a configuration flag"):
             self.assertIn(k, cons)
         hyg = " ".join(prompts.specialist_task("hygiene").split())
-        for k in ("never refreshes", "default", "early return", "cannot fail", "broader than", "low (P2)",
-                  "Never report style"):
+        for k in ("never refreshes", "default", "early return", "cannot fail", "passes for a different failure",
+                  "low (P2)", "Never report style", "A test that merely could check more is not a defect"):
             self.assertIn(k, hyg)
+        self.assertNotIn("check too little", hyg)
         self.assertEqual(prompts.V5_AGENTS, LANES)
 
 
@@ -235,7 +249,7 @@ class EndToEnd(LaneRig):
         self.assertEqual(runner.load_result(self.out, res.run_id).hypotheses, res.hypotheses)
         with mock.patch.object(lanes, "collapse", lambda hyps, merges: [{"keptIds": [hyps[0]["id"]],
                                                                          "collapsedIds": [hyps[1]["id"]],
-                                                                         "rule": "near-duplicate-cap@1"}]):
+                                                                         "rule": "near-duplicate-cap@2"}]):
             with self.assertRaises(PipelineError) as c:
                 runner.load_result(self.out, res.run_id)
         self.assertEqual(c.exception.code, "checkpoint-invalid")
@@ -245,27 +259,56 @@ class EndToEnd(LaneRig):
 
 
 class NearDuplicates(LaneRig):
-    def test_near_duplicates_are_capped_before_verify_and_disclosed(self):
+    def dups(self, m):
+        h1 = self.h_test(m, "the test asserts the buggy total value")
+        h2 = self.h_test(m, "the test asserts the buggy total", extra=[m.cite("src/app/core.py", 3)])
+        h3 = self.h_test(m, "this test asserts the buggy total value too")
+        return h1, h2, h3
+
+    def test_true_near_duplicates_are_collapsed_before_verify_and_disclosed(self):
         m = self.big()
-        h1 = self.h_test(m, "the test asserts the buggy total")
-        h2 = self.h_test(m, "the expected value 2 encodes the off-by-one", extra=[m.cite("src/app/core.py", 3)])
-        h3 = self.h_test(m, "the assertion cannot catch the skipped first item")
-        scr = script(*self.five(m, hygiene=[h1, h2, h3]),
-                     vfinal(0, m, path="tests/test_core.py", line=5), vfinal(1, m, path="tests/test_core.py", line=5),
-                     judge())
+        h1, h2, h3 = self.dups(m)
+        scr = script(*self.five(m, hygiene=[h1, h2, h3]), vfinal(0, m, path="tests/test_core.py", line=5), judge())
         res, _ = self.record_v5(m, scr)
         self.assertEqual(res.status, "completed", res.incomplete)
         ids = [shid("hygiene", n, h) for n, h in enumerate((h1, h2, h3))]
         pay = self.payload(res)["payload"]
-        self.assertEqual(pay["collapses"], [{"keptIds": ids[:2], "collapsedIds": ids[2:], "rule": "near-duplicate-cap@1"}])
+        self.assertEqual(pay["collapses"], [{"keptIds": [ids[1]], "collapsedIds": [ids[0], ids[2]],
+                                             "rule": "near-duplicate-cap@2"}])
         self.assertEqual([h["id"] for h in pay["hypotheses"]], ids)                     # kept in the artifact
-        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")], ids[:2])
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")], [ids[1]])
         vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
-        drop = [d for d in vpay["drops"] if d["subjectIds"] == ids[2:]]
-        self.assertEqual([d["reason"] for d in drop], ["merged"])
-        self.assertIn("near-duplicate-cap@1", drop[0]["detail"])
-        md = Path(res.review_path).read_text(encoding="utf-8")
-        self.assertIn("the best evidenced kept): 1", md)
+        self.assertEqual(sorted((d["subjectIds"][0], d["reason"]) for d in vpay["drops"]),
+                         sorted([(ids[0], "merged"), (ids[2], "merged")]))
+        self.assertIn("near-duplicate-cap@2", vpay["drops"][0]["detail"])
+        self.assertIn("the best evidenced kept): 2", Path(res.review_path).read_text(encoding="utf-8"))
+
+    def test_a_refuted_kept_member_hands_verify_the_best_collapsed_one(self):
+        m = self.big()
+        h1, h2, h3 = self.dups(m)
+        ids = [shid("hygiene", n, h) for n, h in enumerate((h1, h2, h3))]
+        scr = script(*self.five(m, hygiene=[h1, h2, h3]),
+                     vfinal(0, m, verdict="refuted", evidence=[m.cite("tests/test_core.py", 5)]),
+                     vfinal(1, m, path="tests/test_core.py", line=5), judge(w([ids[0]])))
+        res, _ = self.record_v5(m, scr)
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")], [ids[1], ids[0]])
+        self.assertEqual([f["id"] for f in res.findings], [ids[0]])
+        vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
+        self.assertEqual([(d["subjectIds"], d["reason"]) for d in vpay["drops"]],
+                         [([ids[1]], "refuted"), ([ids[2]], "merged")])
+
+    def test_the_gates_adjacent_distinct_defects_are_all_verified(self):
+        m = self.big()
+        hs = [hyp(m, "src/app/core.py", k, claim=c, category="bug", evidence=[m.cite("src/app/core.py", k)])
+              for k, c in ((2, "the sum starts from the wrong field"), (3, "the range skips index zero"),
+                           (4, "the accumulator adds the wrong element"))]
+        scr = script(*self.five(m, consistency=hs), *[vfinal(n, m, path="src/app/core.py", line=k)
+                                                       for n, k in enumerate((2, 3, 4))], judge())
+        res, _ = self.record_v5(m, scr)
+        self.assertEqual(self.payload(res)["payload"]["collapses"], [])
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
+                         [shid("consistency", n, h) for n, h in enumerate(hs)])
+        self.assertEqual(len(res.findings), 3)
 
     def test_cross_lane_duplicates_keep_the_v3_merge_rule(self):
         m = self.big()
@@ -280,6 +323,18 @@ class NearDuplicates(LaneRig):
 
 
 class BudgetsAndVerify(LaneRig):
+    def test_each_lane_verifies_its_most_valuable_hypotheses_first(self):
+        m = self.big()
+        lo = hyp(m, "src/app/conf.py", 1, claim="timeout too short", severity="P2", evidence=[m.cite("src/app/conf.py", 1)])
+        hi = hyp(m, "src/app/core.py", 3, claim="the loop skips the first item", severity="P0",
+                 evidence=[m.cite("src/app/core.py", 3)])
+        hu = self.h_util(m)
+        scr = script(*self.five(m, logic=[lo, hi], hygiene=[hu]), vfinal(0, m, path="src/app/core.py", line=3),
+                     vfinal(1, m, path="src/app/util.py", line=2), vfinal(2, m, path="src/app/conf.py", line=1), judge())
+        res, _ = self.record_v5(m, scr)
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
+                         [shid("logic", 1, hi), shid("hygiene", 0, hu), shid("logic", 0, lo)])
+
     def test_tool_calls_follow_the_five_lane_ceilings_with_rollover(self):
         m = self.big()
         reqs = [treq("read_file", side="head", path="src/app/use.py", start_line=k, end_line=k) for k in range(1, 6)]
@@ -366,7 +421,7 @@ class Identity(LaneRig):
         others = [self.spec(m, backend, profile=V3_PROFILE, plan=V3_PLAN, retrieval=V3_POLICY),
                   self.spec(m, backend, profile=V4_PROFILE, plan=V4_PLAN, retrieval=V4_POLICY)]
         base, obase = identity.config_snapshot_id(spec), [identity.config_snapshot_id(s) for s in others]
-        for name, value in (("NEAR_DUP_CAP", 3), ("NEAR_DUP_WINDOW", 1), ("LANE_TOOL_CALLS", 19),
+        for name, value in (("NEAR_DUP_CAP", 2), ("NEAR_DUP_SIMILARITY", 0.6), ("LANE_TOOL_CALLS", 19),
                             ("INVESTIGATE_SPEND_BP", 5000), ("MAX_VERIFY_CANDIDATES_V5", 25), ("NEAR_DUP_TEXT", "x")):
             orig = getattr(lanes, name)
             try:
@@ -396,9 +451,9 @@ class Identity(LaneRig):
     def test_payload_contract(self):
         hid0, hid1 = "hyp_" + "a" * 16, "hyp_" + "b" * 16
         base = {"stage": "INVESTIGATE", "hypotheses": [], "agents": [], "merges": []}
-        ok = dict(base, collapses=[{"keptIds": [hid0], "collapsedIds": [hid1], "rule": "near-duplicate-cap@1"}])
+        ok = dict(base, collapses=[{"keptIds": [hid0], "collapsedIds": [hid1], "rule": "near-duplicate-cap@2"}])
         self.assertEqual(validate("StagePayload", ok), [])
-        for bad in ([{"keptIds": [hid0], "collapsedIds": [], "rule": "near-duplicate-cap@1"}],
+        for bad in ([{"keptIds": [hid0], "collapsedIds": [], "rule": "near-duplicate-cap@2"}],
                     [{"keptIds": [hid0], "collapsedIds": [hid1], "rule": "x@1"}]):
             self.assertNotEqual(validate("StagePayload", dict(base, collapses=bad)), [])
 

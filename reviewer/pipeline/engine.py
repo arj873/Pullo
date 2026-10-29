@@ -1234,23 +1234,25 @@ class Engine:
     def _v3_candidates(self) -> list:
         """investigator.impact@v3: every completed specialist's accepted answer, interleaved round-robin in specialist
         order (contracts 0, logic 0, safety 0, contracts 1, ...), as [(running index, hypothesis id, draft)]. The
-        running index is unique across specialists."""
-        lanes = []
+        running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key)."""
+        lane_list = []
         for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
             if a["status"] != "completed":
                 continue
             agent = a["agentId"]
             if self.sweep and agent not in specialists.AGENTS:      # impact@v4 diff-shard sweep lane
-                lanes.append(self._sweep_lane(agent))
+                lane_list.append(self._sweep_lane(agent))
                 continue
             src = self._floor_source(agent)
             drafts = next((p["hypotheses"] for e in reversed(self.recorder.events)
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
                            and (src is None or e["callId"] == src)
                            and (p := terminal_payload(e)) is not None), [])
-            lanes.append([(hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
-                          for n, d in enumerate(drafts)])
-        out = [lane[k] for k in range(max(map(len, lanes), default=0)) for lane in lanes if k < len(lane)]
+            order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n)) if self.five
+                     else range(len(drafts)))          # impact@v5: a lane's most valuable hypotheses first
+            lane_list.append([(hypothesis_id(agent, n, drafts[n]["claim"], drafts[n]["location"]["path"],
+                                         drafts[n]["location"]["line"]), drafts[n]) for n in order])
+        out = [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
         return [(i, hid, d) for i, (hid, d) in enumerate(out)]
 
     def _sweep_lane(self, agent: str) -> list:
@@ -1382,11 +1384,7 @@ class Engine:
                 continue
             if hid in merged_into:              # v3: a later specialist's duplicate, decided after its kept one
                 continue
-            if hid in collapsed:                # impact@v5: a near-duplicate beyond the per-group cap
-                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "merged",
-                              "detail": f"near-duplicate of {', '.join(collapsed[hid])} ({lanes.NEAR_DUP_RULE}: same "
-                                        f"head path and category, start lines within {lanes.NEAR_DUP_WINDOW}; the "
-                                        f"{lanes.NEAR_DUP_CAP} best-evidenced are verified)"[:2000]})
+            if hid in collapsed:                # impact@v5: a true near-duplicate, decided after its kept member(s)
                 continue
             if over_cap(hid):
                 continue
@@ -1410,6 +1408,8 @@ class Engine:
                                   "detail": f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
                                             f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
                                             "earlier specialist's is kept)"})
+            if self.five and not (self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed"):
+                self._verify_collapsed(index, hyps, outcome, attempt, over_cap, drops, lambda: stop)
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
         for sess in sessions.values():
@@ -1417,6 +1417,26 @@ class Engine:
                 inc.append(self._inc(stage, sess.incomplete))
         status = "partial" if inc else "completed"
         return status, {"findings": findings, "verifications": records, "drops": drops}, None, inc
+
+    def _verify_collapsed(self, index, hyps, outcome, attempt, over_cap, drops, stopped) -> None:
+        """impact@v5 (lanes.NEAR_DUP_RULE): a near-duplicate group none of whose kept members yielded a finding hands
+        VERIFY its best collapsed member (within the cap); every other collapsed member is dropped as merged."""
+        for g in sorted(self.artifacts["INVESTIGATE"]["payload"].get("collapses", ()),
+                        key=lambda g: min(index.get(k, len(index)) for k in g["keptIds"])):
+            rest = [m for m in g["collapsedIds"] if m in hyps and m in index]
+            verified = [outcome.get(k) for k in g["keptIds"]]
+            retry = bool(rest) and all(v is False for v in verified) and stopped() is None
+            if retry and not over_cap(rest[0]):
+                if attempt(index[rest[0]], rest[0]):
+                    return
+                rest = rest[1:]
+            elif retry:
+                rest = rest[1:]                          # over-cap already recorded its drop
+            for m in rest:
+                drops.append({"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
+                              "detail": f"near-duplicate of {', '.join(g['keptIds'])} ({lanes.NEAR_DUP_RULE}: same "
+                                        "head path, category and overlapping lines, similar claim; the best evidenced "
+                                        "is verified and this one only if that yields no finding)"[:2000]})
 
     def verify_one(self, session, n, hyp, t0, family):
         """-> (VerificationRecord, Finding|None, DropRecord|None, [incomplete])."""

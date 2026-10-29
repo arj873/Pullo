@@ -130,7 +130,7 @@ MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579
 # "investigate.coverage". Subtracted below and pinned on their own; LIVE_TRACEEVENT_DIGEST is repinned.
 # SPECIALISTS-V5-01 (declared for root acceptance): the optional INVESTIGATE "collapses" list (impact@v5 near-duplicate
 # cap record). Subtracted below and pinned on its own.
-COLLAPSES_DIGEST = "sha256:14bea9290ed40afc8ee836f1ef572c67060b00e9a30f60475b8e9923e6c0b072"
+COLLAPSES_DIGEST = "sha256:fb282fb43bd0ef147d85ff196c84581f663d12f1d95922ccf0dba22094fe12b2"
 SWEEP_PAYLOAD_DIGEST = "sha256:5c4cf79577bdaed3f0eca43e32481bfd376e9fad77a8af75a6a2427c092a8fc9"
 SWEEP_COVERAGE_DEF_DIGEST = "sha256:2171ba69959becaf36cef2553d5d5dcfa50b20cc197c6e382074c73ed5135a18"
 SWEEP_VARIANT_DIGESTS = {"sweep.disposition": "sha256:00f881788c603c8640139bafc05d13b8ae8303b4d4793497f9ff620e6f643279",
