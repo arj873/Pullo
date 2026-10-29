@@ -311,6 +311,9 @@ class Segmentation(unittest.TestCase):
             self.assertEqual(P.segments(("Why" + boundary) * 3 + "End"), ["Why" + boundary] * 3 + ["End"])
         mixed = "A. word x. lower. 9 digit. `tick` after. B"                                  # only before A-Z, 0-9 or a backtick
         self.assertEqual(P.segments(mixed), ["A. word x. lower. ", "9 digit. ", "`tick` after. ", "B"])
+        self.assertEqual(P.segments("The handler. **Second.** Next"), ["The handler. ", "**Second.** Next"])   # segments@2 markup starts
+        for lead in ("[link](u) x", "(Aside) x", '"Quoted" x', "_Note_ x", "*em* x"):
+            self.assertEqual(P.segments("First. " + lead), ["First. ", lead])
         self.assertEqual(P.segments("End.Next. done; Then. \u00c9tat. \u0394elta"),
                          ["End.Next. done; Then. \u00c9tat. \u0394elta"])                     # no space, lowercase, ';', non-ASCII upper
 
@@ -325,11 +328,11 @@ class Segmentation(unittest.TestCase):
         para = ("**Potential issue.** The handler returns early. `cleanup()` is skipped. 3 callers depend on it. "
                 "Consider moving the release into a finally block, e.g. around line 12. ") * 4
         segs = P.segments(para)
-        self.assertEqual(len(segs), 13)                     # ".**" is not a boundary (no '. ' + A-Z/0-9/backtick): kept joined
+        self.assertEqual(len(segs), 16)                     # segments@2: a '**' bold-led sentence also starts a segment
         self.assertEqual("".join(segs), para)
-        self.assertEqual(segs[:4], ["**Potential issue.** The handler returns early. ", "`cleanup()` is skipped. ",
-                                    "3 callers depend on it. ",
-                                    "Consider moving the release into a finally block, e.g. around line 12. **Potential issue.** The handler returns early. "])
+        self.assertEqual(segs[:5], ["**Potential issue.** The handler returns early. ", "`cleanup()` is skipped. ",
+                                    "3 callers depend on it. ", "Consider moving the release into a finally block, e.g. around line 12. ",
+                                    "**Potential issue.** The handler returns early. "])
 
     GOLDEN = {
         "": [], "  \n\t": ["  \n\t"], "a\n\n\nb\n": ["a\n\n\n", "b\n"], "\n\nfirst\n  \nsecond": ["\n\nfirst\n  \n", "second"],
@@ -342,10 +345,14 @@ class Segmentation(unittest.TestCase):
         "CRLF. Line\r\nnext\r\n": ["CRLF. ", "Line\r\n", "next\r\n"],
         "\u00dcn\u00efc\u00f6d\u00e9 \u2192 \u6f22\u5b57 \U0001f600. Next\u2028x\x0by\n":
             ["\u00dcn\u00efc\u00f6d\u00e9 \u2192 \u6f22\u5b57 \U0001f600. ", "Next\u2028x\x0by\n"],
+        "The handler. **Second.** Next": ["The handler. ", "**Second.** Next"],
+        'See below. [link](https://example.invalid/a) after. _Note_ here! (Aside) ok? "Quoted" end':
+            ["See below. ", "[link](https://example.invalid/a) after. ", "_Note_ here! ", "(Aside) ok? ", '"Quoted" end'],
+        "Keep; lowercase. after; Then; no split": ["Keep; lowercase. after; Then; no split"],
     }
 
     def test_golden_vectors_are_the_pinned_set(self):
-        self.assertEqual(P.SEGMENTER, "segments@1")
+        self.assertEqual(P.SEGMENTER, "segments@2")
         self.assertEqual(tuple(self.GOLDEN), P.SEGMENTER_GOLDEN)
         for t, want in self.GOLDEN.items():
             with self.subTest(t=t[:20]):
@@ -357,8 +364,9 @@ class Segmentation(unittest.TestCase):
         self.assertEqual(pin, CFG.prompt_sha256["extract"])                                     # pullo-score.toml carries it
         self.assertNotEqual(pin, P.sha(P.VERSIONS["extract"] + "\n" + P.SYSTEM["extract"]))   # not the bare prompt hash
         others = {k: v for k, v in P.prompt_digests().items() if k != "extract"}
-        changes = {"identity": mock.patch.object(P, "SEGMENTER", "segments@2"),
+        changes = {"identity": mock.patch.object(P, "SEGMENTER", "segments@3"),
                    "rule constant": mock.patch.object(P, "_FENCES", ("```",)),
+                   "markup starts": mock.patch.object(P, "_MARKUP_STARTS", "`"),
                    "behaviour": mock.patch.object(P, "segments", lambda t: [t] if t else []),
                    "golden set": mock.patch.object(P, "SEGMENTER_GOLDEN", P.SEGMENTER_GOLDEN + ("x. Y",))}
         for name, patch in changes.items():

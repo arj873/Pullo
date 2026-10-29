@@ -49,14 +49,15 @@ def messages(kind: str, data: dict) -> list:
     return [{"role": "system", "content": SYSTEM[kind]}, {"role": "user", "content": _blob(data)}]
 
 
-SEGMENTER = "segments@1"                                # identity of the segmentation rules below; folded into the extract pin
+SEGMENTER = "segments@2"                                # identity of the segmentation rules below; folded into the extract pin
 _SENTENCE_END = ".?!"
 _FENCES = ("```", "~~~")
+_MARKUP_STARTS = "`*_[(\""                              # a sentence may also open with markdown/quote markup
 
 
 def _boundary_start(ch: str) -> bool:
-    """ASCII only (no Unicode database dependence): uppercase A-Z, digit 0-9 or a backtick."""
-    return "A" <= ch <= "Z" or "0" <= ch <= "9" or ch == "`"
+    """ASCII only (no Unicode database dependence): uppercase A-Z, digit 0-9, or one of ` * _ [ ( \"."""
+    return "A" <= ch <= "Z" or "0" <= ch <= "9" or ch in _MARKUP_STARTS
 
 
 def _sentence_pieces(piece: str) -> list:
@@ -123,11 +124,14 @@ SEGMENTER_GOLDEN = (
     "~~~\na. B\n```\nstill. Code\n~~~\nOut. Here",
     "CRLF. Line\r\nnext\r\n",
     "\u00dcn\u00efc\u00f6d\u00e9 \u2192 \u6f22\u5b57 \U0001f600. Next\u2028x\x0by\n",
+    "The handler. **Second.** Next",
+    "See below. [link](https://example.invalid/a) after. _Note_ here! (Aside) ok? \"Quoted\" end",
+    "Keep; lowercase. after; Then; no split",
 )
 
 
 def segmenter_digest() -> str:
-    core = {"id": SEGMENTER, "sentenceEnd": _SENTENCE_END, "fences": list(_FENCES), "boundaryStart": "A-Z0-9`",
+    core = {"id": SEGMENTER, "sentenceEnd": _SENTENCE_END, "fences": list(_FENCES), "boundaryStart": "A-Z0-9" + _MARKUP_STARTS,
             "golden": [[t, segments(t)] for t in SEGMENTER_GOLDEN]}
     return sha(json.dumps(core, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
 
