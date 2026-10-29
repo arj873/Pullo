@@ -4488,6 +4488,45 @@
               "maxItems": 100,
               "type": "array"
             },
+            "collapses": {
+              "items": {
+                "additionalProperties": false,
+                "description": "investigator.impact@v5 only: a group of near-duplicate hypotheses (same head path and category, start lines within 2 of the group's anchor) capped to its best-evidenced members (keptIds). collapsedIds stay in `hypotheses`; VERIFY drops them as merged without a verifier call.",
+                "properties": {
+                  "collapsedIds": {
+                    "items": {
+                      "pattern": "^(?:hyp_[0-9a-f]{16})$",
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "keptIds": {
+                    "items": {
+                      "pattern": "^(?:hyp_[0-9a-f]{16})$",
+                      "type": "string"
+                    },
+                    "maxItems": 100,
+                    "minItems": 1,
+                    "type": "array",
+                    "uniqueItems": true
+                  },
+                  "rule": {
+                    "const": "near-duplicate-cap@1"
+                  }
+                },
+                "required": [
+                  "keptIds",
+                  "collapsedIds",
+                  "rule"
+                ],
+                "type": "object"
+              },
+              "maxItems": 1000,
+              "type": "array"
+            },
             "hypotheses": {
               "items": {
                 "$ref": "#/$defs/Hypothesis"

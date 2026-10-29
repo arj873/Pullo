@@ -1444,6 +1444,16 @@ SpecialistMerge = Obj(
                 "keptId yields no finding and drops the others as merged.")
 
 
+NEAR_DUP_VERSION = "near-duplicate-cap@1"
+NearDuplicateCollapse = Obj(
+    required={"keptIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
+              "collapsedIds": Arr(Id("hyp"), min_items=1, max_items=100, unique=True),
+              "rule": Const(NEAR_DUP_VERSION)},
+    description="investigator.impact@v5 only: a group of near-duplicate hypotheses (same head path and category, start "
+                "lines within 2 of the group's anchor) capped to its best-evidenced members (keptIds). collapsedIds "
+                "stay in `hypotheses`; VERIFY drops them as merged without a verifier call.")
+
+
 def _payload(stage: str, required: dict, optional: dict | None = None) -> Obj:
     return Obj(required={"stage": Const(stage), **required}, optional=optional or {})
 
@@ -1456,7 +1466,8 @@ StagePayload = define("StagePayload", Union("stage", {
     "TRIAGE": _payload("TRIAGE", {"plan": Plan}),
     "INVESTIGATE": _payload("INVESTIGATE", {"hypotheses": Arr(Hypothesis, max_items=1000),
                                             "agents": Arr(AgentStatus, max_items=100)},
-                            {"merges": Arr(SpecialistMerge, max_items=1000), "sweep": SweepCoverage}),
+                            {"merges": Arr(SpecialistMerge, max_items=1000), "sweep": SweepCoverage,
+                             "collapses": Arr(NearDuplicateCollapse, max_items=1000)}),
     "VERIFY": _payload("VERIFY", {"findings": Arr(Finding, max_items=1000),
                                   "verifications": Arr(VerificationRecord, max_items=1000),
                                   "drops": Arr(DropRecord, max_items=1000)}),

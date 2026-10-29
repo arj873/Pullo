@@ -24,7 +24,7 @@ from reviewer.tools.ops import Outcome
 
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                      SPECIALIST_AGENTS)
+                      INVESTIGATOR_IMPACT_V5_PROMPT, SPECIALIST_AGENTS, V5_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -78,21 +78,29 @@ class RetrievalPolicy:
         """Impact mode (impact map in PREPARE, find_references, impact prompts) is selected by the investigator
         prompt id alone (impact@v1, @v2, @v3 or @v4); every other id keeps the frozen retrieval@2 behaviour byte for byte."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
-                                            INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT)
+                                            INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
+                                            INVESTIGATOR_IMPACT_V5_PROMPT)
 
     @property
     def exploration_floor(self) -> bool:
         """The engine-enforced exploration floor (investigator.impact@v2, and every specialist of @v3 and @v4; see
         Engine._investigator_chain). A v4 diff-shard sweep has its disposition continuation instead."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT,
-                                            INVESTIGATOR_IMPACT_V4_PROMPT)
+                                            INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT)
 
     @property
     def specialists(self) -> tuple | None:
         """investigator.impact@v3 and @v4: the specialist investigator agent ids, in run order (None for every other
         id: one `generalist` investigator, unchanged)."""
+        if self.investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT:
+            return V5_AGENTS                      # impact@v5: the v3 specialists, then consistency and hygiene
         return (SPECIALIST_AGENTS if self.investigator_prompt in (INVESTIGATOR_IMPACT_V3_PROMPT,
                                                                   INVESTIGATOR_IMPACT_V4_PROMPT) else None)
+
+    @property
+    def five_lanes(self) -> bool:
+        """investigator.impact@v5: five specialist lanes with the lanes.py budget split and near-duplicate cap."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT
 
     @property
     def diff_sweep(self) -> bool:

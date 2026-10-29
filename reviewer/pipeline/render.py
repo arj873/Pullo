@@ -178,6 +178,9 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
                 f"verification: {merged}",
                 "- A specialist that did not complete did not review its focus; its share of the review is missing.",
                 ""]
+        if "collapses" in specialists:       # investigator.impact@v5 only
+            out[-1:] = [f"- Near-duplicates collapsed before verification (same file, category and spot; the best "
+                        f"evidenced kept): {sum(len(g['collapsedIds']) for g in specialists['collapses'])}", ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
         out += sweep_section(sweep, specialists)
     out += [f"## Comments ({len(comments)})", ""]
