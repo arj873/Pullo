@@ -49,11 +49,15 @@ The 22 IDs below are the public checkpoint's expected-failure repros that accoun
 
 - `tests.positive_pilot_review.test_positive_gate.SourceFreeze.test_stray_pycache_or_pyc_in_the_fixture_is_not_hidden_from_the_baseline` — The positive-fixture baseline ignores pycache/pyc files that the snapshot manifest can include. [Source](tests/positive_pilot_review/test_positive_gate.py).
 
-### Terra CLI path (held)
+### Terra CLI path (fixed in TERRA-ARM-01; no longer expected failures)
 
-- `tests.runtime_review.test_codex_review.CodexReview.test_F6_unrecognised_event_types_must_fail_closed` — Unknown CLI event types are ignored rather than refused, leaving tool-event auditing incomplete. [Source](tests/runtime_review/test_codex_review.py).
-- `tests.runtime_review.test_codex_review.RunBounded.test_F8_detached_grandchild_holding_the_pipes_must_not_hang_run_bounded` — A detached descendant holding output pipes can outlive process-group termination and hang bounded execution. [Source](tests/runtime_review/test_codex_review.py).
-- `tests.runtime_review.test_s106a_review.CodexTurnsHeld.test_codex_duplicate_json_keys_are_invalid_not_last_wins` — Duplicate JSON keys use the last value instead of invalidating a Turn response. [Source](tests/runtime_review/test_s106a_review.py).
+Terra (provider `openai`, GPT Terra via the installed Codex CLI) is un-held behind the per-call isolation
+`codex-isolated-home@2` (fresh CODEX_HOME, pinned model catalog, strict `-c` overrides, offline prompt-input and
+loopback request-capture proofs in every live preflight). These three former expected failures now pass:
+
+- `tests.runtime_review.test_codex_review.CodexReview.test_F6_unrecognised_event_types_must_fail_closed` — unknown CLI event types, item events without an item and malformed JSONL lines now abort the call as an isolation violation.
+- `tests.runtime_review.test_codex_review.RunBounded.test_F8_detached_grandchild_holding_the_pipes_must_not_hang_run_bounded` — bounded execution uses non-blocking pipes and a selector, so a detached descendant holding the pipes no longer hangs it.
+- `tests.runtime_review.test_s106a_review.CodexTurnsHeld.test_codex_duplicate_json_keys_are_invalid_not_last_wins` — CLI answers are parsed strictly; duplicate keys are invalid output, never last-key-wins.
 
 ### Repository tools
 
@@ -63,7 +67,7 @@ The 22 IDs below are the public checkpoint's expected-failure repros that accoun
 
 ### Additional environment-dependent marker
 
-There are **23 expectedFailure markers** in the published, discoverable test source. The additional ID is `tests.runtime_review.test_codex_review.IsolationBoundary.test_F1_tool_exposure_features_still_enabled_after_the_adapters_disable_list` ([source](tests/runtime_review/test_codex_review.py)). Its class skips when `codex` is not installed. Reconciling the source markers with the hosted totals identifies this conditional class skip as the extra marker; the hosted log reports aggregate results rather than individual test IDs. It is not counted among the 22 expected failures listed above. The test checks whether default-enabled tool-related CLI features remain outside the adapter disable list. It does not establish effective tool isolation. Local CLI availability can change skip/expected-failure counts; Terra remains held pending isolation checks.
+There are **23 expectedFailure markers** in the published, discoverable test source. The additional ID is `tests.runtime_review.test_codex_review.IsolationBoundary.test_F1_tool_exposure_features_still_enabled_after_the_adapters_disable_list` ([source](tests/runtime_review/test_codex_review.py)). Its class skips when `codex` is not installed. Reconciling the source markers with the hosted totals identifies this conditional class skip as the extra marker; the hosted log reports aggregate results rather than individual test IDs. It is not counted among the 22 expected failures listed above. The test checks whether default-enabled tool-related CLI features remain outside the adapter disable list. It does not establish effective tool isolation. Local CLI availability can change skip/expected-failure counts. Tool isolation is established separately by the loopback request-capture proof (`reviewer/runtime/codex_capture.py`), which the remaining `tool_search_always_defer_mcp_tools` (a removed, non-disableable feature) does not affect.
 
 ## Local temporary-directory interference
 

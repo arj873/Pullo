@@ -4,7 +4,7 @@
         [--case investigator-final|investigator-turn] [--model gpt-6.1-terra] --confirm-live
 
 Model workers must NEVER pass --confirm-live. Without it nothing runs. The call goes through the real
-CodexTerraProvider (codex-isolated-home@1, after its offline CLI + prompt-isolation preflight) with a tool-temptation
+CodexTerraProvider (codex-isolated-home@2, after its offline CLI + prompt-isolation preflight) with a tool-temptation
 prompt ("run ls", "open a URL", "read ~/.codex/auth.json"), max_calls=1, no retries/fallback, no OpenRouter key or
 transport, and its own fresh runtime ledger inside the receipt directory (never the OpenRouter trial state). It passes
 only with a schema-valid answer, zero tool items in the audited event stream and an intact per-call home (auth.json
@@ -19,6 +19,8 @@ import json
 import os
 import sys
 from pathlib import Path
+
+from reviewer.contracts.redaction import redact
 
 from .catalog import TERRA_6_MODEL, TERRA_MODELS, TRIAL_TOTAL_USD_MICROS
 from .codex_cli import CodexTerraProvider, CodexUnsupported, check_cli_isolation, request_facts
@@ -72,7 +74,7 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = TERRA_
               "runtimeLedger": "runtime-ledger.jsonl"}
     try:
         pf = preflight if preflight is not None else check_cli_isolation()
-        report["preflight"] = {k: pf.get(k) for k in ("version", "supported", "problems", "promptIsolation",
+        report["preflight"] = {k: pf.get(k) for k in ("version", "supported", "problems", "promptIsolation", "requestIsolation",
                                                        "unknownFeatures", "featuresEnabledByDefault", "loggedIn")}
         provider = provider_factory(enabled=True, ledger=ledger, max_calls=1, timeout_sec=120, preflight=pf,
                                     run_scope="terra-canary-" + stamp.lower())
@@ -101,7 +103,13 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = TERRA_
     except CodexUnsupported as e:
         report.update(error={"code": "unsupported", "message": str(e)[:400]}, providerCalls=0)
     finally:
-        (receipt / "receipt.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        # model output and CLI error text are untrusted: the receipt goes through the shared redaction (gate S4)
+        text, counts = redact(json.dumps(report, indent=2, sort_keys=True))
+        if counts:
+            doc = json.loads(text)
+            doc["redactions"] = counts
+            text = json.dumps(doc, indent=2, sort_keys=True)
+        (receipt / "receipt.json").write_text(text + "\n")
     if not report["ok"]:
         raise RuntimeError(f"Terra canary failed; receipt: {receipt}")
     return receipt

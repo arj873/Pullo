@@ -269,9 +269,9 @@ class RunBounded(unittest.TestCase):
         self.assertLess(dt, 15)
 
     def test_F8_detached_grandchild_holding_the_pipes_must_not_hang_run_bounded(self):
-        """A descendant that leaves the process group (setsid) and keeps stdout open survives killpg. run_bounded then joins its
-        pump threads for 5 s each and calls stdout.close() while a pump thread is blocked in read(): close() waits on the buffer
-        lock held by that read, so the call can hang until the grandchild exits."""
+        """A descendant that leaves the process group (setsid) and keeps stdout open survives killpg. The old run_bounded joined
+        pump threads and called stdout.close() while a pump thread was blocked in read(), so it could hang until the grandchild
+        exited. FIXED in TERRA-ARM-01: non-blocking pipes and a selector; the deadline returns promptly."""
         code = ("from reviewer.runtime.codex_cli import run_bounded\nimport sys\n"
                 "child=\"import os,time,subprocess,sys\\nsubprocess.Popen([sys.executable,'-c','import time;time.sleep(45)'],start_new_session=True)\\ntime.sleep(60)\"\n"
                 "r=run_bounded([sys.executable,'-c',child],b'',{},__import__('tempfile').gettempdir(),1)\nprint('returned',r.timed_out)")

@@ -43,7 +43,8 @@ from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gatewa
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
 from .profile import ProfileError
-from .providers import ReviewProviders, live_terra, needs, plan_providers, scrub_of, worst_case
+from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
+                        open_terra_state, plan_providers, scrub_of, worst_case)
 from .repository_profile import check_experiment, repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
@@ -164,8 +165,8 @@ def check_options(o: BenchmarkOptions) -> None:
     if live:
         if not o.confirm_live:
             raise BenchmarkLaunchError("--mode live needs --confirm-live")
-        if not (o.auth and o.state_dir and o.env_file):
-            raise BenchmarkLaunchError("live needs --auth, --state-dir and --env")
+        if not (o.auth and o.state_dir):           # --env is checked once the arm is known (a Terra arm reads no key)
+            raise BenchmarkLaunchError("live needs --auth, --state-dir and --env (--env only for an OpenRouter arm)")
         if type(o.baseline_micros) is not int or o.baseline_micros < 0:
             raise BenchmarkLaunchError("live needs an explicit --baseline-micros (non-negative integer)")
         if o.book_baseline_micros is not None and (type(o.book_baseline_micros) is not int or o.book_baseline_micros < 0):
@@ -648,13 +649,15 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     first = capture.facts(transport.requests, _request_facts) if capture else []
     ceiling = plan["budget"]["maxUsdMicros"]
     worst = worst_case(first)
-    planned = bool(first) and not any(f["toolsInBody"] for f in first)
+    planned = bool(first) and not any(f.get("toolsInBody", False) for f in first)
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent Opus gate on this host, then root's explicit invocation with real admission files",
              "live: root must export the exact accepted code bytes/hash and runtime config, pin them externally before any "
              "real plan/live, and compare this plan's first-request body hash before sending (the launch baseline does not "
              "bind code, prompts, profile or plan)",
              STRICT_REPLAY_ONLY]
+    if needs(profile, "openai"):
+        unmet.insert(0, TERRA_STATE_NOTE)
     if worst is not None and worst > ceiling:
         planned = False
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
@@ -713,9 +716,15 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.store, out, REPO])
     verify_authorization(o, ing)
     try:
-        book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
-                                  o.baseline_micros if o.book_baseline_micros is None else o.book_baseline_micros)
-    except Refused as e:
+        arm = live_arm(profile)
+        if arm == "terra":       # its own Terra state dir; the OpenRouter trial state is never opened or written
+            book, ledger = open_terra_state(o.state_dir, handle, o.baseline_micros)
+        else:
+            if not o.env_file:
+                raise BenchmarkLaunchError("live needs --auth, --state-dir and --env (--env only for an OpenRouter arm)")
+            book, ledger = open_state(o.state_dir, handle, o.baseline_micros,
+                                      o.baseline_micros if o.book_baseline_micros is None else o.book_baseline_micros)
+    except (Refused, TerraStateError) as e:
         raise BenchmarkLaunchError(str(e)[:300]) from None
     try:
         _check_ceiling(ledger, plan)

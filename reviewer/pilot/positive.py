@@ -450,7 +450,7 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
     first = capture.facts(transport.requests, _request_facts) if capture else []
     ceiling = plan["budget"]["maxUsdMicros"]
     worst = worst_case(first)
-    planned = bool(first) and not any(f["toolsInBody"] for f in first)
+    planned = bool(first) and not any(f.get("toolsInBody", False) for f in first)
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent review of this harness, then root's explicit invocation",
              STRICT_REPLAY_ONLY]
@@ -497,6 +497,9 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
     cfg = effective_config(o, cfg)
     out = check_out(o)
     profile, plan, policy = _profile_parts(cfg)
+    if needs(profile, "openai"):                  # gate S1: this host's state is the OpenRouter trial state
+        raise PositiveError("live Terra arms run through the repository/benchmark hosts with their own Terra state "
+                            "dir; the positive-control host only plans them")
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out, *_control_roots(o)])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,

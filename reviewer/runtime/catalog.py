@@ -21,7 +21,7 @@ TERRA_MODELS = frozenset({TERRA_MODEL, TERRA_6_MODEL})
 # Pinned reasoning effort per Terra model (explicit, so an arm never silently follows a CLI/catalog default change).
 TERRA_REASONING_EFFORT = {TERRA_MODEL: "medium", TERRA_6_MODEL: "medium"}
 # Every Terra call runs in a fresh per-call CODEX_HOME (codex_cli.isolated_home); there is no shared-home path.
-TERRA_ISOLATION_VERSION = "codex-isolated-home@1"
+TERRA_ISOLATION_VERSION = "codex-isolated-home@2"
 
 # model -> {input, cached, write, write1h, output}; `override` applies when prompt tokens >= threshold
 ALLOWED_ROUTER_MODELS: dict[str, dict] = {

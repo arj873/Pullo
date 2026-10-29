@@ -16,6 +16,7 @@ from reviewer.config import ConfigError, ReviewModels, parse, resolve_config
 from reviewer.contracts import validate
 from reviewer.pilot.profile import live_profile
 from reviewer.runtime import codex_cli as C
+from reviewer.runtime import codex_capture as CAP
 from reviewer.runtime import terra_canary as TC
 from reviewer.runtime.catalog import (TERRA_MODEL, TERRA_6_MODEL, TERRA_6_PRICE_VERSION, TERRA_MODELS,
                                       terra_api_equivalent_micros, terra_worst_case_micros)
@@ -25,6 +26,43 @@ from tests.runtime.test_codex import events
 
 ROOT = Path(__file__).resolve().parents[2]
 USER = {"HOME": "/invented-user", "OPENAI_API_KEY": "fake", "OPENROUTER_KEY": "fake", "TMPDIR": os.environ.get("TMPDIR", "")}
+
+
+ANSWER = json.dumps({"hypotheses": []})
+# The tool surface the gate captured from the SERVER catalog (code_mode_only + multi_agent v2), as additional_tools.
+SERVER_TOOLS = [{"type": "namespace", "name": "functions", "tools": [{"type": "custom", "name": "exec"},
+                                                                       {"type": "function", "name": "wait"},
+                                                                       {"type": "function", "name": "request_user_input"}]},
+                {"type": "namespace", "name": "collaboration", "tools": [{"type": "function", "name": "spawn_agent"},
+                                                                           {"type": "function", "name": "send_message"}]}]
+CODE_MODE_ITEM = {"type": "item.completed", "item": {"id": "item_0", "type": "error",
+                                                     "message": "Code Mode is unavailable because code-mode host is disabled."}}
+WS_ITEM = {"type": "item.completed", "item": {"id": "item_0", "type": "error",
+                                              "message": "Falling back from WebSockets to HTTPS transport. 404"}}
+
+
+def capture_body(model=TERRA_6_MODEL, tools=None, dev="Pullo base instructions"):
+    inp = [{"type": "message", "role": "developer", "content": [{"type": "input_text", "text": dev}]},
+           {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "probe"}]}]
+    if tools:
+        inp.insert(0, {"type": "additional_tools", "role": "developer", "tools": tools})
+    return {"model": model, "input": inp, "tool_choice": "auto", "stream": True}
+
+
+def capture_with(tools=None, items=(WS_ITEM,), dev="Pullo base instructions", posts=1, final=True):
+    def run(argv, stdin, env, cwd, timeout):
+        assert argv[1:3] == ["--unshare-net", "--die-with-parent"], argv
+        model = json.loads(stdin)["model"]
+        ev = [{"type": "thread.started", "thread_id": "t"}, {"type": "turn.started"}, *items]
+        if final:
+            ev.append({"type": "item.completed", "item": {"type": "agent_message", "text": ANSWER}})
+        out = {"rc": 0, "posts": posts, "gets": ["/v1/responses"],
+               "bodies": [capture_body(model, tools, dev)] if posts else [], "events": [json.dumps(e) for e in ev]}
+        return C.RunResult(0, json.dumps(out).encode(), b"")
+    return run
+
+
+clean_capture = capture_with()
 
 
 def score_req(**over):
@@ -217,7 +255,7 @@ class Bounds(Base):
                          ("subscription-consumption", "api-equivalent-standard", TERRA_6_PRICE_VERSION))
         self.assertEqual(row["apiEquivalentEstimateUsdMicros"], 800 + 10 + 250)    # 800 uncached, 200 cached, 50 out
         self.assertEqual(row["isolation"]["toolItems"], 0)
-        self.assertEqual(row["isolation"]["version"], "codex-isolated-home@1")
+        self.assertEqual(row["isolation"]["version"], "codex-isolated-home@2")
         self.assertEqual(self.ledger.totals()["committedUsdMicros"], 0)
 
     def test_cli_reconnect_error_events_abort_as_unknown_outcome(self):
@@ -281,12 +319,98 @@ class PromptIsolationProof(unittest.TestCase):
                    "login": b"Logged in using ChatGPT"}[argv[1]]
             return C.RunResult(0, out, b"")
         run, calls = self.fake([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": C.PROBE}]}])
-        rep = C.check_cli_isolation(runner=cli, environ=USER, prompt_check=True, prompt_runner=run)
+        rep = C.check_cli_isolation(runner=cli, environ=USER, prompt_check=True, prompt_runner=run,
+                                    request_runner=clean_capture)
         self.assertTrue(rep["supported"], rep)
         self.assertEqual(set(rep["promptIsolation"]), set(TERRA_MODELS))
         self.assertEqual(len(calls), len(TERRA_MODELS))
         bad, _ = self.fake([])
-        self.assertFalse(C.check_cli_isolation(runner=cli, environ=USER, prompt_check=True, prompt_runner=bad)["supported"])
+        self.assertFalse(C.check_cli_isolation(runner=cli, environ=USER, prompt_check=True, prompt_runner=bad,
+                                               request_runner=clean_capture)["supported"])
+        self.assertFalse(C.check_cli_isolation(runner=cli, environ=USER, prompt_check=True, prompt_runner=run,
+                                               request_runner=capture_with(tools=SERVER_TOOLS))["supported"])
+
+
+class RequestCaptureProof(unittest.TestCase):
+    """Gate B1/B2: the tool surface lives in the request body, not in prompt-input or the JSONL items."""
+
+    def test_clean_body_with_only_the_websocket_fallback_artefact_passes(self):
+        rep = C.check_request_isolation(model=TERRA_6_MODEL, runner=clean_capture, environ=USER)
+        self.assertTrue(rep["supported"], rep)
+        self.assertEqual((rep["tools"], rep["namespaces"]), ([], []))
+
+    def test_server_catalog_tools_and_the_code_mode_error_item_fail(self):
+        rep = C.check_request_isolation(model=TERRA_6_MODEL, runner=capture_with(tools=SERVER_TOOLS), environ=USER)
+        self.assertFalse(rep["supported"])
+        for want in ("tool offered: exec", "tool offered: spawn_agent", "tool namespace offered: collaboration"):
+            self.assertIn(want, rep["problems"])
+        self.assertNotIn("tool offered: request_user_input", rep["problems"])     # allowlisted inert
+        b2 = C.check_request_isolation(model=TERRA_6_MODEL, runner=capture_with(items=(CODE_MODE_ITEM,)), environ=USER)
+        self.assertFalse(b2["supported"])
+        self.assertTrue(any("Code Mode is unavailable" in p for p in b2["problems"]))
+
+    def test_agent_text_no_request_or_no_final_answer_fail(self):
+        for run in (capture_with(dev="<skills_instructions> ..."), capture_with(dev="use spawn_agent"),
+                    capture_with(posts=0), capture_with(final=False)):
+            self.assertFalse(C.check_request_isolation(model=TERRA_6_MODEL, runner=run, environ=USER)["supported"])
+
+    def test_analyse_body_reads_top_level_and_additional_tools(self):
+        a = CAP.analyse_body(dict(capture_body(), tools=[{"type": "function", "name": "shell"}]))
+        self.assertEqual(a["violations"], ["tool offered: shell"])
+        self.assertEqual(CAP.analyse_body(capture_body(tools=[{"type": "namespace", "name": "functions", "tools": [
+            {"type": "function", "name": "request_user_input"}]}]))["violations"], [])
+
+    def test_the_proof_runs_in_a_private_network_namespace_with_a_fake_key(self):
+        argv = C.capture_argv("/usr/bin/bwrap")
+        self.assertEqual(argv[:3], ["/usr/bin/bwrap", "--unshare-net", "--die-with-parent"])
+        self.assertTrue(CAP.FAKE_KEY.startswith("sk-pullo-capture-fake"))
+        with mock.patch.object(C.shutil, "which", return_value=None):
+            self.assertFalse(C.check_request_isolation(model=TERRA_6_MODEL, environ=USER)["supported"])
+
+
+class PinnedCatalog(unittest.TestCase):
+    def test_pinned_catalog_has_no_tool_surface_and_matches_its_digest(self):
+        doc = json.loads(C.pinned_catalog())
+        self.assertEqual({m["slug"] for m in doc["models"]}, set(TERRA_MODELS))
+        for m in doc["models"]:
+            self.assertEqual((m["tool_mode"], m["shell_type"], m["experimental_supported_tools"]), ("standard", "disabled", []))
+            self.assertNotIn("multi_agent_version", m)
+            self.assertFalse(m["supports_search_tool"])
+            self.assertIsNone(m["apply_patch_tool_type"])
+            self.assertIsNone(m["model_messages"])
+            self.assertEqual(m["base_instructions"], "")
+        self.assertEqual(C.isolation_identity(TERRA_6_MODEL)["modelCatalogSha256"], C.TERRA_CATALOG_SHA256)
+
+    def test_a_changed_catalog_refuses_and_every_call_uses_the_pinned_copy(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "c.json"
+            bad.write_bytes(C.pinned_catalog().replace(b'"standard"', b'"code_mode_only"', 1))
+            with mock.patch.object(C, "CATALOG_PATH", bad), self.assertRaises(C.CodexUnsupported):
+                C.pinned_catalog()
+            made = C.isolated_home(str(Path(d) / "w"), USER)
+            self.assertEqual(Path(made["catalog"]).read_bytes(), C.pinned_catalog())
+        a = C.build_argv("codex", "/w/s.json", "/w/cwd", TERRA_6_MODEL, catalog_file="/w/catalog.json")
+        self.assertEqual(a[a.index('model_catalog_json="/w/catalog.json"') - 1], "-c")
+        self.assertIn("tools.experimental_request_user_input.enabled=false", a)
+
+
+@unittest.skipUnless(C.shutil.which("codex") and C.shutil.which("bwrap"), "needs the installed codex CLI and bwrap")
+class RealCliCaptureProof(unittest.TestCase):
+    """The REAL codex binary, offline: private network namespace, fake key, loopback fake endpoint. No inference."""
+
+    def test_pinned_catalog_offers_no_tools_for_either_model(self):
+        for m in sorted(TERRA_MODELS):
+            with self.subTest(m):
+                rep = C.check_request_isolation(model=m)
+                self.assertTrue(rep["supported"], rep)
+                self.assertEqual((rep["tools"], rep["namespaces"], rep["modelCatalogGets"]), ([], [], []))
+
+    def test_a_server_style_catalog_is_caught_b1_and_b2(self):
+        rep = C.check_request_isolation(model=TERRA_6_MODEL, spec={"catalogEntryOverride": {
+            "tool_mode": "code_mode_only", "multi_agent_version": "v2", "shell_type": "unified_exec"}})
+        self.assertFalse(rep["supported"])
+        self.assertIn("tool namespace offered: collaboration", rep["problems"])
+        self.assertTrue(any("Code Mode is unavailable" in p for p in rep["problems"]), rep["problems"])
 
 
 class ScoreFamilyReadiness(Base):
@@ -329,7 +453,7 @@ class ConfigAndProfile(unittest.TestCase):
         roles = cfg.report()["roles"]
         self.assertEqual({v["provider"] for v in roles.values()}, {"openai"})
         self.assertEqual({v["model"] for v in roles.values()}, {TERRA_6_MODEL})
-        self.assertTrue(all(v["isolation"] == "codex-isolated-home@1" for v in roles.values()))
+        self.assertTrue(all(v["isolation"] == "codex-isolated-home@2" for v in roles.values()))
         default = resolve_config(ROOT / "pullo.toml")
         self.assertEqual(default.models, ReviewModels())
         self.assertTrue(all(set(v) == {"provider", "model"} for v in default.report()["roles"].values()))
@@ -397,6 +521,16 @@ class Canary(Base):
         for d in ("v1", "v2"):
             (r,) = list((self.root / d).iterdir())
             self.assertFalse(json.loads((r / "receipt.json").read_text())["ok"])
+
+    def test_receipt_is_redacted(self):
+        leak = "sk-proj-" + "a1b2" * 8
+        TC.run_canary(self.root / "v3", provider_factory=self.factory(events('{"hypotheses": []}')),
+                      preflight={"supported": True, "version": "codex-cli " + leak})    # untrusted CLI text
+        (r,) = list((self.root / "v3").iterdir())
+        text = (r / "receipt.json").read_text()
+        self.assertNotIn(leak, text)
+        self.assertIn("[REDACTED:openai-key]", text)
+        self.assertEqual(json.loads(text)["redactions"], {"openai-key": 1})
 
     def test_cli_refuses_without_confirmation_or_with_tmp(self):
         with mock.patch.object(TC, "run_canary", side_effect=AssertionError("must not run")):

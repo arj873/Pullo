@@ -397,14 +397,14 @@ class GatewayTurns(RT):
 
 
 class CodexTurnsHeld(CodexBase):
-    """Terra stays held (F6/F8/isolation); these record pre-Terra gaps, not Sonnet canary blockers."""
+    """Recorded pre-Terra gaps. TERRA-ARM-01 un-held Terra behind codex-isolated-home@2, so these are now live-path
+    requirements: duplicate JSON keys refuse (strict parse), never last-key-wins."""
 
-    @unittest.expectedFailure
     def test_codex_duplicate_json_keys_are_invalid_not_last_wins(self):
         text = '{"contextRequests":[],"output":{"verdict":"x"},"output":%s}' % json.dumps(OK_VERIFY)
         p = self.prov(RunResult(0, events(text), b""))
         res = p.call(req("verifier", outputSchema="VerifierTurn", hop=0, contextResults=[]), CKEY)
-        self.assertEqual(res.response["status"], "invalid-output")      # today: "ok" (json.loads keeps the last key)
+        self.assertEqual(res.response["status"], "invalid-output")      # was "ok" (json.loads kept the last key)
 
 
 if __name__ == "__main__":

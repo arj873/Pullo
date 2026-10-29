@@ -2,7 +2,7 @@
 
 Each role's provider comes from its ModelProfile entry (pullo.toml model -> provider; the allowlists are disjoint):
   anthropic -> OpenRouterProvider (paid, the operator's $50 trial key/book)
-  openai    -> CodexTerraProvider (ChatGPT subscription through the installed Codex CLI, codex-isolated-home@1)
+  openai    -> CodexTerraProvider (ChatGPT subscription through the installed Codex CLI, codex-isolated-home@2)
 A provider no role uses is a DisabledProvider, so an arm that needs no OpenRouter role never loads the key, and an
 arm with no Terra role never runs the Codex CLI preflight. Plan mode captures both kinds in call order without
 sending anything; the Terra capture declares the same billing kind as the live adapter, so the gateway takes the
@@ -10,11 +10,30 @@ same (no SpendBook) path in plan as in live."""
 
 from __future__ import annotations
 
-from reviewer.gateway import DisabledProvider
+import os
+import stat
+from pathlib import Path
+
+from reviewer.gateway import DisabledProvider, SpendBook
 from reviewer.gateway.errors import typed_error
 from reviewer.gateway.providers import ProviderResult
 from reviewer.pipeline.errors import PipelineError
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from reviewer.runtime.codex_cli import CodexTerraProvider, CodexUnsupported, request_facts
+from reviewer.runtime.receipts import RuntimeLedger
+
+# A Terra arm's live state is its OWN operator-created directory (gate S1): the subscription ledger and an (unused,
+# never-written) spend book bound to the Terra authorization. It may never be, or hold, the OpenRouter trial state.
+TERRA_LEDGER_NAME = "terra-subscription-ledger.jsonl"
+TERRA_BOOK_NAME = "terra-spend-book.jsonl"
+TRIAL_STATE_NAMES = ("runtime-ledger.jsonl", "spend-book.jsonl")
+TERRA_STATE_NOTE = ("live: a Terra arm uses --state-dir as its own operator-created Terra state dir holding "
+                    f"{TERRA_LEDGER_NAME} (subscription ledger; may start empty) - never the OpenRouter trial state; "
+                    "--env is not read; --baseline-micros is that ledger's committed total (0 for subscription calls)")
+
+
+class TerraStateError(ValueError):
+    pass
 
 
 class ReviewProviders:
@@ -28,6 +47,44 @@ class ReviewProviders:
 
 def needs(profile, provider) -> bool:
     return any(s["provider"] == provider for s in profile["roles"].values())
+
+
+def live_arm(profile) -> str:
+    """'router' (OpenRouter roles only) or 'terra' (Terra roles only). A live mixed arm is refused: it would need the
+    trial state and a subscription ledger in one run, and the trial ledger must never carry subscription rows."""
+    router, terra = needs(profile, "anthropic"), needs(profile, "openai")
+    if router and terra:
+        raise TerraStateError("live mixed OpenRouter+Terra arms are not supported: run all roles on one provider "
+                              "(plan mode still shows a mixed arm's requests)")
+    return "terra" if terra else "router"
+
+
+def open_terra_state(state_dir, handle, baseline: int) -> tuple:
+    """-> (SpendBook, RuntimeLedger) of a Terra state dir. Refuses a symlink, a missing dir or ledger file (the operator
+    creates both), a directory holding OpenRouter trial state, and a ledger whose committed total differs from
+    `baseline`."""
+    state = Path(state_dir)
+    if os.path.islink(state) or not state.is_dir():
+        raise TerraStateError("--state-dir must be an existing directory (not a symlink)")
+    if any(os.path.lexists(state / n) for n in TRIAL_STATE_NAMES):
+        raise TerraStateError("--state-dir holds OpenRouter trial state; a Terra arm needs its own Terra state dir")
+    led = state / TERRA_LEDGER_NAME
+    try:
+        st = os.lstat(led)
+    except OSError:
+        raise TerraStateError(f"Terra state dir lacks the operator-created {TERRA_LEDGER_NAME}") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise TerraStateError(f"{TERRA_LEDGER_NAME} is not a regular file")
+    ledger = RuntimeLedger(led, TRIAL_TOTAL_USD_MICROS)
+    try:
+        t = ledger.totals()
+    except (ValueError, KeyError, TypeError, OSError):
+        raise TerraStateError("Terra subscription ledger is unreadable") from None
+    if t["committedUsdMicros"] != baseline:
+        raise TerraStateError(f"Terra ledger committed {t['committedUsdMicros']} != --baseline-micros {baseline}")
+    if os.path.lexists(state / TERRA_BOOK_NAME) and not os.path.isfile(state / TERRA_BOOK_NAME):
+        raise TerraStateError(f"{TERRA_BOOK_NAME} is not a regular file")
+    return SpendBook(handle, state / TERRA_BOOK_NAME), ledger
 
 
 def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider):
