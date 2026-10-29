@@ -5,7 +5,9 @@
     call.result          # contract-valid ToolResult (code Evidence carries resolved: true)
     call.trace_fields()  # keyword fields for a `tool.call` TraceEvent (e.g. Recorder.append)
 
-Only the four tools below exist. Anything else (shell, regex, URL, write, test run, post) is
+Only the four tools below exist by default. A session may be opened with a wider fixed set: impact mode adds the
+read-only `find_references` (IMPACT_TOOLS) for model requests, and the host-only `impact_scan` (HOST_IMPACT_TOOLS)
+for the PREPARE session, which no model can reach. Anything else (shell, regex, URL, write, test run, post) is
 refused as an unknown tool and never reaches the filesystem.
 """
 
@@ -19,12 +21,19 @@ from reviewer.contracts.canonical import result_hash, tool_call_id
 from reviewer.contracts.redaction import contains_protected, redact
 
 from . import ops, policy
+from .words import valid_symbol
 from .ops import DENIED, Ctx, Limits, Outcome
 from .view import SIDES, View
 
 TOOLS = ("list_files", "read_file", "search_literal", "diff")
+IMPACT_TOOLS = TOOLS + ("find_references",)            # model-requestable in impact mode
+HOST_IMPACT_TOOLS = TOOLS + ("impact_scan",)           # the PREPARE (host) session in impact mode
+ALL_TOOLS = TOOLS + ("find_references", "impact_scan")
 _OPS = {"list_files": ops.list_files, "read_file": ops.read_file,
-        "search_literal": ops.search_literal, "diff": ops.diff}
+        "search_literal": ops.search_literal, "diff": ops.diff,
+        "find_references": ops.find_references, "impact_scan": ops.impact_scan}
+MAX_SYMBOL_CHARS = 128
+MAX_OFFSET = 5_000
 
 
 class ArgError(ValueError):
@@ -61,6 +70,9 @@ def normalize(tool: str, args, lim: Limits) -> dict:
         "search_literal": {"side": None, "query": None, "prefix": "", "case_sensitive": True,
                            "limit": lim.max_search_results},
         "diff": {"path": None},
+        "find_references": {"side": None, "symbol": None, "path_prefix": "", "limit": lim.max_search_results,
+                            "offset": 0},
+        "impact_scan": {},
     }[tool]
     if tool == "list_files":
         spec["after"] = ""            # paging cursor; omitted from the normalized args when empty (stable ids)
@@ -93,6 +105,17 @@ def normalize(tool: str, args, lim: Limits) -> dict:
         if not isinstance(a["case_sensitive"], bool):
             raise ArgError("case_sensitive must be a boolean")
         a["limit"] = _int(a["limit"], "limit", 1, 1000)
+    elif tool == "find_references":
+        sym = a["symbol"]
+        if not valid_symbol(sym, MAX_SYMBOL_CHARS) or contains_protected(sym):
+            raise ArgError("symbol must be one identifier (letters, digits, _ or $; parts may be joined by . or -), "
+                           f"at most {MAX_SYMBOL_CHARS} characters")
+        if not policy.valid_prefix(a["path_prefix"]):
+            raise ArgError("path_prefix")
+        a["limit"] = _int(a["limit"], "limit", 1, 1000)
+        a["offset"] = _int(a["offset"], "offset", 0, MAX_OFFSET)
+    elif tool == "impact_scan":
+        pass
     else:
         if a["path"] is not None and not policy.valid_path(a["path"]):
             raise ArgError("path")
@@ -124,8 +147,11 @@ class ToolCall:
 
 class ToolSession:
     def __init__(self, view: View, *, stage: str = "INVESTIGATE", agent_id: str = "generalist",
-                 limits: Limits | None = None, clock=time.monotonic):
+                 limits: Limits | None = None, clock=time.monotonic, tools: tuple = TOOLS):
+        if not set(tools) <= set(ALL_TOOLS) or not set(TOOLS) <= set(tools):
+            raise ValueError("a session's tools are the four base tools plus known impact tools")
         self.view, self.stage, self.agent_id = view, stage, agent_id
+        self.tools = tuple(tools)
         self.limits = limits or Limits()
         self.clock, self.started = clock, clock()
         self.calls: list[ToolCall] = []
@@ -168,11 +194,12 @@ class ToolSession:
     def _call(self, tool, args=None) -> ToolCall:
         ordinal = len(self.calls)
         t0 = self.clock()
-        if tool not in TOOLS:
+        if tool not in self.tools:
             name = tool if isinstance(tool, str) and len(tool) <= 64 and tool.replace("_", "").replace("-", "").isalnum() \
                 and tool.isascii() else "?"
+            offered = [t for t in self.tools if t != "impact_scan"]     # the host-only tool is never advertised
             return self._finish(ordinal, "unknown-tool", {"requested": redact(name[:64])[0]},
-                                Outcome("denied", notice="No such tool. Available: " + ", ".join(TOOLS) + "."), None, t0)
+                                Outcome("denied", notice="No such tool. Available: " + ", ".join(offered) + "."), None, t0)
         try:
             norm = normalize(tool, args if args is not None else {}, self.limits)
         except ArgError as e:

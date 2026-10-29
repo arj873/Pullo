@@ -72,7 +72,7 @@ def summary_line(status: str, comments: list, incomplete: list, error: dict | No
 
 def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete: list, error: dict | None,
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
-              coverage: dict | None = None, retrieval: bool = False) -> str:
+              coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -109,6 +109,21 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
     out += ["- Static bounded context only: the models had no autonomous file retrieval in this version." if not retrieval
             else "- Bounded model-requested retrieval over read-only pinned snapshots: every request and its result is "
                  "in the trace; requests that were not run (caps) are listed as incomplete, never as findings.", ""]
+    if impact is not None:          # impact-coverage@1 (absent for runs without an impact map: bytes unchanged)
+        out += ["## Impact coverage", "", impact["statement"], ""]
+        if "symbols" in impact:
+            out += [f"- Changed symbols analysed: {impact['symbols']} of {impact['symbolsFound']} detected in "
+                    f"{impact['changedFiles']} changed file(s)",
+                    f"- References outside the changed lines: {impact['references']}"
+                    f"{' (lower bound: the scan stopped early)' if impact['referencesLowerBound'] else ''} in "
+                    f"{impact['files']} file(s); {impact['shown']} shown in the impact map",
+                    f"- Map truncated: {'yes' if impact['truncated'] else 'no'}"]
+        out += [f"- Dependent files opened: {impact['dependentFilesOpened']} of {impact['dependentFilesKnown']} "
+                "whose path the impact map or find_references showed",
+                f"- Other files outside the change opened: {impact['otherFilesOpened']}",
+                f"- find_references calls: {impact['findReferencesCalls']}",
+                "- The impact map is a heuristic (definition patterns and whole-word matches): names can collide and "
+                "dynamic, reflective or string-built uses are missed. Dependents not opened were not reviewed.", ""]
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

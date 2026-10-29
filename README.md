@@ -32,6 +32,12 @@ The Python package is named `reviewer`; the product name is Pullo. Everything is
 - The hosted public suite at the earlier checkpoint passed, but its 30 skips and 22 expected failures left meaningful gates open (see Tests). The benchmark package adds two native-scorer expected failures; its own counts are reconciled from hosted CI, not stated here.
 - Source docstrings still mention private project-coordination documents that are not in this repository.
 
+## Impact mode (repository reviews)
+
+With retrieval on, the repository pilot reviews in impact mode by default (`investigator.impact@v1` and `verifier.impact@v1`). PREPARE logs one host-only `impact_scan`: a bounded, heuristic map of changed or removed definitions and their whole-word references outside the changed lines. The investigator may also request `find_references`. The prompts ask the investigator to check dependents and to cite both the changed code and the dependent code. `review.md` and the receipt disclose how many changed symbols were analysed, how many references were found, and how many dependent files were opened. Scans stop only on deterministic caps; a wall-clock safety abort fails the call outright. Lockfiles, generated or minified files, and files over 5000 lines are skipped for symbol extraction, and each skip is disclosed.
+
+There is no `--no-impact` CLI flag. Runs recorded before impact mode (Cal 14740, Grafana 94942, Sentry 95633 and earlier) are replayed only with their own frozen exports, never with this tree. In code, `repository_profile(..., impact=False)` and `repository_policy(..., impact=False)` still give the earlier retrieval@2 profile and policy byte for byte.
+
 ## Review models
 
 Set the investigator, verifier and judge models in `pullo.toml`. Each role can use a different model:

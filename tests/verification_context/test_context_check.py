@@ -58,8 +58,16 @@ GOLD = {
                  ["verifier", 0, "sha256:d7fc4d47a15a65287ed161deef628503cb9edaf4c02d52ca51c86e197ff246e8"],
                  ["verifier", 1, "sha256:c336cd07983a97406c1437ff414398f4b4ec5c7911967541ed19915d4111b854"],
                  ["judge", None, "sha256:159f6313299e125b53d69ea00b4c1ca3b999a1a39647a0c4a2a5b97222174f69"]],
-    "benchFirst": "c5957b0563b88b06acd539c9570a78cc9ed0f4b61f45146a377214fb368164a3",
+    "benchFirst": "c5957b0563b88b06acd539c9570a78cc9ed0f4b61f45146a377214fb368164a3",   # retrieval@2 arm (pre-IMPACT-01)
     "benchRetrievalOff": "ad9d35d729aca26ba50148bd1032a65aa3ab36e01af55a0af74633de11366aac",
+}
+# IMPACT-01: the pilot repository default is now impact mode (investigator.impact@v1 / verifier.impact@v1). The pins
+# above stay the pre-change retrieval@2 arm (reproduced by repository_profile/policy(..., impact=False)); these are the
+# new defaults. Recorded from this source; same plan, numeric policy limits and models.
+IMPACT_GOLD = {
+    "profileOn": "sha256:3e62ef3208e068fafde841cb7d220094f15ed0e08a11bf185097b8299f16bdf7",
+    "policy": "sha256:c849a611a21899ac9c64ac149ce2b0b4edb36ebcf544111987cebd91c639e559",
+    "benchFirst": "77da9a6a63e9d3f83d0e9cb4eb2fc60e81fc4a35891ed3a1cc412d7d88cfc526",   # impact-map@2 rows (O2 quoting)
 }
 
 UTIL = "def close_stream():\n    return None\n\ndef is_open():\n    return True\n"
@@ -122,15 +130,20 @@ class DefaultUnchanged(Base_):
         self.assertEqual(prompts.template_digests(), GOLD["templates"])
         self.assertEqual(prompts.retrieval_template_digests(), GOLD["retrievalTemplates"])
         self.assertEqual(digest(identity.engine_identity()), GOLD["engineIdentity"])
-        on, off = repository_profile(True, ms), repository_profile(False, ms)
+        on, off = repository_profile(True, ms, impact=False), repository_profile(False, ms)
         self.assertEqual((profile_digest(on), profile_digest(off)), (GOLD["profileOn"], GOLD["profileOff"]))
         self.assertEqual(digest(repository_plan(on)), GOLD["plan"])
-        pol = repository_policy(True)
+        pol = repository_policy(True, impact=False)
         self.assertEqual((pol.digest, pol.to_doc()), (GOLD["policy"], GOLD["policyDoc"]))
         # naming the baseline explicitly is the default
-        self.assertEqual(profile_digest(repository_profile(True, ms, "baseline")), GOLD["profileOn"])
-        self.assertEqual(repository_policy(True, "baseline").digest, GOLD["policy"])
+        self.assertEqual(profile_digest(repository_profile(True, ms, "baseline", impact=False)), GOLD["profileOn"])
+        self.assertEqual(repository_policy(True, "baseline", impact=False).digest, GOLD["policy"])
         self.assertIsNone(repository_policy(False))
+        # IMPACT-01 default (impact mode): new pins; the plan and retrieval-off profile are unchanged
+        self.assertEqual(profile_digest(repository_profile(True, ms)), IMPACT_GOLD["profileOn"])
+        self.assertEqual(digest(repository_plan(repository_profile(True, ms))), GOLD["plan"])
+        self.assertEqual(repository_policy(True).digest, IMPACT_GOLD["policy"])
+        self.assertEqual(profile_digest(repository_profile(False, ms, impact=True)), GOLD["profileOff"])
 
     def test_baseline_run_requests_tasks_comment_and_config_identity_equal_the_pre_change_values(self):
         m = self.case()
@@ -386,10 +399,10 @@ class Selector(TBH.Base):
     def test_default_plan_equals_the_pre_change_first_request_policy_and_profile(self):
         rep = self.plan()
         p = rep["plan"]
-        self.assertEqual(p["firstRequest"]["bodySha256"], GOLD["benchFirst"])
-        self.assertEqual((p["profile"], digest(p["retrievalPolicy"])), ("pilot-repository@1", GOLD["policy"]))
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_GOLD["benchFirst"])        # IMPACT-01 default
+        self.assertEqual((p["profile"], digest(p["retrievalPolicy"])), ("pilot-repository@1", IMPACT_GOLD["policy"]))
         self.assertEqual(self.plan(retrieval=False)["plan"]["firstRequest"]["bodySha256"], GOLD["benchRetrievalOff"])
-        self.assertEqual(rep["experiment"], {"id": "baseline", "verifierPrompt": "verifier.refute@v4",
+        self.assertEqual(rep["experiment"], {"id": "baseline", "verifierPrompt": "verifier.impact@v1",
                                               "judgePrompt": "judge.wording@v1"})
         self.assertEqual(self.plan(experiment="baseline")["plan"]["configIdentityDigest"], p["configIdentityDigest"])
 
@@ -446,7 +459,7 @@ class Selector(TBH.Base):
         self.assertEqual(rep["experiment"]["id"], "context-check@1")
         self.assertEqual(rep["providerCalls"], 5)
         tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
-        self.assertEqual(tasks[0], prompts.INVESTIGATOR_RETRIEVE_TASK)
+        self.assertEqual(tasks[0], prompts.INVESTIGATOR_IMPACT_TASK)          # IMPACT-01: the pilot default investigator
         self.assertEqual(tasks[2], prompts.VERIFIER_CONTEXT_CHECK_TASK)
         self.assertEqual(tasks[3], prompts.VERIFIER_CONTEXT_CHECK_TASK)
         self.assertEqual(tasks[4], prompts.JUDGE_FACT_TASK)
@@ -471,8 +484,8 @@ class Selector(TBH.Base):
         rep, _ = self.live(model)
         self.assertEqual(rep["experiment"]["id"], "baseline")
         tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
-        self.assertEqual((tasks[2], tasks[3], tasks[4]),
-                         (prompts.VERIFIER_REFUTE_TASK, prompts.VERIFIER_REFUTE_TASK, prompts.JUDGE_TASK))
+        self.assertEqual((tasks[2], tasks[3], tasks[4]),        # IMPACT-01: the baseline arm's verifier is impact mode's
+                         (prompts.VERIFIER_IMPACT_TASK, prompts.VERIFIER_IMPACT_TASK, prompts.JUDGE_TASK))
 
     def test_identity_carries_the_experiment_only_when_selected(self):
         from reviewer.config import resolve_config
@@ -508,7 +521,7 @@ class ReportPromptLabels(TBH.Base):
 
     def test_expected_ids_are_pinned_so_a_wrong_profile_cannot_pass_by_agreement(self):
         self.assertEqual(self.used(retrieval=False), ("verifier.refute@v1", "judge.wording@v1"))
-        self.assertEqual(self.used(retrieval=True), ("verifier.refute@v4", "judge.wording@v1"))
+        self.assertEqual(self.used(retrieval=True), ("verifier.impact@v1", "judge.wording@v1"))     # IMPACT-01 default
         self.assertEqual(self.used(retrieval=True, experiment="context-check@1"), (CTX, FACT))
 
     def test_plan_report_names_the_prompts_in_force_for_retrieval_on_off_and_the_arm(self):
@@ -521,9 +534,9 @@ class ReportPromptLabels(TBH.Base):
 
     def test_plan_routing_and_identity_are_unchanged_by_the_label_fix(self):
         p = self.plan()["plan"]
-        self.assertEqual(p["firstRequest"]["bodySha256"], GOLD["benchFirst"])
+        self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_GOLD["benchFirst"])
         self.assertEqual(self.plan(retrieval=False)["plan"]["firstRequest"]["bodySha256"], GOLD["benchRetrievalOff"])
-        self.assertEqual(digest(p["retrievalPolicy"]), GOLD["policy"])
+        self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_GOLD["policy"])
         self.assertNotEqual(self.plan(retrieval=False)["plan"]["configIdentityDigest"], p["configIdentityDigest"])
 
     def test_live_and_replay_reports_name_the_prompts_in_force_with_retrieval_off(self):
@@ -543,7 +556,7 @@ class ReportPromptLabels(TBH.Base):
 
     def test_live_retrieval_on_baseline_and_arm_reports_name_the_prompts_in_force(self):
         rep, _ = self.live()
-        self.assertEqual(self.ids(rep), ("verifier.refute@v4", "judge.wording@v1"))
+        self.assertEqual(self.ids(rep), ("verifier.impact@v1", "judge.wording@v1"))
         self.check_text(rep)
         self.w = TBH.BWorld(self.tmp / "w2")
         rep, _ = self.live(experiment="context-check@1")
@@ -559,7 +572,7 @@ class ReportPromptLabels(TBH.Base):
             raise KeyboardInterrupt
 
         for retrieval, want in ((False, ("verifier.refute@v1", "judge.wording@v1")),
-                                (True, ("verifier.refute@v4", "judge.wording@v1"))):
+                                (True, ("verifier.impact@v1", "judge.wording@v1"))):
             with self.subTest(retrieval=retrieval, path="refused"):
                 self.w = TBH.BWorld(self.tmp / f"r{retrieval}")
                 self.w.seed()

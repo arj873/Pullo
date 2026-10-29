@@ -247,14 +247,22 @@ class ProfileTests(unittest.TestCase):
             {a.option_strings[0] for a in R._parser()._actions if a.option_strings}))
 
     def test_retrieval_on_uses_turn_schemas_and_prompts_off_is_plain_with_no_policy(self):
-        on, off = repository_profile(True)["roles"], repository_profile(False)["roles"]
+        on, off = repository_profile(True, impact=False)["roles"], repository_profile(False)["roles"]
         self.assertEqual((on["investigator"]["outputSchema"], on["investigator"]["promptVersion"]),
                          ("InvestigatorTurn", "investigator.retrieve@v2"))
         self.assertEqual((on["verifier"]["outputSchema"], on["verifier"]["promptVersion"]),
                          ("VerifierTurn", "verifier.refute@v4"))
         self.assertEqual((off["investigator"]["outputSchema"], off["verifier"]["outputSchema"]),
                          ("InvestigatorOutput", "VerifierOutput"))
-        self.assertEqual(repository_policy(True), RetrievalPolicy())
+        self.assertEqual(repository_policy(True, impact=False), RetrievalPolicy())
+        # IMPACT-01: the default with retrieval is impact mode (same schemas, impact prompt ids)
+        imp = repository_profile(True)["roles"]
+        self.assertEqual((imp["investigator"]["outputSchema"], imp["investigator"]["promptVersion"]),
+                         ("InvestigatorTurn", "investigator.impact@v1"))
+        self.assertEqual((imp["verifier"]["outputSchema"], imp["verifier"]["promptVersion"]),
+                         ("VerifierTurn", "verifier.impact@v1"))
+        self.assertEqual(repository_policy(True), RetrievalPolicy(investigator_prompt="investigator.impact@v1",
+                                                                  verifier_prompt="verifier.impact@v1"))
         self.assertIsNone(repository_policy(False))
 
     def test_the_reused_private_helpers_keep_their_shape(self):

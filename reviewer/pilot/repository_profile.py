@@ -2,13 +2,18 @@
 
 Built from the reviewed `live_profile`/`live_plan` so caps, timeouts, retries (0), repairs (0), the $4 run ceiling and
 the deadlines are never re-declared. `retrieval=True` switches the investigator and verifier to the Turn schemas and
-their retrieval prompts; the judge stays the plain review-cost JudgeOutput. There is no host option to widen anything."""
+their retrieval prompts; the judge stays the plain review-cost JudgeOutput. There is no host option to widen anything.
+
+`impact=True` (the default with retrieval) selects impact mode: investigator.impact@v1 / verifier.impact@v1, the
+PREPARE impact map and the find_references tool, with the same numeric caps. `impact=False` is exactly the earlier
+retrieval@2 profile and policy (same digests), kept for reproducing and replaying earlier runs."""
 
 from __future__ import annotations
 
 from reviewer.pipeline import RetrievalPolicy
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
-                                       JUDGE_FACT_WORDING_PROMPT, VERIFIER_CONTEXT_CHECK_PROMPT)
+                                       INVESTIGATOR_IMPACT_PROMPT, JUDGE_FACT_WORDING_PROMPT,
+                                       VERIFIER_CONTEXT_CHECK_PROMPT, VERIFIER_IMPACT_PROMPT)
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
 
 from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile
@@ -26,15 +31,22 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
         raise ProfileError(f"experiment {experiment} needs the retrieval profile (the Turn verifier)")
 
 
-def repository_profile(retrieval: bool = True, models=None, experiment: str = EXPERIMENT_BASELINE) -> dict:
+def _prompts(impact: bool) -> tuple[str, str]:
+    return (INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT) if impact else (INVESTIGATOR_PROMPT, VERIFIER_PROMPT)
+
+
+def repository_profile(retrieval: bool = True, models=None, experiment: str = EXPERIMENT_BASELINE,
+                       impact: bool = True) -> dict:
     """`experiment` (default baseline) opts into context-check@1: only the verifier and judge prompt ids change, to the
-    experiment's; models, schemas, caps, tools, timeouts and retries are the baseline's."""
+    experiment's; models, schemas, caps, tools, timeouts and retries are the baseline's. `impact` (default on) only
+    matters with retrieval: it selects the impact investigator/verifier prompt ids."""
     check_experiment(experiment, retrieval)
     profile = live_profile(None if models is not None else MODEL, models=models)
     profile["id"] = PROFILE_ID
     if retrieval:
-        profile["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion=INVESTIGATOR_PROMPT)
-        profile["roles"]["verifier"].update(outputSchema="VerifierTurn", promptVersion=VERIFIER_PROMPT)
+        inv, ver = _prompts(impact)
+        profile["roles"]["investigator"].update(outputSchema="InvestigatorTurn", promptVersion=inv)
+        profile["roles"]["verifier"].update(outputSchema="VerifierTurn", promptVersion=ver)
     if experiment == EXPERIMENT_CONTEXT_CHECK:
         profile["roles"]["verifier"]["promptVersion"] = VERIFIER_CONTEXT_CHECK_PROMPT
         profile["roles"]["judge"]["promptVersion"] = JUDGE_FACT_WORDING_PROMPT
@@ -51,10 +63,16 @@ def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     return plan
 
 
-def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE) -> RetrievalPolicy | None:
+def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
+                      impact: bool = True) -> RetrievalPolicy | None:
     check_experiment(experiment, retrieval)
     if not retrieval:
         return None
+    inv, ver = _prompts(impact)
     if experiment == EXPERIMENT_CONTEXT_CHECK:       # the same numeric limits; only the verifier prompt id differs
-        return RetrievalPolicy(verifier_prompt=VERIFIER_CONTEXT_CHECK_PROMPT)
-    return RetrievalPolicy()
+        ver = VERIFIER_CONTEXT_CHECK_PROMPT
+    if (inv, ver) == (INVESTIGATOR_PROMPT, VERIFIER_PROMPT):
+        return RetrievalPolicy()
+    if inv == INVESTIGATOR_PROMPT:
+        return RetrievalPolicy(verifier_prompt=ver)
+    return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)

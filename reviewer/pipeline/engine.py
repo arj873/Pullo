@@ -27,10 +27,11 @@ from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
 from reviewer.contracts.stages import STAGES, artifact_name
 from reviewer.gateway import SettlementError, typed_error
-from reviewer.tools import Limits, ToolSession, full_view, import_view, omissions_from_records
+from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, TOOLS, Limits, ToolSession, full_view, import_view,
+                            omissions_from_records)
 
 from . import coverage as cov_mod
-from . import identity, judging, prompts, render, repocov, retrieval, snaps
+from . import identity, impactcov, judging, prompts, render, repocov, retrieval, snaps
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -101,10 +102,11 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                  "Synthetic and replayed amounts are not provider spend; no per-review cost target is claimed.")
     cdoc = None if cov is None else coverage_doc(cov)
     retrieval_run = any(e["type"] == "model.call" and "hop" in e["request"] for e in events)
+    impact = impactcov.summarize(events, {f["path"] for f in files})     # None unless an impact map was made
     cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc))
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
-                          coverage=cdoc, retrieval=retrieval_run)
+                          coverage=cdoc, retrieval=retrieval_run, impact=impact)
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -148,6 +150,7 @@ class Engine:
         self.spec, self.case, self.host = spec, spec.case, spec.host
         self.profile, self.plan, self.budget = spec.profile, spec.plan, spec.plan["budget"]
         self.policy = identity.retrieval_policy(spec)           # None unless a role returns the Turn envelope
+        self.impact = identity.impact_mode(spec)                # impact map + find_references + impact prompts
         self.guard = guard
         self._ordinals: dict[tuple, int] = {}
         self._gate_n: dict[str, int] = {}      # per-STAGE count of gate checks (host-stop@2 position); reset per stage run
@@ -333,7 +336,9 @@ class Engine:
         return dataclasses.replace(identity.tool_limits(self.spec), max_calls=min(self.agent_limit(), remaining))
 
     def new_session(self, stage: str, agent: str) -> ToolSession:
-        return ToolSession(self.view, stage=stage, agent_id=agent, limits=self.limits_for(), clock=self.clock)
+        tools = TOOLS if not self.impact else (HOST_IMPACT_TOOLS if stage == "PREPARE" else IMPACT_TOOLS)
+        return ToolSession(self.view, stage=stage, agent_id=agent, limits=self.limits_for(), clock=self.clock,
+                           tools=tools)
 
     def tool(self, session: ToolSession, tool: str, args: dict, stage_t0: float):
         """-> (ToolCall|None, why). Never calls past a cap, deadline or cancellation."""
@@ -524,6 +529,10 @@ class Engine:
             adds, dels = self._count(call.result)
             files.append({"path": path, "status": {"A": "added", "D": "deleted", "M": "modified"}[letter],
                           "additions": adds, "deletions": dels})
+        if self.impact and not self.fatal:      # deterministic impact pre-pass: one host-only, logged tool call
+            call, why = self.tool(session, "impact_scan", {}, t0)
+            if call is None:
+                inc.append(self.stopped(stage, why, "impact map (impact_scan) not collected"))
         if self.fatal:
             return "failed", self.empty(stage), self.fatal["error"], []
         if session.incomplete and not inc:
@@ -602,7 +611,10 @@ class Engine:
         g = self.gate(stage, t0, new_agent=True)
         if g is not None:
             return self._agent_failed(g[1], reason=g[0])
-        ctx, notes = self.bounded_context(prompts.context_items(self.recorder.events, "PREPARE"))
+        items = prompts.context_items(self.recorder.events, "PREPARE")
+        if self.impact:         # the impact map goes first so the request context budget never drops it
+            items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
+        ctx, notes = self.bounded_context(items)
         if self.turn_role("investigator"):
             ctx, notes = self._cap_host_results(ctx, notes)
             end = self._investigator_chain(stage, t0, ctx, notes)
@@ -655,7 +667,7 @@ class Engine:
         events = self.tool_calls()
         host = [events[c["toolCallId"]] for c in ctx]
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
-                                       task=prompts.INVESTIGATOR_RETRIEVE_TASK)
+                                       task=prompts.investigator_task(self.policy.investigator_prompt))
         if self.coverage_doc() is None:
             doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
                                "context below is bounded and may be truncated or omitted.")
@@ -665,7 +677,7 @@ class Engine:
                                 unrendered=self.unrendered_ids(ctx, host))
         return chain.run(lambda hop, state: prompts.turn_request(
             self.profile, self.profile_ref, "investigator", doc, state, self.policy.requests_per_turn,
-            retrieval.RETRIEVAL_VERSION))
+            retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools()))
 
     def _investigator_exhausted(self, stage, end):
         detail = (f"investigator retrieval ended at the {end.exhausted} limit after {end.hops} hop(s) and "
@@ -856,7 +868,11 @@ class Engine:
                                 unrendered=self.unrendered_ids(items, host))
         return chain.run(lambda hop, state: prompts.turn_request(
             self.profile, self.profile_ref, "verifier", doc, state, self.policy.requests_per_turn,
-            retrieval.RETRIEVAL_VERSION, hypothesis_id=hyp["id"]))
+            retrieval.RETRIEVAL_VERSION, hypothesis_id=hyp["id"], tools=self.retrieval_tools()))
+
+    def retrieval_tools(self) -> list | None:
+        """The model-visible tool list: None keeps the frozen retrieval@2 list (legacy bytes unchanged)."""
+        return prompts.IMPACT_RETRIEVAL_TOOLS if self.impact else None
 
     def _verify_exhausted(self, hid, end, call_ids, inc):
         """A retrieval cap ended the chain: no final answer exists and none is invented. The claim stays
