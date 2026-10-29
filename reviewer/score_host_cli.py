@@ -1,10 +1,11 @@
-"""Operator entry for the trusted scoring host (SCORE-HOST-05): `plan | live | canary | replay | reconcile`.
+"""Operator entry for the trusted scoring host (SCORE-HOST-05): `plan | live | canary | replay | reconcile | acknowledge`.
 
     python -I -B -m reviewer.score_host_cli plan   --config pullo-score.toml --baseline B.json --store DIR
     python -I -B -m reviewer.score_host_cli live   ... --confirm-live            (root-gated; refuses without every control)
     python -I -B -m reviewer.score_host_cli canary ... --confirm-live            (only the preregistered three-role probe)
     python -I -B -m reviewer.score_host_cli replay ... --trace T --eval-run-id evr_...
     python -I -B -m reviewer.score_host_cli reconcile --baseline B.json --evidence E.json [--apply]
+    python -I -B -m reviewer.score_host_cli acknowledge --baseline B.json --evidence E.json [--apply]   (scoring startup hold)
 
 Models, caps, retries, sampling and prompts come ONLY from the strict score config; there is no flag to change them. The
 root-pinned launch baseline binds sources, inputs, config, authorization, state and proofs. Nothing here reads the
@@ -89,12 +90,13 @@ def _auth(b):
     return handle
 
 
-def _reconcile(reconcile, b, a, out, fail) -> int:
+def _reconcile(reconcile, b, a, out, fail, refused="reconcile-refused") -> int:
+    """Runs an append-only runtime ledger tool (`reconcile` or `acknowledge`) on the baseline's ORIGINAL ledger."""
     argv2 = ["--ledger", str(b.ledger_path), "--evidence", a.evidence] + (["--apply"] if a.apply else [])
     try:
         return reconcile.main(argv2, out=out)                          # the accepted append-only mechanism; nothing invented here
     except SystemExit:
-        return fail("reconcile-refused")
+        return fail(refused)
 
 
 def _recheck_inputs(b, v):
@@ -117,10 +119,11 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
             p.add_argument("--confirm-live", action="store_true")
         if name == "replay":
             p.add_argument("--trace", required=True)
-    r = sub.add_parser("reconcile")
-    r.add_argument("--baseline", required=True)
-    r.add_argument("--evidence", required=True)
-    r.add_argument("--apply", action="store_true")
+    for name in ("reconcile", "acknowledge"):
+        r = sub.add_parser(name)
+        r.add_argument("--baseline", required=True)
+        r.add_argument("--evidence", required=True)
+        r.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
 
     def fail(reason):
@@ -130,12 +133,14 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
         import datetime as dt
         stamp = now or dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         b = load_baseline(a.baseline)
-        if a.cmd == "reconcile":
-            from .runtime import reconcile
+        if a.cmd in ("reconcile", "acknowledge"):
+            from .runtime import acknowledge, reconcile
             if not b.state_dir.is_dir():
                 raise CliError("state-dir-missing")                        # never create the ORIGINAL state dir
-            lock_fd = H.acquire_lock(b.lock_path)                          # the canonical shared scorer lock, held for the whole reconcile
+            lock_fd = H.acquire_lock(b.lock_path)                          # the canonical shared scorer lock, held for the whole tool run
             try:
+                if a.cmd == "acknowledge":
+                    return _reconcile(acknowledge, b, a, out, fail, "acknowledge-refused")
                 return _reconcile(reconcile, b, a, out, fail)
             finally:
                 os.close(lock_fd)
