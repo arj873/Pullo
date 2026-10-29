@@ -54,7 +54,10 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # TERRA-ARM-01: benchmark.py candidate pin moved to the GPT Terra review arm (role -> provider routing, Terra-only arm reads
 # no OpenRouter key, Terra plan pin). Like LIVE-DEADLINE-04 this is an intentional extension that still awaits an
 # independent gate; it is NOT already accepted. Previous pin: 4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807.
-GATED = {"reviewer/pilot/benchmark.py": "9e98e14eeb624dc30e871ddd540850ac7c7d8992aa7ab495b29c21d373c15ab3",
+# BENCH-IMPACT-VERSION: benchmark.py candidate pin moved again for the opt-in BenchmarkOptions.impact_version /
+# --impact-version selector (default unset = profile default impact@v2, byte-identical) merged onto TERRA-ARM-01
+# (9e98e14eeb624dc30e871ddd540850ac7c7d8992aa7ab495b29c21d373c15ab3; standalone selector pin was adaf45bf9e4f...).
+GATED = {"reviewer/pilot/benchmark.py": "919365a65ea2dabfc2baecbaf002dfc572676e676d0d408eddb8d068e1181f3f",
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
