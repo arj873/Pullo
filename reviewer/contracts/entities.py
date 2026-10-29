@@ -1280,6 +1280,47 @@ def _floor_ok(d):
         yield ".finalCallId", "the accepted final answer is not the draft"
 
 
+SWEEP_COVERAGE_VERSION = "diff-shard-coverage@1"
+SWEEP_DISPOSITIONS = ("issue", "no-issue", "uncovered")
+SWEEP_EXCLUSIONS = ("deleted", "generated", "no-text-diff", "shard-limit")
+SweepShard = Obj(required={"agentId": Slug, "paths": Arr(RelPath(), min_items=1, max_items=50, unique=True),
+                           "diffChars": Count})
+SweepFile = Obj(required={"path": RelPath(), "agentId": Slug, "disposition": Enum(*SWEEP_DISPOSITIONS),
+                          "hypotheses": Count},
+                optional={"reason": Str(max_len=300), "toolCallId": Id("tool")})
+SweepExcluded = Obj(required={"path": RelPath(), "reason": Enum(*SWEEP_EXCLUSIONS)})
+SweepCoverage = define("SweepCoverage", Obj(
+    required={"version": Const(SWEEP_COVERAGE_VERSION), "rule": Str(min_len=1, max_len=64), "reviewable": Count,
+              "shards": Arr(SweepShard, max_items=50), "files": Arr(SweepFile, max_items=1000),
+              "excluded": Arr(SweepExcluded, max_items=1000), "excludedTotal": Count,
+              "summary": Obj(required={"swept": Count, "issue": Count, "noIssue": Count, "uncovered": Count})},
+    optional={"note": Str(max_len=500)},
+    description="investigator.impact@v4 only: the deterministic diff-shard partition of the reviewable changed files "
+                "and, per swept file, the disposition its sweep investigator gave: issue (a resolved hypothesis of that "
+                "sweep agent located in the file), no-issue (a logged file_disposition record of that agent, with its "
+                "reason and toolCallId) or uncovered (neither, after the one bounded continuation). Changed files the "
+                "partition left out are listed with the reason (deleted, generated, no text diff, shard limit)."))
+
+
+SWEEP_DISPOSITION_VERSION = "sweep-disposition@1"
+SWEEP_DECISIONS = ("complete", "continue", "final", "draft", "no-answer")
+SWEEP_DRAFT_REASONS = ("turns", "tool-calls", "context-chars", "stopped", "call-failed")
+
+
+def _sweep_ok(d):
+    dec = d["decision"]
+    if ("answerCallId" in d) != (dec in ("complete", "continue")):
+        yield ".answerCallId", "present exactly when decision is complete or continue"
+    if ("finalCallId" in d) != (dec == "final"):
+        yield ".finalCallId", "present exactly when decision is final"
+    if ("reason" in d) != (dec in ("draft", "no-answer")):
+        yield ".reason", "present exactly when decision is draft or no-answer"
+    if ("errorCode" in d) != (d.get("reason") in ("stopped", "call-failed")):
+        yield ".errorCode", "present exactly when the reason is a stop or a failed call"
+    if (dec == "complete") != (not d["missing"]) and dec in ("complete", "continue"):
+        yield ".missing", "complete has no missing file, continue has at least one"
+
+
 TraceEvent = define("TraceEvent", Union("type", {
     "run.start": _event("run.start", {"run": ReviewRun}),
     "stage.start": _event("stage.start", {"stage": Stage}),
@@ -1321,6 +1362,17 @@ TraceEvent = define("TraceEvent", Union("type", {
                    "left, the draft is final), continue (the host sent its one continuation), final (+finalCallId: "
                    "the continuation's final answer is used), draft (+reason, +errorCode for stopped/call-failed: "
                    "the continuation ended without a final answer and the draft is used)", _floor_ok)]),
+    "sweep.disposition": _event("sweep.disposition", {
+        "stage": Enum("INVESTIGATE"), "agentId": Slug, "version": Const(SWEEP_DISPOSITION_VERSION),
+        "decision": Enum(*SWEEP_DECISIONS), "missing": Arr(RelPath(), max_items=50, unique=True)},
+        {"answerCallId": Id("call"), "finalCallId": Id("call"), "reason": Enum(*SWEEP_DRAFT_REASONS),
+         "errorCode": Enum(*ERROR_CODES)},
+        [Invariant("sweep-decision", "investigator.impact@v4 per-file disposition check of one diff-shard sweep agent: "
+                   "complete/continue (+answerCallId: the first final answer; missing = shard files without a "
+                   "disposition), final (+finalCallId: the one continuation's final answer, whose hypotheses are "
+                   "added; missing = still without one), draft (+reason: the continuation ended without a final "
+                   "answer), no-answer (+reason: the sweep's first chain ended without a final answer)", _sweep_ok)]),
+    "investigate.coverage": _event("investigate.coverage", {"stage": Enum("INVESTIGATE"), "coverage": SweepCoverage}),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),
     "error": _event("error", {"error": TypedError}),
@@ -1398,7 +1450,7 @@ StagePayload = define("StagePayload", Union("stage", {
     "TRIAGE": _payload("TRIAGE", {"plan": Plan}),
     "INVESTIGATE": _payload("INVESTIGATE", {"hypotheses": Arr(Hypothesis, max_items=1000),
                                             "agents": Arr(AgentStatus, max_items=100)},
-                            {"merges": Arr(SpecialistMerge, max_items=1000)}),
+                            {"merges": Arr(SpecialistMerge, max_items=1000), "sweep": SweepCoverage}),
     "VERIFY": _payload("VERIFY", {"findings": Arr(Finding, max_items=1000),
                                   "verifications": Arr(VerificationRecord, max_items=1000),
                                   "drops": Arr(DropRecord, max_items=1000)}),

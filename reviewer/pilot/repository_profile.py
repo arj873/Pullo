@@ -9,8 +9,11 @@ with the same numeric caps. `impact_version` picks the investigator: 2 (the defa
 profile, Plan and policy (investigator.impact@v2 with the engine-enforced exploration floor: one guaranteed extra prompt,
 not guaranteed tool use). 3 (explicit only, until measured) is investigator.impact@v3: three specialist investigators
 (contracts, logic, safety) run in turn, each a v2 investigator with its own lens paragraph, sharing the v2 investigator
-budgets (reviewer.pipeline.specialists); its Plan lists those specialists. 1 is exactly the IMPACT-01 profile and policy (investigator.impact@v1,
-same digests). The verifier is verifier.impact@v1 in all three. `impact=False` is exactly the earlier retrieval@2 profile and
+budgets (reviewer.pipeline.specialists); its Plan lists those specialists. 4 (explicit only, until measured) is
+investigator.impact@v4: the v3 specialists unchanged plus deterministic diff-shard sweep investigators
+(reviewer.pipeline.sweeps); its Plan lists the specialists and the sweep marker and scales the budgets for the extra
+agents (V4_* below; the $4 run ceiling and the spend split are unchanged). 1 is exactly the IMPACT-01 profile and policy
+(investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
 
 from __future__ import annotations
@@ -18,10 +21,12 @@ from __future__ import annotations
 from reviewer.pipeline import RetrievalPolicy
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
                                        INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
-                                       INVESTIGATOR_IMPACT_V3_PROMPT, SPECIALIST_AGENTS,
+                                       INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
+                                       SPECIALIST_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
                                        VERIFIER_CONTEXT_CHECK_PROMPT, VERIFIER_IMPACT_PROMPT)
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
+from reviewer.pipeline.sweeps import plan_specialists as v4_plan_specialists
 
 from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile
 
@@ -38,8 +43,17 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
         raise ProfileError(f"experiment {experiment} needs the retrieval profile (the Turn verifier)")
 
 
-IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT}
+IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT,
+                   4: INVESTIGATOR_IMPACT_V4_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
+# investigator.impact@v4 Plan scaling (only for v4; every other Plan keeps its bytes). The INVESTIGATE ceiling doubles so
+# the specialists keep exactly the v3 seconds (they split the first half, reviewer.pipeline.sweeps) and the diff-shard
+# sweeps share the second half; VERIFY gets more time for the larger, round-robin candidate list; the hard and soft run
+# deadlines move to fit. The run tool-call cap covers up to 6 sweeps (12 + files each) and renewed verifier sessions.
+V4_MAX_TOOL_CALLS = 400
+V4_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 600, "VERIFY": 450, "JUDGE": 200}
+V4_LIVE_WALL_CLOCK_SEC, V4_LIVE_SOFT_DEADLINE_SEC = 1_500, 1_200
+V4_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 240}      # twice the legacy table's 120 s
 
 
 def _prompts(impact: bool, impact_version: int = DEFAULT_IMPACT_VERSION) -> tuple[str, str]:
@@ -70,13 +84,24 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
 def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     """`live_stage_timing` (explicit, default off = the legacy Plan) sets the versioned live stage ceilings and
     host-stop recording together; no repository data selects either. An investigator.impact@v3 profile gets the
-    specialist investigators as Plan.specialists (every other profile keeps the one generalist, same Plan bytes)."""
-    plan = live_plan(profile, **({"stage_ceilings_sec": LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True}
-                                 if live_stage_timing else {}))
-    plan["budget"] = dict(plan["budget"], maxToolCalls=MAX_TOOL_CALLS, maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+    specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep
+    marker and the V4_* budget scaling (every other profile keeps the one generalist, same Plan bytes)."""
+    inv = profile["roles"]["investigator"]["promptVersion"]
+    if inv == INVESTIGATOR_IMPACT_V4_PROMPT:     # the v4 scaling (V4_*); every other Plan is built exactly as before
+        plan = live_plan(profile, **({"stage_ceilings_sec": V4_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
+                                      "wall_clock_sec": V4_LIVE_WALL_CLOCK_SEC,
+                                      "soft_deadline_sec": V4_LIVE_SOFT_DEADLINE_SEC}
+                                     if live_stage_timing else {"stage_ceilings_sec": V4_LEGACY_STAGE_CEILINGS_SEC}))
+        plan["budget"] = dict(plan["budget"], maxToolCalls=V4_MAX_TOOL_CALLS,
+                              maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+        plan["specialists"] = v4_plan_specialists()
+    else:
+        plan = live_plan(profile, **({"stage_ceilings_sec": LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True}
+                                     if live_stage_timing else {}))
+        plan["budget"] = dict(plan["budget"], maxToolCalls=MAX_TOOL_CALLS, maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+        if inv == INVESTIGATOR_IMPACT_V3_PROMPT:
+            plan["specialists"] = list(SPECIALIST_AGENTS)
     plan["reasons"] = ["pilot-repository: fixed standard Plan, retries/repairs off, complete pinned repository imports"]
-    if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V3_PROMPT:
-        plan["specialists"] = list(SPECIALIST_AGENTS)
     return plan
 
 
@@ -92,4 +117,6 @@ def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
         return RetrievalPolicy()
     if inv == INVESTIGATOR_PROMPT:
         return RetrievalPolicy(verifier_prompt=ver)
+    if inv == INVESTIGATOR_IMPACT_V4_PROMPT:         # the run-wide tool-call cap follows the v4 Plan's
+        return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V4_MAX_TOOL_CALLS)
     return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)

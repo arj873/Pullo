@@ -849,3 +849,17 @@ def impact_scan(ctx: Ctx, a: dict) -> Outcome:
     return Outcome(status, evidence, "approximate" if truncated or ctx.view.approximate else "exact",
                    {"shown": len(ev), "total": total_refs} if len(ev) < total_refs and not scan_partial else None,
                    " ".join(notes), counts, [l.name for l in ctx.view.layers("head")])
+
+
+# ---------------------------------------------------------------- diff-shard sweeps (investigator.impact@v4)
+
+def file_disposition(ctx: Ctx, a: dict) -> Outcome:
+    """A sweep investigator's record that it examined `path` and found no issue (with a one-line reason). It reads
+    nothing and returns no evidence: the logged call IS the record (the engine counts it only for a shard file of
+    the requesting sweep agent). A path that is no file of the head view is refused as unavailable (nothing recorded)."""
+    if not policy.permitted(a["path"]):
+        return DENIED
+    if ctx.view.find("head", a["path"]) is None:
+        return Outcome("unavailable", completeness="approximate" if ctx.view.approximate else "exact",
+                       notice=f"{a['path']!r} is not a file of the head snapshot; no disposition was recorded.")
+    return Outcome("ok", notice=f"Recorded: {a['path']!r} examined, no issue.")

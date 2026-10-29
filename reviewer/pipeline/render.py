@@ -70,10 +70,37 @@ def summary_line(status: str, comments: list, incomplete: list, error: dict | No
     return base[:8000]
 
 
+def sweep_section(cov: dict, limit: int = 60) -> list[str]:
+    """review.md lines of the impact@v4 diff-shard sweep coverage (per-file dispositions, bounded)."""
+    s = cov["summary"]
+    out = ["## Diff-shard sweep coverage", ""]
+    if not cov["shards"]:
+        out += [f"- No diff shards: {cov.get('note', 'no reviewable changed files')}."]
+    else:
+        out += [f"- Reviewable changed files: {cov['reviewable']} in {len(cov['shards'])} shard(s) "
+                f"({', '.join(d['agentId'] + ': ' + str(len(d['paths'])) for d in cov['shards'])})",
+                f"- Swept files with a disposition: {s['issue'] + s['noIssue']} of {s['swept']} "
+                f"({s['issue']} with a resolved hypothesis, {s['noIssue']} examined with no issue)",
+                f"- Uncovered (no disposition after the one continuation): {s['uncovered']}"]
+        for f in cov["files"][:limit]:
+            what = {"issue": f"{f['hypotheses']} hypothesis(es)", "no-issue": f"no issue: {f.get('reason', '')}",
+                    "uncovered": "NOT COVERED"}[f["disposition"]]
+            out.append(f"  - `{f['path']}` ({f['agentId']}): {what}")
+        if len(cov["files"]) > limit:
+            out.append(f"  - ... {len(cov['files']) - limit} more file(s) in the INVESTIGATE artifact")
+    if cov["excludedTotal"]:
+        shown = ", ".join(f"`{x['path']}` ({x['reason']})" for x in cov["excluded"][:20])
+        more = f" (+{cov['excludedTotal'] - 20} more)" if cov["excludedTotal"] > 20 else ""
+        out.append(f"- Changed files not swept: {cov['excludedTotal']}: {shown}{more}")
+    out += ["- A disposition is the sweep investigator's own statement; 'no issue' is not a certificate that the file "
+            "is free of defects.", ""]
+    return out
+
+
 def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete: list, error: dict | None,
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
               coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
-              specialists: dict | None = None) -> str:
+              specialists: dict | None = None, sweep: dict | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -138,6 +165,8 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
         out += [f"- Duplicates merged across specialists before verification: {merged}",
                 "- A specialist that did not complete did not review its focus; its share of the review is missing.",
                 ""]
+    if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
+        out += sweep_section(sweep)
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

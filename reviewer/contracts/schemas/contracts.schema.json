@@ -4530,6 +4530,9 @@
             },
             "stage": {
               "const": "INVESTIGATE"
+            },
+            "sweep": {
+              "$ref": "#/$defs/SweepCoverage"
             }
           },
           "required": [
@@ -4764,6 +4767,187 @@
       "x-invariants": [
         "suite-separation: unique ids; labels/ separation; smoke-only overlap"
       ]
+    },
+    "SweepCoverage": {
+      "additionalProperties": false,
+      "description": "investigator.impact@v4 only: the deterministic diff-shard partition of the reviewable changed files and, per swept file, the disposition its sweep investigator gave: issue (a resolved hypothesis of that sweep agent located in the file), no-issue (a logged file_disposition record of that agent, with its reason and toolCallId) or uncovered (neither, after the one bounded continuation). Changed files the partition left out are listed with the reason (deleted, generated, no text diff, shard limit).",
+      "properties": {
+        "excluded": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  "deleted",
+                  "generated",
+                  "no-text-diff",
+                  "shard-limit"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "excludedTotal": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "agentId": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                "type": "string"
+              },
+              "disposition": {
+                "enum": [
+                  "issue",
+                  "no-issue",
+                  "uncovered"
+                ]
+              },
+              "hypotheses": {
+                "maximum": 1000000000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              },
+              "reason": {
+                "maxLength": 300,
+                "type": "string"
+              },
+              "toolCallId": {
+                "pattern": "^(?:tool_[0-9a-f]{16})$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "agentId",
+              "disposition",
+              "hypotheses"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "note": {
+          "maxLength": 500,
+          "type": "string"
+        },
+        "reviewable": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "shards": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "agentId": {
+                "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+                "type": "string"
+              },
+              "diffChars": {
+                "maximum": 1000000000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "paths": {
+                "items": {
+                  "maxLength": 1024,
+                  "minLength": 1,
+                  "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                  "type": "string"
+                },
+                "maxItems": 50,
+                "minItems": 1,
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "agentId",
+              "paths",
+              "diffChars"
+            ],
+            "type": "object"
+          },
+          "maxItems": 50,
+          "type": "array"
+        },
+        "summary": {
+          "additionalProperties": false,
+          "properties": {
+            "issue": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "noIssue": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "swept": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "uncovered": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "swept",
+            "issue",
+            "noIssue",
+            "uncovered"
+          ],
+          "type": "object"
+        },
+        "version": {
+          "const": "diff-shard-coverage@1"
+        }
+      },
+      "required": [
+        "version",
+        "rule",
+        "reviewable",
+        "shards",
+        "files",
+        "excluded",
+        "excludedTotal",
+        "summary"
+      ],
+      "type": "object"
     },
     "Tier": {
       "enum": [
@@ -5425,6 +5609,159 @@
           "type": "object",
           "x-invariants": [
             "floor-decision: investigator.impact@v2 exploration floor: draftCallId is the agent's first final answer, given before any context request. skipped (+reason: no turn/tool/context budget left, the draft is final), continue (the host sent its one continuation), final (+finalCallId: the continuation's final answer is used), draft (+reason, +errorCode for stopped/call-failed: the continuation ended without a final answer and the draft is used)",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agentId": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
+              "type": "string"
+            },
+            "answerCallId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "decision": {
+              "enum": [
+                "complete",
+                "continue",
+                "final",
+                "draft",
+                "no-answer"
+              ]
+            },
+            "errorCode": {
+              "enum": [
+                "replay-miss",
+                "replay-mismatch",
+                "live-calls-disabled",
+                "model-unresolved",
+                "schema-invalid",
+                "repair-exhausted",
+                "provider-error",
+                "provider-timeout",
+                "budget-exhausted",
+                "deadline-exceeded",
+                "cancelled",
+                "tool-denied",
+                "path-escape",
+                "invalid-citation",
+                "contract-violation",
+                "internal"
+              ]
+            },
+            "finalCallId": {
+              "pattern": "^(?:call_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "missing": {
+              "items": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "pattern": "^(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*[\\x00-\\x1f\\x7f])(?!(?:[\\s\\S]*/)?\\.{1,2}(?:/|$))(?![\\s\\S]*//)(?![\\s\\S]*/$).+$",
+                "type": "string"
+              },
+              "maxItems": 50,
+              "type": "array",
+              "uniqueItems": true
+            },
+            "reason": {
+              "enum": [
+                "turns",
+                "tool-calls",
+                "context-chars",
+                "stopped",
+                "call-failed"
+              ]
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INVESTIGATE"
+              ]
+            },
+            "type": {
+              "const": "sweep.disposition"
+            },
+            "version": {
+              "const": "sweep-disposition@1"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "agentId",
+            "version",
+            "decision",
+            "missing"
+          ],
+          "type": "object",
+          "x-invariants": [
+            "sweep-decision: investigator.impact@v4 per-file disposition check of one diff-shard sweep agent: complete/continue (+answerCallId: the first final answer; missing = shard files without a disposition), final (+finalCallId: the one continuation's final answer, whose hypotheses are added; missing = still without one), draft (+reason: the continuation ended without a final answer), no-answer (+reason: the sweep's first chain ended without a final answer)",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "coverage": {
+              "$ref": "#/$defs/SweepCoverage"
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "enum": [
+                "INVESTIGATE"
+              ]
+            },
+            "type": {
+              "const": "investigate.coverage"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "coverage"
+          ],
+          "type": "object",
+          "x-invariants": [
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },

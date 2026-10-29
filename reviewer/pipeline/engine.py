@@ -28,11 +28,11 @@ from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
 from reviewer.contracts.stages import STAGES, artifact_name
 from reviewer.gateway import SettlementError, typed_error
-from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, TOOLS, Limits, ToolSession, full_view, import_view,
-                            omissions_from_records)
+from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS, Limits, ToolSession, full_view,
+                            import_view, omissions_from_records)
 
 from . import coverage as cov_mod
-from . import identity, impactcov, judging, prompts, render, repocov, retrieval, snaps, specialists
+from . import identity, impactcov, judging, prompts, render, repocov, retrieval, snaps, specialists, sweeps
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -120,7 +120,9 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
                           coverage=cdoc, retrieval=retrieval_run, impact=impact,
                           specialists=(artifacts["INVESTIGATE"]["payload"]
-                                       if specialists.is_v3_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
+                                       if specialists.is_specialist_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                       else None),
+                          sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"))
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -167,6 +169,8 @@ class Engine:
         self.impact = identity.impact_mode(spec)                # impact map + find_references + impact prompts
         # investigator.impact@v3: specialist investigator agent ids in run order (None: the one generalist agent)
         self.specialists = self.policy.specialists if self.impact else None
+        # investigator.impact@v4: diff-shard sweep investigators run after the specialists (reviewer.pipeline.sweeps)
+        self.sweep = bool(self.impact and self.policy.diff_sweep)
         self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
         self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
         self._time_slice: tuple | None = None   # v3: (agent, slice end sec, stage ceiling sec) of the running agent
@@ -833,11 +837,13 @@ class Engine:
                                                                 identity.tool_limits(self.spec).max_calls))
         spend_cum = specialists.cumulative(investigation_limit(self.budget))
         ceiling = stage_ceiling(stage, self.budget)
-        slices = specialists.time_slices(ceiling)
+        # impact@v4: the specialists split HALF of the (doubled) v4 ceiling exactly as v3 splits its ceiling
+        slices = specialists.time_slices(sweeps.specialist_ceiling(ceiling) if self.sweep else ceiling)
         agents, hyps, inc = [], [], []
         first_err = None                     # (error, reason) of the first specialist that failed or was stopped
         usable = 0
         ctx = notes = None
+        systemic = False                     # impact@v4: a systemic failure also starts no sweep
 
         def failed(agent, err, why):
             agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
@@ -884,6 +890,7 @@ class Engine:
                             err["code"], f"not started: specialist {agent} failed with {err['code']} (systemic or "
                             "unknown provider outcome), which must not be repeated by every specialist", stage=stage),
                             "agent-failure")
+                    systemic = err
                     break
             elif end.exhausted is not None:
                 agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
@@ -896,9 +903,22 @@ class Engine:
                 usable += 1
             if self.fatal:                       # e.g. a snapshot tamper during this specialist's tool calls
                 break
+        cov = None
+        if self.sweep:                           # investigator.impact@v4: the diff-shard sweep phase
+            out = self._sweep_phase(stage, t0, ceiling, agents, hyps, inc, systemic, failed)
+            if out[0] == "fatal":
+                return self._v3_failed(agents, *out[1])
+            _, n_usable, err_reason, cov = out
+            usable += n_usable
+            first_err = first_err or err_reason
         if not usable:
             return self._v3_failed(agents, *first_err)
-        payload = {"hypotheses": hyps, "agents": agents, "merges": specialists.merge(hyps)}
+        if not self.sweep:
+            payload = {"hypotheses": hyps, "agents": agents, "merges": specialists.merge(hyps)}
+            return ("partial" if inc else "completed"), payload, None, inc
+        payload = {"hypotheses": hyps, "agents": agents,
+                   "merges": specialists.merge(hyps, sweeps.merge_order(agents)), "sweep": cov}
+        self.recorder.append("investigate.coverage", stage=stage, coverage=cov)
         return ("partial" if inc else "completed"), payload, None, inc
 
     @staticmethod
@@ -911,6 +931,209 @@ class Engine:
         if reason == "soft-deadline":
             self.set_fatal("INVESTIGATE", err, reason="soft-deadline")
         return "failed", {"hypotheses": [], "agents": agents, "merges": []}, err, []
+
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v4 diff-shard sweeps
+    def shard_plan(self) -> tuple[list, list, list, list]:
+        """-> (reviewable [(path, chars)], shards [[(path, chars)]], excluded [{path, reason}], all changed paths),
+        a pure function of the PREPARE artifact and its logged per-file diff results (sweeps.SHARD_RULE)."""
+        files = self.artifacts["PREPARE"]["payload"]["files"]
+        diffs = {}
+        for e in self.recorder.events:
+            if e["type"] == "tool.call" and e["stage"] == "PREPARE" and e["tool"] == "diff" \
+                    and e["args"].get("path") is not None:
+                diffs.setdefault(e["args"]["path"], e)
+        rev, excluded = sweeps.reviewable(files, diffs)
+        shard_list, over = sweeps.shards(rev)
+        excluded = excluded + [{"path": p, "reason": "shard-limit"} for p in over]
+        return rev, shard_list, sorted(excluded, key=lambda x: x["path"]), sorted(f["path"] for f in files)
+
+    def _sweep_context(self, paths: list[str]) -> tuple[list, list]:
+        """The sweep's prefetched context: the PREPARE changed-path list and the PREPARE diffs of its shard files."""
+        mine = set(paths)
+        items = [i for i in prompts.context_items(self.recorder.events, "PREPARE")
+                 if i["tool"] == "diff" and (i["args"].get("path") is None or i["args"]["path"] in mine)]
+        return self._cap_host_results(*self.bounded_context(items))
+
+    def _dispositions(self, agent: str, paths: list[str], found: list[dict]) -> dict:
+        """path -> (disposition, reason|None, toolCallId|None, owner hypothesis count) for a sweep's shard files."""
+        records = {}
+        for e in self.recorder.events:
+            if e["type"] == "tool.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent \
+                    and e["tool"] == "file_disposition" and e["result"]["status"] == "ok":
+                records.setdefault(e["args"]["path"], e)
+        out = {}
+        for p in paths:
+            n = sum(1 for h in found if h["location"]["path"] == p)
+            if n:
+                out[p] = ("issue", None, None, n)
+            elif p in records:
+                out[p] = ("no-issue", records[p]["args"]["reason"].strip()[:300], records[p]["toolCallId"], 0)
+            else:
+                out[p] = ("uncovered", None, None, 0)
+        return out
+
+    def _missing(self, agent: str, paths: list[str], found: list[dict]) -> list[str]:
+        return [p for p, d in self._dispositions(agent, paths, found).items() if d[0] == "uncovered"]
+
+    def _sweep_phase(self, stage, t0, ceiling, agents, hyps, inc, systemic, failed):
+        """investigator.impact@v4: one sweep investigator per diff shard, in shard order, after the specialists, under
+        the cumulative sweep ceilings of sweeps.BUDGET_RULE. -> ("fatal", (error, reason)) when the stage must fail as
+        v3 would (replay failure, cancellation, internal error, spend-book failure), else ("ok", usable sweeps,
+        (error, reason)|None of the first failed sweep, SweepCoverage)."""
+        rev, shard_list, excluded, all_paths = self.shard_plan()
+        k = len(shard_list)
+        ids = [sweeps.agent_id(j) for j in range(k)]
+        shard_docs = [{"agentId": a, "paths": [p for p, _ in sh], "diffChars": sum(c for _, c in sh)}
+                      for a, sh in zip(ids, shard_list)]
+        found_by: dict[str, list] = {a: [] for a in ids}
+
+        def cov(note=None):
+            files = []
+            for d in shard_docs:
+                for p, (disp, reason, tid, n) in self._dispositions(d["agentId"], d["paths"],
+                                                                    found_by[d["agentId"]]).items():
+                    f = {"path": p, "agentId": d["agentId"], "disposition": disp, "hypotheses": n}
+                    if reason is not None:
+                        f["reason"], f["toolCallId"] = reason, tid
+                    files.append(f)
+            return sweeps.coverage(len(rev), shard_docs, excluded, files, note)
+
+        if not k:
+            return "ok", 0, None, cov(sweeps.NOTE_TINY)
+        if self.fatal:                           # e.g. a snapshot tamper: the run fails; no sweep starts
+            return "ok", 0, None, cov()
+        if systemic:
+            for a in ids:
+                failed(a, typed_error(systemic["code"], f"not started: a specialist failed with {systemic['code']} "
+                                      "(systemic or unknown provider outcome), which must not be repeated by every "
+                                      "diff-shard sweep", stage=stage), "agent-failure")
+            return "ok", 0, None, cov()
+        used0 = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
+        tool_cum = sweeps.tool_ceilings(used0, [len(d["paths"]) for d in shard_docs])
+        spend_cum = sweeps.spend_ceilings(self.stage_spend(stage), investigation_limit(self.budget), k)
+        slices = sweeps.time_slices(ceiling, k)
+        usable, first_err = 0, None
+        for j, (agent, d) in enumerate(zip(ids, shard_docs)):
+            self._time_slice = None if slices is None or slices[j] >= ceiling else (agent, slices[j], ceiling)
+            try:
+                g = self.gate(stage, t0, new_agent=True)
+                if g is not None:
+                    reason, err = g
+                    if err["code"] == "cancelled":
+                        agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err),
+                                       "error": err})
+                        return "fatal", (err, reason)
+                    failed(agent, err, reason)
+                    first_err = first_err or (err, reason)
+                    continue
+                ctx, notes = self._sweep_context(d["paths"])
+                used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
+                self._tool_share, self._spend_ceiling = max(0, tool_cum[j] - used), spend_cum[j]
+                try:
+                    end, found, more = self._sweep_agent(stage, t0, agent, j, k, d["paths"], all_paths, ctx, notes)
+                finally:
+                    self._tool_share = self._spend_ceiling = None
+            finally:
+                self._time_slice = None
+            inc.extend(more)
+            if end.payload is None and end.error is not None:
+                err, reason = end.error, (end.stop[0] if end.stop else None)
+                if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
+                    agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                    return "fatal", (err, reason)
+                limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
+                failed(agent, err, limit or "agent-failure")
+                first_err = first_err or (err, reason)
+                if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further sweep
+                    for later in ids[j + 1:]:
+                        failed(later, typed_error(
+                            err["code"], f"not started: sweep {agent} failed with {err['code']} (systemic or unknown "
+                            "provider outcome), which must not be repeated by every sweep", stage=stage),
+                            "agent-failure")
+                    break
+            elif end.payload is None:            # an exhausted counter ended the first chain without an answer
+                agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                inc.append(self._inc_doc(stage, "tool-calls-exhausted", f"sweep {agent}: " + self._exhausted_detail(end)))
+                usable += 1
+            else:
+                agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                found_by[agent] = found
+                hyps.extend(found)
+                usable += 1
+            if self.fatal:
+                break
+        return "ok", usable, first_err, cov()
+
+    def _sweep_agent(self, stage, t0, agent, j, k, paths, all_paths, ctx, notes):
+        """One diff-shard sweep investigator: its retrieval chain, then the disposition check and at most one
+        continuation (sweeps.DISPOSITION_RULE). -> (ChainEnd, [resolved hypotheses], [incomplete]). The ChainEnd is the
+        first chain's (payload set when it gave a final answer), or the continuation's error when that must fail the
+        stage as v3 would (payload then None)."""
+        events = self.tool_calls()
+        host = [events[c["toolCallId"]] for c in ctx]
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
+                                       task=prompts.SWEEP_TASK)
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        doc["sweep"] = prompts.sweep_block(j + 1, k, paths, all_paths)
+        session = ToolSession(self.view, stage=stage, agent_id=agent, limits=self.limits_for(), clock=self.clock,
+                              tools=SWEEP_TOOLS)
+        unrendered = self.unrendered_ids(ctx, host)
+
+        def chain(turns):
+            return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
+                                   turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
+
+        def build(d):
+            return lambda hop, state: prompts.turn_request(
+                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                retrieval.RETRIEVAL_VERSION, tools=prompts.SWEEP_RETRIEVAL_TOOLS)
+
+        rec = dict(stage=stage, agentId=agent, version=sweeps.DISPOSITION_RULE)
+        end = chain(self.policy.investigator_turns).run(build(doc))
+        if end.payload is None:
+            why = "stopped" if end.stop is not None else "call-failed" if end.error is not None else end.exhausted
+            extra = {"errorCode": end.error["code"]} if why in ("stopped", "call-failed") else {}
+            self.recorder.append("sweep.disposition", decision="no-answer", reason=why,
+                                 missing=self._missing(agent, paths, []), **extra, **rec)
+            return end, [], []
+        found = self._hypotheses(agent, end.payload, end.final_call)
+        missing = self._missing(agent, paths, found)
+        if not missing:
+            self.recorder.append("sweep.disposition", decision="complete", answerCallId=end.final_call, missing=[],
+                                 **rec)
+            return end, found, []
+        self.recorder.append("sweep.disposition", decision="continue", answerCallId=end.final_call, missing=missing,
+                             **rec)
+        second = chain(sweeps.CONTINUATION_HOPS).run(
+            build(dict(doc, dispositionCheck=prompts.disposition_block(missing, end.payload))))
+        if second.payload is not None:
+            have = {h["id"] for h in found}
+            found = found + [h for h in self._hypotheses(agent, second.payload, second.final_call)
+                             if h["id"] not in have]
+            self.recorder.append("sweep.disposition", decision="final", finalCallId=second.final_call,
+                                 missing=self._missing(agent, paths, found), **rec)
+            return end, found, []
+        if second.error is not None and (second.error["code"] in REPLAY_CODES
+                                         or second.error["code"] in ("cancelled", "internal")
+                                         or self.needs_reconciliation):
+            return second, [], []                 # never masked by the first answer: fail exactly as v3 would
+        inc = []
+        if second.error is not None:
+            code = second.error["code"]
+            why = "stopped" if second.stop is not None else "call-failed"
+            self.recorder.append("sweep.disposition", decision="draft", reason=why, errorCode=code,
+                                 missing=self._missing(agent, paths, found), **rec)
+            limit = ("deadline" if second.stop is not None or code == "deadline-exceeded"
+                     else "budget" if code == "budget-exhausted" else None)
+            if limit is not None:
+                inc = [self._inc_doc(stage, limit, f"sweep {agent}: the disposition continuation was stopped ({code}); "
+                                                   "files without a disposition are disclosed as uncovered")]
+        else:
+            self.recorder.append("sweep.disposition", decision="draft", reason=second.exhausted,
+                                 missing=self._missing(agent, paths, found), **rec)
+        return end, found, inc
 
     @property
     def coverage_record(self) -> dict | None:
@@ -965,6 +1188,9 @@ class Engine:
             if a["status"] != "completed":
                 continue
             agent = a["agentId"]
+            if self.sweep and agent not in specialists.AGENTS:      # impact@v4 diff-shard sweep lane
+                lanes.append(self._sweep_lane(agent))
+                continue
             src = self._floor_source(agent)
             drafts = next((p["hypotheses"] for e in reversed(self.recorder.events)
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
@@ -974,6 +1200,27 @@ class Engine:
                           for n, d in enumerate(drafts)])
         out = [lane[k] for k in range(max(map(len, lanes), default=0)) for lane in lanes if k < len(lane)]
         return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+
+    def _sweep_lane(self, agent: str) -> list:
+        """An impact@v4 sweep's VERIFY lane: the hypotheses of its first final answer, then those its disposition
+        continuation added (per its `sweep.disposition` events), as [(hypothesis id, draft)] without repeated ids."""
+        srcs = [e.get("answerCallId") or e["finalCallId"] for e in self.recorder.events
+                if e["type"] == "sweep.disposition" and e["agentId"] == agent
+                and e["decision"] in ("complete", "continue", "final")]
+        lane, seen = [], set()
+        for src in srcs:
+            ev = self.model_event(src)
+            for n, d in enumerate(((terminal_payload(ev) if ev is not None else None) or {"hypotheses": []})["hypotheses"]):
+                hid = hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"])
+                if hid not in seen:
+                    seen.add(hid)
+                    lane.append((hid, d))
+        return lane
+
+    def sweep_shards(self) -> int:
+        """Number of impact@v4 diff shards of this run (0 without sweeps), from the INVESTIGATE artifact."""
+        cov = self.artifacts["INVESTIGATE"]["payload"].get("sweep") if self.sweep else None
+        return 0 if cov is None else len(cov["shards"])
 
     def _floor_source(self, agent: str | None = None) -> str | None:
         """The investigator call whose answer INVESTIGATE used, per the last `retrieval.floor` decision that settles it
@@ -994,6 +1241,9 @@ class Engine:
         cands, hyps = self.candidates()
         findings, records, drops, inc = [], [], [], []
         session = self.new_session(stage, VERIFIER_AGENT)
+        shards = self.sweep_shards()                  # impact@v4: the cap scales with the shards; sessions renew
+        cap = sweeps.verify_cap(shards) if self.sweep else specialists.MAX_VERIFY_CANDIDATES
+        sessions = {VERIFIER_AGENT: session}
         stop = None                                   # (reason, error) once a global stop applies
         family = self.profile["roles"]["verifier"]["family"]
         v3 = self.specialists is not None
@@ -1019,7 +1269,10 @@ class Engine:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
                               "detail": err["message"][:500]})
                 return False
-            rec, finding, drop, more = self.verify_one(session, n, hyps[hid], t0, family)
+            name = sweeps.verifier_agent(kept - 1, shards) if self.sweep else VERIFIER_AGENT
+            if name not in sessions:
+                sessions[name] = self.new_session(stage, name)
+            rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
             inc.extend(more)
             if rec is None:
                 return False
@@ -1036,11 +1289,14 @@ class Engine:
             if not v3:
                 return False
             kept += 1
-            if kept <= specialists.MAX_VERIFY_CANDIDATES:
+            if kept <= cap:
                 return False
             drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
-                          "detail": f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist hypotheses; "
-                                    "later ones (round-robin specialist order) are not verified"})
+                          "detail": (f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
+                                     f"({sweeps.VERIFY_RULE}); later ones (round-robin across specialist and sweep "
+                                     "lanes) are not verified" if self.sweep else
+                                     f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist hypotheses; "
+                                     "later ones (round-robin specialist order) are not verified")})
             return True
 
         for n, hid, draft in cands:
@@ -1075,8 +1331,9 @@ class Engine:
                                             "earlier specialist's is kept)"})
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
-        if session.incomplete and not any(i["reason"] == session.incomplete for i in inc):
-            inc.append(self._inc(stage, session.incomplete))
+        for sess in sessions.values():
+            if sess.incomplete and not any(i["reason"] == sess.incomplete for i in inc):
+                inc.append(self._inc(stage, sess.incomplete))
         status = "partial" if inc else "completed"
         return status, {"findings": findings, "verifications": records, "drops": drops}, None, inc
 
@@ -1118,12 +1375,12 @@ class Engine:
             g = self.gate(stage, t0, scope="model")  # the last tool call may have crossed a deadline / cancel
             if g is not None:
                 return self._verify_failed(hid, g[1], [], inc)
-            out, err, attempts = self.model_call(stage, "verifier", VERIFIER_AGENT, n, req)
+            out, err, attempts = self.model_call(stage, "verifier", session.agent_id, n, req)
             call_ids = [a.call_id for a in attempts if a.call_id]
             if err is not None:
                 return self._verify_failed(hid, err, call_ids, inc)
             final = next(a.call_id for a in reversed(attempts) if a.outcome == "ok")
-        ev, problems = materialize_evidence(out["evidence"], self.citable(final), f"verifier:{VERIFIER_AGENT}",
+        ev, problems = materialize_evidence(out["evidence"], self.citable(final), f"verifier:{session.agent_id}",
                                             self.resolver)
         rec = {"hypothesisId": hid, "verdict": out["verdict"], "evidence": ev, "callIds": call_ids[-10:],
                "notes": out["notes"][:4000]}
@@ -1171,7 +1428,7 @@ class Engine:
         host = [events[i] for i in host_ids]
         doc = prompts.verifier_doc(self.case, hyp, items, omitted, self.coverage_doc(),
                                    task=prompts.verifier_task(self.policy.verifier_prompt))
-        chain = retrieval.Chain(self, stage="VERIFY", role="verifier", agent=VERIFIER_AGENT, session=session, t0=t0,
+        chain = retrieval.Chain(self, stage="VERIFY", role="verifier", agent=session.agent_id, session=session, t0=t0,
                                 turns=self.policy.verifier_turns, policy=self.policy, hypothesis_id=hyp["id"],
                                 host_events=host, hyp_calls_used=len(host),
                                 unrendered=self.unrendered_ids(items, host))
