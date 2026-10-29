@@ -14,7 +14,7 @@ from reviewer import impactmap as im
 from reviewer.contracts import validate
 from reviewer.contracts.snapshot import build_manifest
 from reviewer.pipeline import impactcov
-from reviewer.tools import (ALL_TOOLS, HOST_IMPACT_TOOLS, IMPACT_TOOLS, TOOLS, ArgError, Limits, ToolSession,
+from reviewer.tools import (ALL_TOOLS, HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS, ArgError, Limits, ToolSession,
                             full_view, normalize)
 from reviewer.tools.words import has_word, valid_symbol, word_hits
 
@@ -322,7 +322,8 @@ class Registration(unittest.TestCase):
         self.assertEqual(TOOLS, ("list_files", "read_file", "search_literal", "diff"))      # frozen default
         self.assertEqual(IMPACT_TOOLS, TOOLS + ("find_references",))
         self.assertEqual(HOST_IMPACT_TOOLS, TOOLS + ("impact_scan",))
-        self.assertEqual(set(ALL_TOOLS), set(IMPACT_TOOLS) | set(HOST_IMPACT_TOOLS))
+        self.assertEqual(SWEEP_TOOLS, IMPACT_TOOLS + ("file_disposition",))     # impact@v4 diff-shard sweeps only
+        self.assertEqual(set(ALL_TOOLS), set(IMPACT_TOOLS) | set(HOST_IMPACT_TOOLS) | set(SWEEP_TOOLS))
         t = refs_tree(self, 1)
         with self.assertRaises(ValueError):
             ToolSession(t.view, tools=("read_file",))

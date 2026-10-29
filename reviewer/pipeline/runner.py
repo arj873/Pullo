@@ -24,7 +24,7 @@ from reviewer.gateway import Recorder, TraceError, bytes_digest, load_trace
 from reviewer.tools import Limits
 
 from . import coverage as cov_mod
-from . import identity, impactcov, repocov, retrieval, specialists, stagereplay
+from . import identity, impactcov, repocov, retrieval, specialists, stagereplay, sweeps
 from .compare import first_difference, split_recording
 from .engine import Engine, render_outputs
 from .errors import PipelineError
@@ -67,8 +67,10 @@ def validate_spec(spec: ReviewSpec) -> None:
     if plan["specialists"] != identity.plan_specialists(spec):
         if identity.plan_specialists(spec) == ["generalist"]:
             raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
-        raise PipelineError("invalid-input", "investigator.impact@v3 needs Plan.specialists "
-                            f"{identity.plan_specialists(spec)} (the specialist investigators, in run order)")
+        v = "v4" if identity.plan_specialists(spec) == sweeps.plan_specialists() else "v3"
+        raise PipelineError("invalid-input", f"investigator.impact@{v} needs Plan.specialists "
+                            f"{identity.plan_specialists(spec)} (the specialist investigators, in run order"
+                            + (", then the diff-shard sweep marker)" if v == "v4" else ")"))
     host = spec.host
     if not (isinstance(host.attempt, int) and not isinstance(host.attempt, bool) and 1 <= host.attempt <= 1000):
         raise PipelineError("invalid-input", "attempt must be an integer >= 1")
@@ -505,9 +507,11 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
             raise PipelineError("checkpoint-invalid", f"{st} artifact is not chained")
         artifacts[st] = prev = art
     inv = artifacts["INVESTIGATE"]["payload"]
-    if specialists.is_v3_plan(artifacts["TRIAGE"]["payload"]["plan"]):    # impact@v3: the merge record is re-derived
+    tplan = artifacts["TRIAGE"]["payload"]["plan"]
+    if specialists.is_specialist_plan(tplan):    # impact@v3/@v4: the merge record is re-derived
         try:
-            again = specialists.merge(inv["hypotheses"])
+            again = (specialists.merge(inv["hypotheses"], sweeps.merge_order(inv["agents"])) if sweeps.is_v4_plan(tplan)
+                     else specialists.merge(inv["hypotheses"]))
         except KeyError:
             again = None
         if inv.get("merges") != again:
@@ -515,6 +519,10 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
                                 "hypotheses")
     elif "merges" in inv:
         raise PipelineError("checkpoint-invalid", "INVESTIGATE merges in a run without specialist investigators")
+    swept = [e["coverage"] for e in trace.events if e["type"] == "investigate.coverage"]
+    if ("sweep" in inv or swept) and (not sweeps.is_v4_plan(tplan) or swept != [inv.get("sweep")]):
+        raise PipelineError("checkpoint-invalid", "INVESTIGATE sweep coverage is not the one investigate.coverage trace "
+                            "event of an impact@v4 run")
     for name, key in (("comments.json", "comments.json"), ("review.md", "review.md"), ("run.json", "run.json")):
         data = rd.read(name)
         if data is None or _sha(data) != receipt["outputs"].get(key):

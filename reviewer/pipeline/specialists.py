@@ -60,6 +60,12 @@ def is_v3_plan(plan: dict) -> bool:
     return plan.get("specialists") == list(AGENTS)
 
 
+def is_specialist_plan(plan: dict) -> bool:
+    """A Plan whose INVESTIGATE runs the specialists: impact@v3, or impact@v4 (the specialists then the diff-shard
+    sweep marker, see reviewer.pipeline.sweeps.PLAN_MARKER)."""
+    return is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
+
+
 def time_slices(ceiling_sec: int | None) -> list[int] | None:
     """Cumulative per-agent INVESTIGATE time ceilings (seconds since the stage started), or None without a ceiling."""
     return None if ceiling_sec is None else cumulative(ceiling_sec)
@@ -102,11 +108,12 @@ def duplicate(a: dict, b: dict) -> bool:
             and abs(a["location"]["line"] - b["location"]["line"]) <= MERGE_LINE_WINDOW)
 
 
-def merge(hypotheses: list[dict]) -> list[dict]:
+def merge(hypotheses: list[dict], agents: list[str] | None = None) -> list[dict]:
     """-> [{keptId, mergedIds, rule}] for the INVESTIGATE artifact. `hypotheses` are Hypothesis documents in agent
     order then output order (as INVESTIGATE stores them); only a hypothesis of a LATER agent is merged, into the first
-    kept one that it duplicates. Kept hypotheses never merge with each other inside one agent."""
-    order = {a: i for i, a in enumerate(AGENTS)}
+    kept one that it duplicates. Kept hypotheses never merge with each other inside one agent. `agents` is the agent
+    order (default: the v3 specialists; impact@v4 passes sweeps.merge_order, which appends the diff-shard sweeps)."""
+    order = {a: i for i, a in enumerate(AGENTS if agents is None else agents)}
     kept: list[dict] = []
     merged: dict[str, list[str]] = {}
     for h in hypotheses:

@@ -7,7 +7,8 @@
 
 Only the four tools below exist by default. A session may be opened with a wider fixed set: impact mode adds the
 read-only `find_references` (IMPACT_TOOLS) for model requests, and the host-only `impact_scan` (HOST_IMPACT_TOOLS)
-for the PREPARE session, which no model can reach. Anything else (shell, regex, URL, write, test run, post) is
+for the PREPARE session, which no model can reach. An investigator.impact@v4 diff-shard sweep session (SWEEP_TOOLS)
+also offers `file_disposition`, which reads nothing: its logged call records "examined, no issue" for a path. Anything else (shell, regex, URL, write, test run, post) is
 refused as an unknown tool and never reaches the filesystem.
 """
 
@@ -28,10 +29,14 @@ from .view import SIDES, View
 TOOLS = ("list_files", "read_file", "search_literal", "diff")
 IMPACT_TOOLS = TOOLS + ("find_references",)            # model-requestable in impact mode
 HOST_IMPACT_TOOLS = TOOLS + ("impact_scan",)           # the PREPARE (host) session in impact mode
-ALL_TOOLS = TOOLS + ("find_references", "impact_scan")
+# investigator.impact@v4 diff-shard sweep sessions: impact tools plus the host-recorded `file_disposition` (no read)
+SWEEP_TOOLS = IMPACT_TOOLS + ("file_disposition",)
+ALL_TOOLS = TOOLS + ("find_references", "impact_scan", "file_disposition")
 _OPS = {"list_files": ops.list_files, "read_file": ops.read_file,
         "search_literal": ops.search_literal, "diff": ops.diff,
-        "find_references": ops.find_references, "impact_scan": ops.impact_scan}
+        "find_references": ops.find_references, "impact_scan": ops.impact_scan,
+        "file_disposition": ops.file_disposition}
+MAX_REASON_CHARS = 300
 MAX_SYMBOL_CHARS = 128
 MAX_OFFSET = 5_000
 
@@ -73,6 +78,7 @@ def normalize(tool: str, args, lim: Limits) -> dict:
         "find_references": {"side": None, "symbol": None, "path_prefix": "", "limit": lim.max_search_results,
                             "offset": 0},
         "impact_scan": {},
+        "file_disposition": {"path": None, "reason": None},
     }[tool]
     if tool == "list_files":
         spec["after"] = ""            # paging cursor; omitted from the normalized args when empty (stable ids)
@@ -116,6 +122,13 @@ def normalize(tool: str, args, lim: Limits) -> dict:
         a["offset"] = _int(a["offset"], "offset", 0, MAX_OFFSET)
     elif tool == "impact_scan":
         pass
+    elif tool == "file_disposition":
+        if not policy.valid_path(a["path"]):
+            raise ArgError("path")
+        r = a["reason"]
+        if not isinstance(r, str) or not 1 <= len(r.strip()) <= MAX_REASON_CHARS or not _encodable(r) \
+                or contains_protected(r) or any(ord(c) < 32 or ord(c) == 127 for c in r):
+            raise ArgError(f"reason must be one line of 1..{MAX_REASON_CHARS} printable characters without secrets")
     else:
         if a["path"] is not None and not policy.valid_path(a["path"]):
             raise ArgError("path")

@@ -276,7 +276,12 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(repository_policy(True, impact_version=3).specialists, ("contracts", "logic", "safety"))
         self.assertEqual(repository_plan(repository_profile(True, impact_version=3))["specialists"],
                          ["contracts", "logic", "safety"])
-        for bad in (0, 4, True, "2", None):
+        # SHARD-COVERAGE-01: impact@v4 (specialists + diff-shard sweeps) is selectable explicitly only as well
+        self.assertEqual(repository_profile(True, impact_version=4)["roles"]["investigator"]["promptVersion"],
+                         "investigator.impact@v4")
+        self.assertEqual(repository_plan(repository_profile(True, impact_version=4))["specialists"],
+                         ["contracts", "logic", "safety", "diff-sweep"])
+        for bad in (0, 5, True, "2", None):
             with self.assertRaises(ProfileError):
                 repository_profile(True, impact_version=bad)
         self.assertIsNone(repository_policy(False))
