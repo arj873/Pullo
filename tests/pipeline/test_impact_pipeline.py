@@ -86,7 +86,7 @@ class ImpactPipeline(ImpactRig):
         self.assertEqual((scans[0]["agentId"], scans[0]["args"]), ("prepare", {}))
         listing = scans[0]["result"]["evidence"][0]["excerpt"]
         self.assertIn("## load_user (function, definition line changed) defined src/lib.py:1", listing)
-        self.assertIn("src/use.py:6 in `def show(self, uid):` (L5)", listing)
+        self.assertIn('src/use.py:6 in "def show(self, uid):" (L5)', listing)
         self.assertNotIn("src/lib.py:1 ", listing.split("\n", 2)[2])        # the changed definition line is excluded
         code = [(x["path"], x["lines"]) for x in scans[0]["result"]["evidence"][1:]]
         self.assertIn(("src/use.py", [6, 6]), code)
@@ -166,6 +166,11 @@ class ImpactPipeline(ImpactRig):
             return Path(r.review_path).read_text(encoding="utf-8").replace(r.run_id, "R").split("## Cost")[0]
         self.assertEqual(body(rep), body(res))
         self.assertIn("## Impact coverage", body(rep))
+        # R3: the replayed impact scan is the recorded one, field for field (only deterministic caps can stop it)
+        scan = lambda r: [{k: e[k] for k in ("toolCallId", "args", "resultHash", "result")}     # noqa: E731
+                          for e in tool_calls(r, "PREPARE") if e["tool"] == "impact_scan"]
+        self.assertEqual(scan(rep), scan(res))
+        self.assertEqual(len(scan(rep)), 1)
 
     def test_impact_mode_is_bound_into_the_config_identity(self):
         m = self.case()

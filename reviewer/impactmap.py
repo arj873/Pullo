@@ -32,7 +32,8 @@ IMPACT_VERSION = "impact-map@1"
 
 # ---- bounds (also bound into the run config identity when impact mode is on)
 MAX_CHANGED_FILES = 200          # changed files whose definitions are extracted
-MAX_FILE_LINES = 20_000          # longer files are not analysed for definitions
+MAX_FILE_LINES = 5_000           # = Limits.max_diff_input_lines: longer files are not diffed or analysed
+MAX_ANALYSED_LINES = 60_000      # total base+head lines analysed for definitions in one scan; later files skipped
 MAX_DEFS_PER_FILE = 4_000
 MAX_SYMBOLS = 20                 # symbols scanned for references
 MAX_REFS_PER_SYMBOL_SHOWN = 6
@@ -42,12 +43,21 @@ MAX_HEADER_CHARS = 160
 MAX_DEF_LINE_CHARS = 1_000       # longer lines (minified code, data) are never matched as definitions
 HEADER_LOOKBACK = 400            # lines searched upwards for an enclosing definition
 COMMON_REFS = 200                # above this a name is flagged as probably colliding
-SCAN_WALL_S = 25.0               # per impact scan (PREPARE's ceiling is 60 s)
-LIMITS_DOC = {"version": IMPACT_VERSION, "maxChangedFiles": MAX_CHANGED_FILES, "maxFileLines": MAX_FILE_LINES,
+# Reference scans stop ONLY on deterministic caps (path order), so record and strict replay agree. Wall clock is a
+# hard safety abort that fails the call with an explicit error and returns nothing, never a silent partial result.
+SCAN_MAX_FILES = 60_000          # files verified (also capped by Limits.max_search_files)
+SCAN_MAX_BYTES = 192 << 20       # bytes verified (also capped by Limits.max_search_scan_bytes)
+SCAN_MAX_DECODED_BYTES = 16 << 20   # bytes decoded and redacted (only files whose bytes contain a name)
+SCAN_MAX_HITS = 20_000           # reference lines counted
+SAFETY_WALL_S = 45.0             # abort (error, nothing returned); never a stop condition
+LIMITS_DOC = {"version": "impact-map@2", "maxChangedFiles": MAX_CHANGED_FILES, "maxFileLines": MAX_FILE_LINES,
+              "maxAnalysedLines": MAX_ANALYSED_LINES, "scanMaxFiles": SCAN_MAX_FILES, "scanMaxBytes": SCAN_MAX_BYTES,
+              "scanMaxDecodedBytes": SCAN_MAX_DECODED_BYTES, "scanMaxHits": SCAN_MAX_HITS,
+              "safetyWallS": SAFETY_WALL_S, "skipGenerated": True,
               "maxDefsPerFile": MAX_DEFS_PER_FILE, "maxSymbols": MAX_SYMBOLS,
               "maxRefsPerSymbolShown": MAX_REFS_PER_SYMBOL_SHOWN, "maxRefsShown": MAX_REFS_SHOWN,
               "maxRefLineChars": MAX_REF_LINE_CHARS, "maxDefLineChars": MAX_DEF_LINE_CHARS,
-              "headerLookback": HEADER_LOOKBACK, "commonRefs": COMMON_REFS, "scanWallS": SCAN_WALL_S}
+              "headerLookback": HEADER_LOOKBACK, "commonRefs": COMMON_REFS}
 
 ID = r"[A-Za-z_$][A-Za-z0-9_$]*"
 SYMBOL_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*(?:[.-][A-Za-z0-9_$]+)*")
@@ -75,6 +85,20 @@ _TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|specs|testdata|fixture
 
 def is_test_path(path: str) -> bool:
     return bool(_TEST_PATH.search(path))
+
+
+LOCKFILES = frozenset("""package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml bun.lockb go.sum go.work.sum
+Cargo.lock poetry.lock Pipfile.lock uv.lock pdm.lock composer.lock Gemfile.lock packages.lock.json gradle.lockfile
+flake.lock mix.lock pubspec.lock Package.resolved""".split())
+_GENERATED = re.compile(r"\.min\.[a-z]+$|\.map$|\.pb\.go$|_pb2(?:_grpc)?\.pyi?$|\.pb\.(?:ts|js|cc|h)$|"
+                        r"[._-]generated\.[a-z]+$|\.g\.dart$|\.bundle\.js$|(?:^|/)(?:vendor|node_modules|dist|"
+                        r"third_party|__generated__)/")
+
+
+def is_generated(path: str) -> bool:
+    """Lockfiles, minified bundles, source maps, protobuf/codegen output and vendored trees: never analysed for
+    symbols (huge, machine-written diffs with no meaningful definitions). The skip is disclosed in the map."""
+    return path.rsplit("/", 1)[-1] in LOCKFILES or bool(_GENERATED.search(path))
 
 
 KEYWORDS = frozenset("""
@@ -211,10 +235,15 @@ def definitions(path: str, lines: list[str]) -> list[Def]:
     return out
 
 
-def _regions(defs: list[Def], n_lines: int) -> list[tuple[Def, int]]:
+_CLOSER = ("}", ")", "]")
+
+
+def _regions(defs: list[Def], lines: list[str], lang: str | None = None) -> list[tuple[Def, int]]:
     """(def, last line) where a definition extends until the next definition at the same or a lower indent.
-    Constants occupy their own line only."""
-    out = []
+    Constants occupy their own line only. In brace languages any other statement at the definition's indent or
+    lower (a package-level `var`/`const`, an annotation, a field) also ends it; closing brackets and comments do not."""
+    out, n_lines = [], len(lines)
+    brace = lang in ("go", "js", "java", "generic")
     for i, d in enumerate(defs):
         if d.kind == "constant":
             out.append((d, d.line))
@@ -224,6 +253,13 @@ def _regions(defs: list[Def], n_lines: int) -> list[tuple[Def, int]]:
             if e.indent <= d.indent:
                 end = e.line - 1
                 break
+        if brace:
+            for k in range(d.line + 1, end + 1):
+                t = lines[k - 1]
+                st = t.strip()
+                if st and _ind(t) <= d.indent and not st.startswith(_CLOSER) and not _COMMENT.match(t):
+                    end = k - 1
+                    break
         out.append((d, max(d.line, end)))
     return out
 
@@ -238,7 +274,7 @@ def innermost(regions: list[tuple[Def, int]], line: int) -> Def | None:
 
 def changed_lines(base: list[str], head: list[str]) -> tuple[set, set]:
     """(base line numbers removed or replaced, head line numbers added or replaced), 1-based."""
-    sm = difflib.SequenceMatcher(None, base, head, autojunk=False)
+    sm = difflib.SequenceMatcher(None, base, head)      # autojunk on, exactly as the `diff` tool's unified_diff
     b, h = set(), set()
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag != "equal":
@@ -263,10 +299,10 @@ STATUS_TEXT = {"removed": "removed", "signature": "definition line changed", "bo
                "field": "field changed", "key": "config key changed", "added": "added"}
 
 
-def _touched(defs: list[Def], lines: list[str], changed: set) -> dict:
+def _touched(defs: list[Def], lines: list[str], changed: set, lang: str | None = None) -> dict:
     """{def: [changed lines attributed to it]} for every definition touched by the changed lines. Blank and
     comment-only changed lines touch nothing (a reflow or comment edit is not a contract change)."""
-    regions = _regions(defs, len(lines))
+    regions = _regions(defs, lines, lang)
     out: dict = {}
     for ln in sorted(changed):
         text = lines[ln - 1] if ln <= len(lines) else ""
@@ -322,7 +358,7 @@ def file_symbols(path: str, base: list[str] | None, head: list[str] | None) -> t
         return [], set()
     bc, hc = changed_lines(b_lines, h_lines)
     lang = language_of(path)
-    if lang is None or is_test_path(path):
+    if lang is None or is_test_path(path) or is_generated(path):
         return [], hc
     if lang == "config":
         keys = _config_keys(path, h_lines, hc, "head")
@@ -332,16 +368,26 @@ def file_symbols(path: str, base: list[str] | None, head: list[str] | None) -> t
     hdefs, bdefs = definitions(path, h_lines), definitions(path, b_lines)
     hnames, bnames = {d.name for d in hdefs}, {d.name for d in bdefs}
     out: list[Symbol] = []
-    touched_h = _touched(hdefs, h_lines, hc)
+    touched_h = _touched(hdefs, h_lines, hc, lang)
     for d, _ in sorted(touched_h.items(), key=lambda kv: kv[0].line):
         if not _good_name(d.name):
             continue
         status = "added" if d.name not in bnames else ("signature" if d.line in hc else "body")
         out.append(Symbol(d.name, d.kind, status, path, d.line, "head", d.text))
     out += _fields(lang, h_lines, touched_h, path)
-    for d, _ in sorted(_touched(bdefs, b_lines, bc).items(), key=lambda kv: kv[0].line):
-        if d.name not in hnames and _good_name(d.name):
+    have = {s.name for s in out}
+    first_head = {}
+    for d in hdefs:
+        first_head.setdefault(d.name, d)
+    for d, _ in sorted(_touched(bdefs, b_lines, bc, lang).items(), key=lambda kv: kv[0].line):
+        if not _good_name(d.name):
+            continue
+        if d.name not in hnames:
             out.append(Symbol(d.name, d.kind, "removed", path, d.line, "base", d.text))
+        elif d.name not in have:      # lines deleted inside a definition that still exists (a removed call or guard)
+            hd = first_head[d.name]
+            out.append(Symbol(d.name, hd.kind, "body", path, hd.line, "head", hd.text))
+            have.add(d.name)
     return out, hc
 
 

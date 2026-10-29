@@ -67,7 +67,7 @@ GOLD = {
 IMPACT_GOLD = {
     "profileOn": "sha256:3e62ef3208e068fafde841cb7d220094f15ed0e08a11bf185097b8299f16bdf7",
     "policy": "sha256:c849a611a21899ac9c64ac149ce2b0b4edb36ebcf544111987cebd91c639e559",
-    "benchFirst": "098aab34b1779f14bf7f5a70693f219455934ac4bde586a34045e8d087155cca",
+    "benchFirst": "77da9a6a63e9d3f83d0e9cb4eb2fc60e81fc4a35891ed3a1cc412d7d88cfc526",   # impact-map@2 rows (O2 quoting)
 }
 
 UTIL = "def close_stream():\n    return None\n\ndef is_open():\n    return True\n"
