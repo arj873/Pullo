@@ -51,7 +51,10 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # LIVE-DEADLINE-04: benchmark.py candidate pin moved to the LIVE-DEADLINE-02 opt-in live-stage-timing extension
 # (--live-stage-timing). This is an intentional extension that still awaits the independent LIVE-DEADLINE-03 gate; it is
 # NOT already accepted. The previous pin 4fe30e94... is retained in orchestration/archive (before-LIVE-DEADLINE04).
-GATED = {"reviewer/pilot/benchmark.py": "4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807",
+# BENCH-IMPACT-VERSION: benchmark.py candidate pin moved to the opt-in BenchmarkOptions.impact_version /
+# --impact-version selector (default unset = profile default impact@v2, byte-identical). Author-moved; it still awaits
+# an independent gate and is NOT already accepted. The previous pin was 4a1ae600363796d008bc45f428e6a1291ff93cc5076d0c0245debeb2928f4807.
+GATED = {"reviewer/pilot/benchmark.py": "adaf45bf9e4fe11c88a73eddc7cd5d7920cf80f6cd9a187e81b899ca079f9c40",
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",

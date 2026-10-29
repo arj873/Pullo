@@ -14,7 +14,6 @@ import copy
 import io
 import json
 import unittest
-from unittest import mock
 from pathlib import Path
 
 from reviewer.config import ReviewModels
@@ -438,10 +437,7 @@ class Selector(TBH.Base):
 
     def test_impact_v1_selected_explicitly_keeps_the_pre_change_first_request_policy_and_profile(self):
         """EXPLORE-FLOOR: the IMPACT-01 arm stays byte-identical when impact@v1 is selected (impact_version=1)."""
-        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=1)       # noqa: E731
-        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=1)         # noqa: E731
-        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
-            p = self.plan()["plan"]
+        p = self.plan(impact_version=1)["plan"]                         # BENCH-IMPACT-VERSION: the option
         self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_GOLD["benchFirst"])
         self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_GOLD["policy"])
         self.assertEqual(p["profileDigest"], IMPACT_GOLD["profileOn"])
@@ -452,10 +448,7 @@ class Selector(TBH.Base):
 
     def test_impact_v3_selected_explicitly_has_its_own_first_request_policy_and_profile(self):
         """SPECIALISTS-01: impact@v3 only by explicit selection; its plan pins are new, the v2 default is unchanged."""
-        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=3)       # noqa: E731
-        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=3)         # noqa: E731
-        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
-            p = self.plan()["plan"]
+        p = self.plan(impact_version=3)["plan"]                         # BENCH-IMPACT-VERSION: the option
         self.assertEqual(p["firstRequest"]["bodySha256"], IMPACT_V3_GOLD["benchFirst"])
         self.assertEqual(digest(p["retrievalPolicy"]), IMPACT_V3_GOLD["policy"])
         self.assertEqual(p["profileDigest"], IMPACT_V3_GOLD["profileOn"])
@@ -484,19 +477,16 @@ class Selector(TBH.Base):
                      "usage": __import__("tests.pilot.test_repository", fromlist=["USAGE"]).USAGE}
                 return __import__("reviewer.runtime.openrouter", fromlist=["HttpResponse"]).HttpResponse(
                     200, {}, json.dumps(d).encode())
-        prof = lambda *a, **k: repository_profile(*a, **k, impact_version=3)       # noqa: E731
-        pol = lambda *a, **k: repository_policy(*a, **k, impact_version=3)         # noqa: E731
         model = LaneModel(self.w.imports["head"].snapshot_id)
-        with mock.patch.object(B, "repository_profile", prof), mock.patch.object(B, "repository_policy", pol):
-            rep, _ = self.live(model)
-            self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
-            tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
-            self.assertEqual(tasks[0:6:2], [prompts.investigator_v3_task(a) for a in prompts.SPECIALIST_AGENTS])
-            self.assertEqual(rep["counts"]["comments"], 1)
-            trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
-            o = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "replay-v3"), replay_trace=trace,
-                               trace_digest=pin)
-            rr = B.run_benchmark(o, key_loader=self.boom)
+        rep, _ = self.live(model, impact_version=3)                     # BENCH-IMPACT-VERSION: the option
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 9))
+        tasks = [json.loads(b["messages"][1]["content"])["task"] for b in model.bodies]
+        self.assertEqual(tasks[0:6:2], [prompts.investigator_v3_task(a) for a in prompts.SPECIALIST_AGENTS])
+        self.assertEqual(rep["counts"]["comments"], 1)
+        trace, pin = rep["paths"]["trace"], rep["traceDigest"]["value"]
+        o = self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "replay-v3"), replay_trace=trace,
+                           trace_digest=pin, impact_version=3)
+        rr = B.run_benchmark(o, key_loader=self.boom)
         self.assertEqual((rr["status"], rr["replay"]["liveCalls"], rr["replay"]["replayedCalls"]), ("completed", 0, 9))
         with self.assertRaises(PipelineError):                     # a v3 recording never replays under the v2 default
             B.run_benchmark(self.w.options(mode="replay", auth=None, out_dir=str(self.tmp / "replay-v2"),
