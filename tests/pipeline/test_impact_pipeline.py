@@ -85,9 +85,9 @@ class ImpactPipeline(ImpactRig):
         self.assertEqual(len(scans), 1)
         self.assertEqual((scans[0]["agentId"], scans[0]["args"]), ("prepare", {}))
         listing = scans[0]["result"]["evidence"][0]["excerpt"]
-        self.assertIn("## load_user (function, definition line changed) defined src/lib.py:1", listing)
-        self.assertIn('src/use.py:6 in "def show(self, uid):" (L5)', listing)
-        self.assertNotIn("src/lib.py:1 ", listing.split("\n", 2)[2])        # the changed definition line is excluded
+        self.assertIn('## load_user (function, definition line changed) defined "src/lib.py":1', listing)
+        self.assertIn('"src/use.py":6 in "def show(self, uid):" (L5)', listing)
+        self.assertNotIn('"src/lib.py":1 ', listing.split("\n", 3)[3])        # the changed definition line is excluded
         code = [(x["path"], x["lines"]) for x in scans[0]["result"]["evidence"][1:]]
         self.assertIn(("src/use.py", [6, 6]), code)
         self.assertTrue(all(x.get("resolved") is True for x in scans[0]["result"]["evidence"][1:]))

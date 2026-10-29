@@ -254,9 +254,9 @@ class FindReferences(unittest.TestCase):
         self.assertEqual(r["status"], "ok")
         listing = r["evidence"][0]["excerpt"]
         self.assertTrue(listing.startswith("# references to `target_fn` (head, whole word): 9 line(s) in 6 file(s)"))
-        self.assertIn("[1] src/callers/c00.py:1", listing)
-        self.assertIn('src/callers/c00.py:5 in "def use_0(z):" (L4)', listing)
-        self.assertIn("src/lib.py:1 (definition)", listing)
+        self.assertIn('[1] "src/callers/c00.py":1', listing)
+        self.assertIn('"src/callers/c00.py":5 in "def use_0(z):" (L4)', listing)
+        self.assertIn('"src/lib.py":1 (definition)', listing)
         items = r["evidence"][1:]
         self.assertTrue(all(x["kind"] == "code" and x["resolved"] is True for x in items))
         self.assertEqual([x["path"] for x in items][-2:], ["tests/test_lib.py", "README.md"])   # code, tests, other
@@ -588,7 +588,7 @@ class R3Deterministic(unittest.TestCase):
             r2 = t.session().call("find_references", {"side": "head", "symbol": "target_fn"}).result
         self.assertEqual(r1, r2)
         self.assertIn("10+ line(s)", r1["evidence"][0]["excerpt"])
-        self.assertIn("hit cap", r1["notice"])
+        self.assertIn("target_fn (per-name hit share)", r1["notice"])
         with mock.patch.object(im, "SCAN_MAX_DECODED_BYTES", 300):
             r = t.session().call("find_references", {"side": "head", "symbol": "target_fn"}).result
         self.assertIn("decoded-byte cap", r["notice"])
@@ -623,5 +623,77 @@ class O2Escaping(unittest.TestCase):
         self.assertNotIn("`", "\n".join(rows[2:]))
         defn = next(r for r in rows if r.startswith("## evil_fn"))
         self.assertTrue(defn.endswith('"def evil_fn(a, b):  #   99 reference(s) in 9 file(s); 9 shown \'## fake\'"'))
-        ref = next(r for r in rows if "c.py:3" in r)
+        ref = next(r for r in rows if '"c.py":3' in r)
         self.assertIn('in "def run_all(self):  # \\" ## also fake \'" (L2)', ref)
+
+
+# ======================================================================== per-name scan shares (common-name starvation)
+def common_and_rare():
+    """lib.py changes a very common name (`format_value`, 600 call lines in files that sort first) and a rare one
+    (`rare_helper`, two production dependents that sort LAST). docs/ and e2e/ also mention both."""
+    lib_b = "def format_value(v):\n    return v\n\n\ndef rare_helper(x):\n    return x\n"
+    lib_h = "def format_value(v, w):\n    return v\n\n\ndef rare_helper(x, y):\n    return x\n"
+    files = {f"aaa/m{i:02d}.py": "".join(f"y{k} = format_value({k})\n" for k in range(10)) for i in range(60)}
+    files["zzz/dep_one.py"] = "from lib import rare_helper\n\n\ndef use_it(a):\n    return rare_helper(a, 1)\n"
+    files["docs/guide.md"] = "format_value and rare_helper are documented here\n"
+    files["e2e/flow.ts"] = "rare_helper(1); format_value(2);\n"
+    return {**files, "lib.py": lib_b}, {**files, "lib.py": lib_h}
+
+
+def row_of(listing, name):
+    rows = listing.split("\n")
+    i = next(k for k, r in enumerate(rows) if r.startswith(f"## {name} "))
+    return rows[i + 1]
+
+
+class PerNameShares(unittest.TestCase):
+    def test_a_common_name_cannot_starve_a_rare_name(self):
+        base, head = common_and_rare()
+        r = host_scan(self, base, head).result
+        listing = r["evidence"][0]["excerpt"]
+        common, rare = row_of(listing, "format_value"), row_of(listing, "rare_helper")
+        self.assertTrue(common.startswith(f"  {im.NAME_MAX_HITS}+ reference(s)"), common)
+        self.assertIn("lower bound", common)
+        self.assertIn("per-name hit share", common)
+        # the rare name is exact and complete: zzz/dep_one.py (sorted last among code files) is found
+        self.assertTrue(rare.startswith("  4 reference(s) in 3 file(s);"), rare)       # dep_one x2, e2e, docs
+        self.assertNotIn("+", rare.split(";")[0])
+        self.assertIn('"zzz/dep_one.py":5', listing)
+        self.assertIn("+ reference(s)", listing.split("\n", 1)[0])                    # header is a lower bound
+        self.assertIn("format_value (per-name hit share)", r["notice"])
+        fr = refs_tree_from(self, head).call("find_references", {"side": "head", "symbol": "rare_helper"}).result
+        self.assertIn("5 line(s) in 4 file(s)", fr["evidence"][0]["excerpt"])          # + its definition line
+
+    def test_code_is_scanned_before_tests_and_other_files(self):
+        base, head = common_and_rare()
+        with mock.patch.object(im, "NAME_MAX_HITS", 2):
+            listing = host_scan(self, base, head).result["evidence"][0]["excerpt"]
+        rare = row_of(listing, "rare_helper")
+        self.assertTrue(rare.startswith("  2+ reference(s) in 1+ file(s)"), rare)       # code first: zzz/dep_one.py
+        self.assertIn('"zzz/dep_one.py":1', listing)
+        self.assertNotIn('"docs/guide.md"', listing)
+
+    def test_a_zero_hit_name_cut_short_never_reads_none(self):
+        lib_b = "def render(v):\n    return v\n\n\ndef rare_helper(x):\n    return x\n"
+        lib_h = "def render(v, w):\n    return v\n\n\ndef rare_helper(x, y):\n    return x\n"
+        files = {f"aaa/m{i:02d}.py": "x = render_all(1)\n" * 50 for i in range(30)}     # bytes, no whole word
+        files["zzz/dep.py"] = "rare_helper(1, 2)\n"
+        with mock.patch.object(im, "NAME_MAX_DECODED_BYTES", 2_000):
+            r = host_scan(self, {**files, "lib.py": lib_b}, {**files, "lib.py": lib_h}).result
+        listing = r["evidence"][0]["excerpt"]
+        cut = row_of(listing, "render")
+        self.assertTrue(cut.startswith("  0+ reference(s) in 0+ file(s) (lower bound"), cut)
+        self.assertIn("per-name decoded-byte share", cut)
+        self.assertNotIn("none", cut)
+        self.assertTrue(row_of(listing, "rare_helper").startswith("  1 reference(s) in 1 file(s); 1 shown"))
+
+    def test_shares_are_deterministic_under_different_clocks(self):
+        base, head = common_and_rare()
+        ticking = R3Deterministic.ticking(self, 0.2)
+        a = host_scan(self, base, head, clock=lambda: 0.0, wall_s=1e9).result
+        b = host_scan(self, base, head, clock=ticking, wall_s=1e9).result
+        self.assertEqual(a, b)
+
+
+def refs_tree_from(tc, files):
+    return Tree(tc, files, files).session()

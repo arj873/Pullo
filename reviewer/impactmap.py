@@ -47,12 +47,19 @@ COMMON_REFS = 200                # above this a name is flagged as probably coll
 # hard safety abort that fails the call with an explicit error and returns nothing, never a silent partial result.
 SCAN_MAX_FILES = 60_000          # files verified (also capped by Limits.max_search_files)
 SCAN_MAX_BYTES = 192 << 20       # bytes verified (also capped by Limits.max_search_scan_bytes)
-SCAN_MAX_DECODED_BYTES = 16 << 20   # bytes decoded and redacted (only files whose bytes contain a name)
-SCAN_MAX_HITS = 20_000           # reference lines counted
+SCAN_MAX_DECODED_BYTES = 24 << 20   # bytes decoded and redacted in one scan (only files whose bytes contain a name)
+SCAN_MAX_HITS = 20_000           # reference lines counted in one scan
+# Per-name shares (impact_scan, many names): a name that uses up its share is dropped from the rest of the scan and
+# its count becomes a lower bound, while every other name keeps scanning. find_references (one name) uses the
+# whole-scan caps above as that name's share.
+NAME_MAX_HITS = 250              # ~COMMON_REFS: past this a name is "very common" anyway
+NAME_MAX_DECODED_BYTES = 4 << 20    # decoded bytes charged to a name (files whose bytes contain it)
 SAFETY_WALL_S = 45.0             # abort (error, nothing returned); never a stop condition
-LIMITS_DOC = {"version": "impact-map@2", "maxChangedFiles": MAX_CHANGED_FILES, "maxFileLines": MAX_FILE_LINES,
+LIMITS_DOC = {"version": "impact-map@3", "maxChangedFiles": MAX_CHANGED_FILES, "maxFileLines": MAX_FILE_LINES,
               "maxAnalysedLines": MAX_ANALYSED_LINES, "scanMaxFiles": SCAN_MAX_FILES, "scanMaxBytes": SCAN_MAX_BYTES,
               "scanMaxDecodedBytes": SCAN_MAX_DECODED_BYTES, "scanMaxHits": SCAN_MAX_HITS,
+              "nameMaxHits": NAME_MAX_HITS, "nameMaxDecodedBytes": NAME_MAX_DECODED_BYTES,
+              "scanOrder": "code, tests, other; then path",
               "safetyWallS": SAFETY_WALL_S, "skipGenerated": True,
               "maxDefsPerFile": MAX_DEFS_PER_FILE, "maxSymbols": MAX_SYMBOLS,
               "maxRefsPerSymbolShown": MAX_REFS_PER_SYMBOL_SHOWN, "maxRefsShown": MAX_REFS_SHOWN,
@@ -79,7 +86,8 @@ def language_of(path: str) -> str | None:
     return None if dot <= 0 else _EXT.get(name[dot:])
 
 
-_TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|specs|testdata|fixtures?)/|(?:^|/)test_[^/]*$|"
+_TEST_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|spec|specs|testdata|fixtures?|e2e|cypress|playwright)/|"
+                        r"(?:^|/)test_[^/]*$|"
                         r"_test\.[a-z]+$|[._-](?:test|spec)\.[a-z]+$|Tests?\.java$|(?:^|/)conftest\.py$")
 
 
