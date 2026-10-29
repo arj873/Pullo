@@ -6,7 +6,7 @@ their retrieval prompts; the judge stays the plain review-cost JudgeOutput. Ther
 
 `impact=True` (the default with retrieval) selects impact mode: the PREPARE impact map and the find_references tool,
 with the same numeric caps. `impact_version` picks the investigator text: 2 (the default) is investigator.impact@v2 with
-the engine-enforced exploration floor, 1 is exactly the IMPACT-01 profile and policy (investigator.impact@v1, same
+the engine-enforced exploration floor (one guaranteed extra prompt, not guaranteed tool use), 1 is exactly the IMPACT-01 profile and policy (investigator.impact@v1, same
 digests). The verifier is verifier.impact@v1 in both. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
 

@@ -45,6 +45,7 @@ IMPACT_BEHAVIOR = "impact-pipeline@1"
 # draft, the budget conditions for continuing, the one-time continuation chain, the draft fallback rules and the
 # `retrieval.floor` trace event. Bound only when investigator.impact@v2 is selected, so every v1 run id is unchanged.
 FLOOR_BEHAVIOR = "exploration-floor-pipeline@1"
+FLOOR_MAX_HOPS = 3        # hops of the one continuation chain (Engine._exploration_floor); part of the floor identity
 RECEIPT_SCHEMA = "run-receipt@1"
 
 
@@ -144,7 +145,8 @@ def config_snapshot_id(spec) -> str:
                            "templates": prompts.impact_template_digests(pol.investigator_prompt),
                            "limits": impact_mod.LIMITS_DOC}
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
-            extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION}
+            extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
+                                        "maxContinuationHops": FLOOR_MAX_HOPS}
     exp = experiment_id(spec)
     if exp != prompts.EXPERIMENT_BASELINE:       # absent for the baseline => default ids unchanged by this experiment
         extra["experiment"] = {"id": exp, "behavior": EXPERIMENT_BEHAVIOR, "tasks": prompts.experiment_task_digests(),

@@ -697,9 +697,12 @@ class Engine:
         """investigator.impact@v2: the agent gave a final answer on its first hop without requesting any context.
         That answer is a DRAFT. When at least two turns, a tool call and context budget remain, the host sends its one
         fixed continuation (prompts.EXPLORATION_FLOOR_CONTINUATION with the draft) as a new chain of the same agent,
-        session and budgets (its turns are what the first chain left), and accepts that chain's final answer as it
-        stands. Without a final answer there (call failure, a stage/run stop, exhausted turns/tools/context) the draft
-        is used and the fallback is disclosed as incomplete; replay failures and cancellation keep their usual path.
+        session and budgets (at most identity.FLOOR_MAX_HOPS hops, never more turns than the first chain left), and
+        accepts that chain's final answer as it stands. The floor guarantees one extra prompt, not that the model uses a tool.
+        Without a final answer there the draft is used: a host stop (deadline) or the run ceiling (budget-exhausted)
+        is also disclosed as incomplete; a provider/schema failure or reaching the hop/turn/tool/context limit is
+        disclosed only by the trace event (the run stays completed, as with the draft alone). A replay failure,
+        cancellation or a spend-book failure (needs reconciliation) fails the agent exactly as impact@v1 would.
         Every decision is a `retrieval.floor` trace event, so the floor is auditable and replays deterministically."""
         draft_id = draft_end.final_call
         rec = dict(stage=stage, agentId=SPECIALIST, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
@@ -710,30 +713,29 @@ class Engine:
             self.recorder.append("retrieval.floor", decision="skipped", reason=skip, **rec)
             return draft_end, []
         self.recorder.append("retrieval.floor", decision="continue", **rec)
-        second = chain(turns_left)
+        second = chain(min(turns_left, identity.FLOOR_MAX_HOPS))
         end = second.run(build(dict(doc, explorationFloor=prompts.exploration_floor_block(draft_end.payload))))
         end.hops += draft_end.hops
         end.call_ids = draft_end.call_ids + end.call_ids
         if end.payload is not None:
             self.recorder.append("retrieval.floor", decision="final", finalCallId=end.final_call, **rec)
             return end, []
-        if end.error is not None and (end.error["code"] in REPLAY_CODES or end.error["code"] == "cancelled"):
-            return end, []                       # a broken replay or a cancelled run is never masked by the draft
-        n = len(draft_end.payload["hypotheses"])
+        if end.error is not None and (end.error["code"] in REPLAY_CODES or end.error["code"] in ("cancelled", "internal")
+                                      or self.needs_reconciliation):
+            return end, []                       # never masked by the draft: fail exactly as impact@v1 would
+        inc = []
         if end.error is not None:
             code = end.error["code"]
             why = "stopped" if end.stop is not None else "call-failed"
             self.recorder.append("retrieval.floor", decision="draft", reason=why, errorCode=code, **rec)
-            reason = ("deadline" if code == "deadline-exceeded" else "budget" if code == "budget-exhausted"
-                      else "agent-failure")
-            detail = f"the exploration-floor continuation {'was stopped' if end.stop else 'failed'} ({code})"
+            limit = ("deadline" if end.stop is not None or code == "deadline-exceeded"
+                     else "budget" if code == "budget-exhausted" else None)
+            if limit is not None:                # a real run limit, not just a missing second answer
+                n = len(draft_end.payload["hypotheses"])
+                inc = [self._inc(stage, limit, f"the exploration-floor continuation was stopped ({code}); the "
+                                               f"first-hop draft answer ({n} hypothesis(es)) was used")]
         else:
             self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
-            reason = "tool-calls-exhausted"
-            detail = (f"the exploration-floor continuation ended at the {end.exhausted} limit after "
-                      f"{end.hops - draft_end.hops} hop(s) and {end.tool_calls} requested tool call(s) without a "
-                      f"final answer; {len(end.unread)} pending request(s) were not run: {unread_note(end.unread)}")
-        inc = [self._inc(stage, reason, f"{detail}; the first-hop draft answer ({n} hypothesis(es)) was used")]
         draft_end.hops, draft_end.call_ids = end.hops, end.call_ids
         draft_end.tool_calls = end.tool_calls
         return draft_end, inc
@@ -778,12 +780,25 @@ class Engine:
         """-> ([(original index n, hypothesis id, draft)], {id: Hypothesis}) rebuilt from the logged successful
         investigator call and the INVESTIGATE artifact (so a resumed run needs nothing else)."""
         hyps = {h["id"]: h for h in self.artifacts["INVESTIGATE"]["payload"]["hypotheses"]}
-        # the last usable INVESTIGATE answer that carries a role payload (a non-final Turn hop has none)
+        # the last usable INVESTIGATE answer that carries a role payload (a non-final Turn hop has none); with the
+        # impact@v2 exploration floor, the answer its last retrieval.floor decision names (the draft when it was used)
+        src = self._floor_source()
         drafts = next((p["hypotheses"] for e in reversed(self.recorder.events)
                        if e["type"] == "model.call" and e["stage"] == "INVESTIGATE"
+                       and (src is None or e["callId"] == src)
                        and (p := terminal_payload(e)) is not None), [])
         return [(n, hypothesis_id(SPECIALIST, n, d["claim"], d["location"]["path"], d["location"]["line"]), d)
                 for n, d in enumerate(drafts)], hyps
+
+    def _floor_source(self) -> str | None:
+        """The investigator call whose answer INVESTIGATE used, per the last `retrieval.floor` decision that settles it
+        (skipped/draft: the draft, final: the continuation's final answer). None without such an event (every
+        non-v2 run, and a v2 run whose first answer requested context), so candidates() keeps its rule."""
+        ev = next((e for e in reversed(self.recorder.events) if e["type"] == "retrieval.floor"
+                   and e["stage"] == "INVESTIGATE" and e["decision"] != "continue"), None)
+        if ev is None:
+            return None
+        return ev["finalCallId"] if ev["decision"] == "final" else ev["draftCallId"]
 
     def verify(self, t0):
         stage = "VERIFY"

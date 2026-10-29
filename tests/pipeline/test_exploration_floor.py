@@ -99,7 +99,7 @@ class FloorTriggers(FloorRig):
                                                     "draftHypotheses": [draft_view(d)]})
         # otherwise the very same document (same context, budgets and citable refs), but only the turns left
         self.assertEqual((first["retrieval"]["turnsAllowed"], cont["retrieval"]["turnsAllowed"]),
-                         (V2_POLICY.investigator_turns, V2_POLICY.investigator_turns - 1))
+                         (V2_POLICY.investigator_turns, identity.FLOOR_MAX_HOPS))       # S2: capped at 3 hops
         same = lambda doc: {k: v if k != "retrieval" else {**v, "turnsAllowed": None}      # noqa: E731
                             for k, v in doc.items() if k != "explorationFloor"}
         self.assertEqual(same(cont), same(first))
@@ -156,14 +156,14 @@ class FloorTriggers(FloorRig):
 
 
 class FloorFallback(FloorRig):
-    def test_a_failed_continuation_falls_back_to_the_draft_and_discloses_it(self):
+    def test_a_failed_continuation_falls_back_to_the_draft_and_the_event_discloses_it(self):
         m = self.case()
         d = self.draft(m)
         fail = [entry("INVESTIGATE", "investigator", "generalist", 1, a, error=terr("provider-error", "INVESTIGATE"))
                 for a in range(3)]
         res, spy = self.record_v2(m, script(ifinal(0, d), *fail, vfinal(0, m, path="src/lib.py", line=1),
                                             judge(w([hid(0, d)]))))
-        self.assertEqual(res.status, "partial")
+        self.assertEqual((res.status, res.incomplete), ("completed", []))     # disclosed by the floor event only
         self.assertEqual(validate_trace(events_of(res)), [])
         draft_id = call_of(res, 0)
         self.assertEqual(floors(res), [{"decision": "continue", "draftCallId": draft_id},
@@ -171,11 +171,12 @@ class FloorFallback(FloorRig):
                                         "errorCode": "provider-error"}])
         hyps = res.hypotheses
         self.assertEqual([(x["claim"], x["sourceCallId"]) for x in hyps], [(d["claim"], draft_id)])
-        inc = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
-        self.assertEqual([i["reason"] for i in inc], ["agent-failure"])
-        self.assertIn("draft answer (1 hypothesis(es)) was used", inc[0]["detail"])
         self.assertEqual(len(res.findings), 1)                       # never lose the draft's findings
         self.assertEqual(len(res.comments), 1)
+        # VERIFY verified the DRAFT's hypothesis (candidates come from the draft call, B1)
+        vreq = [e for e in model_calls(res, "VERIFY")]
+        self.assertEqual({e["request"]["hypothesisId"] for e in vreq}, {hid(0, d)})
+        self.assertEqual(res.findings[0]["sourceCallId"], draft_id)
 
     def test_exhausted_continuation_turns_fall_back_to_the_draft(self):
         m = self.case()
@@ -186,15 +187,61 @@ class FloorFallback(FloorRig):
                      iturn(2, [treq("read_file", side="head", path="src/use.py")]),
                      vfinal(0, m, path="src/lib.py", line=1), judge(w([hid(0, d)])))
         res, spy = self.record_v2(m, scr, retrieval=pol)
-        self.assertEqual(res.status, "partial")
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
         self.assertEqual(len(inv_calls(res)), 3)                     # the total turn cap (3) holds across both chains
         self.assertTrue(doc_of(spy.requests[2])["retrieval"]["lastTurn"])
         self.assertEqual(floors(res)[-1], {"decision": "draft", "draftCallId": call_of(res, 0), "reason": "turns"})
-        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "INVESTIGATE"],
-                         ["tool-calls-exhausted"])
         self.assertEqual([x["sourceCallId"] for x in res.hypotheses],
                          [call_of(res, 0)])
         self.assertEqual(len(res.findings), 1)
+
+    def test_the_continuation_is_capped_at_three_hops_then_the_draft_is_used(self):
+        m = self.case()
+        d = self.draft(m)
+        asks = [iturn(k, [treq("read_file", side="head", path="src/use.py", start_line=k, end_line=k)])
+                for k in range(1, 5)]
+        res, spy = self.record_v2(m, script(ifinal(0, d), *asks, vfinal(0, m, path="src/lib.py", line=1),
+                                            judge(w([hid(0, d)]))))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        self.assertEqual(len(inv_calls(res)), 1 + identity.FLOOR_MAX_HOPS)   # never more, although 8 turns remain
+        self.assertTrue(doc_of(spy.requests[3])["retrieval"]["lastTurn"])
+        self.assertEqual(floors(res)[-1], {"decision": "draft", "draftCallId": call_of(res, 0), "reason": "turns"})
+        self.assertEqual([x["sourceCallId"] for x in res.hypotheses], [call_of(res, 0)])
+        self.assertEqual({e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")}, {hid(0, d)})
+
+    def test_a_spend_book_failure_on_the_continuation_fails_like_v1(self):
+        from reviewer.gateway import SpendBook
+
+        class BrokenBook(SpendBook):          # settles the draft call, then fails after the provider answered
+            n = 0
+
+            def settle(self, key, usd):
+                BrokenBook.n += 1
+                if BrokenBook.n >= 2:
+                    raise OSError("disk full")
+                return super().settle(key, usd)
+        self.book = BrokenBook(self.handle)
+        m = self.case()
+        d, other = self.draft(m), self.cross(m)
+        res, spy = self.record_v2(m, script(ifinal(0, d), ifinal(1, other), vfinal(0, m, path="src/lib.py", line=1),
+                                            judge(w([hid(0, d)]))))
+        self.assertEqual((res.status, res.error["code"]), ("failed", "internal"))
+        self.assertTrue(res.receipt["needsReconciliation"])
+        self.assertEqual(spy.calls, 2)                               # no VERIFY on a run that needs reconciliation
+        self.assertEqual((res.hypotheses, res.findings), ([], []))
+        self.assertEqual([f["decision"] for f in floors(res)], ["continue"])
+
+    def test_a_run_ceiling_refusal_is_disclosed_as_budget(self):
+        m = self.case()
+        d = self.draft(m)
+        plan = copy.deepcopy(TURN_PLAN)
+        plan["budget"]["maxUsdMicros"] = 200_000          # admits the draft call, refuses the continuation's admission
+        res, spy = self.record_v2(m, script(ifinal(0, d), ifinal(1, d)), plan=plan)
+        self.assertEqual([c["ordinal"] for c in inv_calls(res) if c["response"] is not None], [0])   # never sent
+        self.assertEqual(floors(res)[-1], {"decision": "draft", "draftCallId": call_of(res, 0), "reason": "call-failed",
+                                           "errorCode": "budget-exhausted"})
+        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "INVESTIGATE"], ["budget"])
+        self.assertEqual([x["sourceCallId"] for x in res.hypotheses], [call_of(res, 0)])
 
     def test_no_budget_left_skips_the_floor_and_the_draft_is_final(self):
         m = self.case()
@@ -281,7 +328,7 @@ class FloorIdentityAndReplay(FloorRig):
         res, _ = self.record_v2(m, script(ifinal(0, d), *fail, vfinal(0, m, path="src/lib.py", line=1),
                                           judge(w([hid(0, d)]))))
         rep = self.replay(m, res, profile=V2_PROFILE, plan=TURN_PLAN, retrieval=V2_POLICY)
-        self.assertEqual((rep.status, rep.error), ("partial", None))
+        self.assertEqual((rep.status, rep.error), ("completed", None))
         self.assertEqual(floors(rep), floors(res))
         self.assertEqual(len(rep.findings), 1)
 
@@ -321,6 +368,7 @@ class FloorIdentityAndReplay(FloorRig):
         self.assertIn("DRAFT", prompts.INVESTIGATOR_IMPACT_V2_TASK)
         self.assertEqual(prompts.investigator_task(INV2), prompts.INVESTIGATOR_IMPACT_V2_TASK)
         self.assertEqual(identity.FLOOR_BEHAVIOR, "exploration-floor-pipeline@1")
+        self.assertEqual(identity.FLOOR_MAX_HOPS, 3)
 
     def test_floor_event_contract(self):
         base = {"schema": "trace-event@1", "runId": "run_" + "a" * 16, "seq": 3, "type": "retrieval.floor",
