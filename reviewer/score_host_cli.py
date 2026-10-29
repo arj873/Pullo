@@ -25,7 +25,7 @@ from pathlib import Path
 from . import score_host as H
 from .benchmark.model import Golden, ScorerCase, ToolReview
 from .score_baseline import BaselineError, load_baseline, read_regular, sha256_hex, verify
-from .score_config import ScoreConfigError, load_score_config
+from .score_config import PROFILE_REF, ScoreConfigError, load_score_config
 from .score_render import adapt
 
 EVR = re.compile(r"evr_[0-9a-f]{16}")
@@ -172,13 +172,13 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
             from .runtime import RuntimeLedger, Secret
             with tempfile.TemporaryDirectory() as scratch:      # scratch accounting only: the original state is never opened
                 zero = H.LaunchBaseline(launch.declared, launch.config_digest, launch.prompt_sha256, 0, 0)
-                host = H.ScoreHost(cfg, zero, units, profile_ref="pullo-score@1", price=price, auth=handle,
+                host = H.ScoreHost(cfg, zero, units, profile_ref=PROFILE_REF, price=price, auth=handle,
                                    book=SpendBook(handle, Path(scratch) / "book.jsonl"), ledger=RuntimeLedger(Path(scratch) / "ledger.jsonl", 50_000_000),
                                    key=Secret(H.PLACEHOLDER_KEY), transport=H.CaptureTransport(), store_dir=store, eval_run_id=evr)
                 rep = host.execute_offline()
             rep.update(plan=True, synthetic=True, realScoring=False)
         elif a.cmd == "replay":
-            host = H.ScoreHost(cfg, launch, units, profile_ref="pullo-score@1", price=price, auth=None, book=None, ledger=None, key=None,
+            host = H.ScoreHost(cfg, launch, units, profile_ref=PROFILE_REF, price=price, auth=None, book=None, ledger=None, key=None,
                                transport=None, store_dir=store, eval_run_id="evr_1111111111111111")
             trace = Path(a.trace)
             pin = "sha256:" + sha256_hex(read_regular(trace, limit=256 << 20))
@@ -203,7 +203,7 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
             _recheck_inputs(b, v)
             transport = _transport_factory()
             b.state_dir.mkdir(parents=True, exist_ok=True)
-            host = H.ScoreHost(cfg, launch, units, profile_ref="pullo-score@1", price=price, auth=handle,
+            host = H.ScoreHost(cfg, launch, units, profile_ref=PROFILE_REF, price=price, auth=handle,
                                book=SpendBook(handle, b.book_path), ledger=RuntimeLedger(b.ledger_path, 50_000_000), key=key,
                                transport=transport, store_dir=store, eval_run_id=evr, lock_path=b.lock_path)
             host.baseline_file_sha256 = b.file_sha256

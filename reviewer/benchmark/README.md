@@ -116,6 +116,15 @@ The common judge (`allpairs.py`, `score_prompts.py`, `pullo-score.toml`) extract
 - v2-era score traces, canaries and witnesses are verified only with the frozen judge export built from `69b676c8`. Current main no longer accepts `ScoreExtraction` for the extractor role.
 - v2 and v3 documents (`judge.extractionPrompt`) must never be mixed in one comparison. Every arm of a comparison is scored by one judge version.
 
+## Common-judge output caps
+
+`pullo-score.toml` caps output at 8000 tokens for extract, 4000 for dedup and 1024 for pair (`bench.pair@v2`, `ScorePair`). The same numbers are the policy maxima in `reviewer/score_config.py` `MAX_OUTPUT`. A lower value loads. A higher value is refused as widening.
+
+The pair cap was 256 until 2026-10-29. Opus 5.5 counts its reasoning tokens against `max_tokens`. In 492 real pair calls the median was 17 output tokens and 7 calls used more than 200. Three calls stopped with `finish_reason` `length` at 255-256 reasoning tokens and produced no JSON. Each became invalid output, and because the campaign is all-or-nothing it had no headline. The cap is now 1024. Sampling and effort stay omitted, and retries stay 0.
+
+- The raise bumps the score profile to `pullo-score@2`. It also changes the config digest and the host policy digest, because `policy_digest` now covers `MAX_OUTPUT` and the profile ref. Traces, canaries and witnesses recorded at 256 (`pullo-score@1`) do not verify under the new pins.
+- The complete-set pair fit (`score_host._fit`) reserves the full 1024 output tokens for every pair. That is 768 more tokens per pair than before, at the pinned Opus output price. The 8M scoring and 20M aggregate ceilings are unchanged.
+
 ## Not here
 
 A live producer (extraction, deduplication or matching with a model) and its accounting, a scoring canary or campaign, historical-eligibility admission from the CLI, raw golden or competitor data, and any quality or cost claim. `phaseb.py` only defines request and schema text and makes no call.

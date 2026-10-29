@@ -21,7 +21,7 @@ timeout_sec = 120
 max_output_tokens = 4000
 timeout_sec = 120
 [caps.pair]
-max_output_tokens = 256
+max_output_tokens = 1024
 timeout_sec = 60
 
 [prompts]

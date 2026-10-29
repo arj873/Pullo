@@ -27,15 +27,15 @@ def genuine(us):
 
 class ConfigGate(unittest.TestCase):
     def test_file_is_exact_policy_and_digest_stable(self):
-        self.assertEqual((CFG.max_output, CFG.timeout_sec), ({"extract": 8000, "dedup": 4000, "pair": 256}, {"extract": 120, "dedup": 120, "pair": 60}))
+        self.assertEqual((CFG.max_output, CFG.timeout_sec), ({"extract": 8000, "dedup": 4000, "pair": 1024}, {"extract": 120, "dedup": 120, "pair": 60}))
         self.assertEqual((CFG.max_candidates, CFG.max_pairs, CFG.max_calls), (200, 2000, 2002))
         self.assertEqual(CFG.canonical()["sampling"], "omit")
         self.assertEqual(CFG.digest, parse_score_config(BASE).digest)
 
     def test_independent_refusal_sweep(self):
-        swaps = [("max_output_tokens = 8000", "max_output_tokens = 8001"), ("max_output_tokens = 4000", "max_output_tokens = 4001"), ("max_output_tokens = 256", "max_output_tokens = 257"),
+        swaps = [("max_output_tokens = 8000", "max_output_tokens = 8001"), ("max_output_tokens = 4000", "max_output_tokens = 4001"), ("max_output_tokens = 1024", "max_output_tokens = 1025"),
                  ("timeout_sec = 60", "timeout_sec = 601"), ("max_output_tokens = 8000", "max_output_tokens = 8000.0"), ("max_output_tokens = 8000", 'max_output_tokens = "8000"'),
-                 ("max_output_tokens = 256", "max_output_tokens = -1"), ("timeout_sec = 120", "timeout_sec = 0"),
+                 ("max_output_tokens = 1024", "max_output_tokens = -1"), ("timeout_sec = 120", "timeout_sec = 0"),
                  ("timeout_sec = 120", "timeout_sec = 120.5"), ("timeout_sec = 60", "timeout_sec = true"),
                  ("max_calls_per_score_run = 2002", "max_calls_per_score_run = 2003"), ("min_extract_chars = 20", "min_extract_chars = 19"),
                  ("[sampling]\npolicy = \"omit\"", "[sampling]\npolicy = \"omit\"\ntemperature = 0.0"),
