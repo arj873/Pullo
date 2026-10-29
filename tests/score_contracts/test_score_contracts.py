@@ -106,7 +106,7 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:024b866d7b8862b2135b9298760cb75b5275fc2bcdf2ee72f0b06490791392c9"   # + SHARD-COVERAGE-01
+LIVE_TRACEEVENT_DIGEST = "sha256:020e0b44f92fd0dfd4bbec44ae5fc42eb0bf73b821a60a9a3ec62fdead6d9bf1"   # + SHARD-COVERAGE-01
 # EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
 # exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
 FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
@@ -131,7 +131,8 @@ MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579
 # sweeps: the optional INVESTIGATE "sweep" (SweepCoverage) and the TraceEvent variants "sweep.disposition" and
 # "investigate.coverage". Subtracted below and pinned on their own; LIVE_TRACEEVENT_DIGEST is repinned.
 SWEEP_PAYLOAD_DIGEST = "sha256:5c4cf79577bdaed3f0eca43e32481bfd376e9fad77a8af75a6a2427c092a8fc9"
-SWEEP_VARIANT_DIGESTS = {"sweep.disposition": "sha256:ae63083ec702e31bb314274e4bd4aeb67f0d2f40da1cc4b16ef6be647b0f4d4c",
+SWEEP_COVERAGE_DEF_DIGEST = "sha256:2171ba69959becaf36cef2553d5d5dcfa50b20cc197c6e382074c73ed5135a18"
+SWEEP_VARIANT_DIGESTS = {"sweep.disposition": "sha256:00f881788c603c8640139bafc05d13b8ae8303b4d4793497f9ff620e6f643279",
                          "investigate.coverage": "sha256:26ed1a5a7e509cf312f16af32d32f90ba0e0c1ab097a5a6082b7dbfbce164e16"}
 
 
@@ -291,6 +292,7 @@ class Compatibility(Base):
         inv = next(v for v in REGISTRY["StagePayload"].to_json()["oneOf"]
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(dig(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
+        self.assertEqual(dig(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(dig(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want, kind)
 

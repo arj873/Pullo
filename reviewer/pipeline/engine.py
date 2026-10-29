@@ -171,6 +171,7 @@ class Engine:
         self.specialists = self.policy.specialists if self.impact else None
         # investigator.impact@v4: diff-shard sweep investigators run after the specialists (reviewer.pipeline.sweeps)
         self.sweep = bool(self.impact and self.policy.diff_sweep)
+        self.off_shard: dict[str, str] = {}     # v4 VERIFY: sweep drafts located outside their own shard -> agent
         self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
         self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
         self._time_slice: tuple | None = None   # v3: (agent, slice end sec, stage ceiling sec) of the running agent
@@ -288,7 +289,7 @@ class Engine:
         msg = "hard run deadline reached" if stop == "hard-deadline" else f"{stage} stage ceiling reached"
         if stop == "stage-deadline" and self._time_slice is not None and stage == "INVESTIGATE":
             agent, end, ceiling = self._time_slice
-            msg = f"INVESTIGATE time slice of specialist {agent} reached ({end}s of the {ceiling}s stage ceiling)"
+            msg = f"INVESTIGATE time slice of {self.agent_label(agent)} {agent} reached ({end}s of the {ceiling}s stage ceiling)"
         return "deadline", typed_error("deadline-exceeded", msg, stage=stage)
 
     def _clock_stop(self, stage: str, stage_t0: float, new_agent: bool) -> str | None:
@@ -355,6 +356,14 @@ class Engine:
             "contract-violation", "a pinned snapshot no longer matches its manifest (tamper)", stage=stage,
             detail={"kind": "snapshot-tamper"}))
 
+    def agent_label(self, agent: str) -> str:
+        """How messages name an INVESTIGATE agent: 'specialist' (always under v3), 'sweep investigator' for a v4 sweep."""
+        return "sweep investigator" if self.sweep and agent not in specialists.AGENTS else "specialist"
+
+    def session_hard_limit(self) -> int:
+        """Tool calls one ToolSession may log at all: the host limit and the Plan per-agent budget."""
+        return min(identity.tool_limits(self.spec).max_calls, self.budget["maxToolCallsPerAgent"])
+
     def agent_limit(self) -> int:
         """Tool calls one agent session may make: host limit and plan per-agent budget (not the run remainder).
         A v3 specialist is further held to its share of the investigator tool-call pool (specialists.BUDGET_RULE)."""
@@ -400,8 +409,10 @@ class Engine:
         if self._spend_ceiling is not None and stage == "INVESTIGATE" and role == "investigator":
             spent = self.stage_spend(stage)
             if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
-                err = typed_error("budget-exhausted", f"specialist {agent} reached its INVESTIGATE spend share",
-                                  stage=stage, detail={"scope": "specialist-share", "rule": specialists.BUDGET_RULE,
+                sweep = self.agent_label(agent) != "specialist"
+                err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
+                                  stage=stage, detail={"scope": "sweep-share" if sweep else "specialist-share",
+                                                       "rule": sweeps.BUDGET_RULE if sweep else specialists.BUDGET_RULE,
                                                        "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
                 self.recorder.append("error", error=err)
                 return None, err, []
@@ -421,6 +432,11 @@ class Engine:
             self.recorder.append("error", error=err)
             return None, err, res.attempts
         return res.output, None, res.attempts
+
+    def run_spend(self) -> int:
+        """USD micros of every logged cost record of the run (the reservation when the charge is unknown)."""
+        return sum(r["usdMicros"] if r["usdMicros"] is not None else r["reservedUsdMicros"]
+                   for e in self.recorder.events if e["type"] == "cost" for r in (e["record"],))
 
     def stage_spend(self, stage: str) -> int:
         """USD micros of every logged cost record of `stage` (the reservation when the charge is unknown)."""
@@ -847,7 +863,7 @@ class Engine:
 
         def failed(agent, err, why):
             agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-            inc.append(self._inc_doc(stage, why, f"specialist {agent}: {err['code']}: {err['message']}"))
+            inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: {err['message']}"))
 
         for i, agent in enumerate(self.specialists):
             # the agent's cumulative time slice gates its start and each of its tool and model calls (the last
@@ -986,6 +1002,7 @@ class Engine:
         shard_docs = [{"agentId": a, "paths": [p for p, _ in sh], "diffChars": sum(c for _, c in sh)}
                       for a, sh in zip(ids, shard_list)]
         found_by: dict[str, list] = {a: [] for a in ids}
+        out_of_shard = [0]                       # sweep hypotheses outside their own shard (sweeps.SCOPE_RULE)
 
         def cov(note=None):
             files = []
@@ -996,7 +1013,7 @@ class Engine:
                     if reason is not None:
                         f["reason"], f["toolCallId"] = reason, tid
                     files.append(f)
-            return sweeps.coverage(len(rev), shard_docs, excluded, files, note)
+            return sweeps.coverage(len(rev), shard_docs, excluded, files, note, out_of_shard[0])
 
         if not k:
             return "ok", 0, None, cov(sweeps.NOTE_TINY)
@@ -1008,9 +1025,8 @@ class Engine:
                                       "(systemic or unknown provider outcome), which must not be repeated by every "
                                       "diff-shard sweep", stage=stage), "agent-failure")
             return "ok", 0, None, cov()
-        used0 = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-        tool_cum = sweeps.tool_ceilings(used0, [len(d["paths"]) for d in shard_docs])
-        spend_cum = sweeps.spend_ceilings(self.stage_spend(stage), investigation_limit(self.budget), k)
+        tool_cum = sweeps.tool_ceilings(self._investigate_reads(stage), k)
+        spend_cum = sweeps.spend_ceilings(self.stage_spend(stage), self.budget, k)
         slices = sweeps.time_slices(ceiling, k)
         usable, first_err = 0, None
         for j, (agent, d) in enumerate(zip(ids, shard_docs)):
@@ -1027,10 +1043,12 @@ class Engine:
                     first_err = first_err or (err, reason)
                     continue
                 ctx, notes = self._sweep_context(d["paths"])
-                used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-                self._tool_share, self._spend_ceiling = max(0, tool_cum[j] - used), spend_cum[j]
+                self._tool_share = max(0, tool_cum[j] - self._investigate_reads(stage))
+                self._spend_ceiling = spend_cum[j]
                 try:
-                    end, found, more = self._sweep_agent(stage, t0, agent, j, k, d["paths"], all_paths, ctx, notes)
+                    end, found, more, dropped = self._sweep_agent(stage, t0, agent, j, k, d["paths"], all_paths, ctx,
+                                                                  notes)
+                    out_of_shard[0] += dropped
                 finally:
                     self._tool_share = self._spend_ceiling = None
             finally:
@@ -1053,7 +1071,8 @@ class Engine:
                     break
             elif end.payload is None:            # an exhausted counter ended the first chain without an answer
                 agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
-                inc.append(self._inc_doc(stage, "tool-calls-exhausted", f"sweep {agent}: " + self._exhausted_detail(end)))
+                inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                         f"sweep investigator {agent}: " + self._exhausted_detail(end)))
                 usable += 1
             else:
                 agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
@@ -1064,11 +1083,22 @@ class Engine:
                 break
         return "ok", usable, first_err, cov()
 
+    def _investigate_reads(self, stage: str) -> int:
+        """INVESTIGATE tool calls that count against read budgets (file_disposition records have their own)."""
+        return sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage
+                   and e["tool"] != retrieval.DISPOSITION_TOOL)
+
+    def _in_shard(self, found: list, paths: list) -> tuple[list, int]:
+        """sweeps.SCOPE_RULE: a sweep keeps only its hypotheses located in its own shard."""
+        mine = set(paths)
+        keep = [h for h in found if h["location"]["path"] in mine]
+        return keep, len(found) - len(keep)
+
     def _sweep_agent(self, stage, t0, agent, j, k, paths, all_paths, ctx, notes):
         """One diff-shard sweep investigator: its retrieval chain, then the disposition check and at most one
-        continuation (sweeps.DISPOSITION_RULE). -> (ChainEnd, [resolved hypotheses], [incomplete]). The ChainEnd is the
-        first chain's (payload set when it gave a final answer), or the continuation's error when that must fail the
-        stage as v3 would (payload then None)."""
+        continuation (sweeps.DISPOSITION_RULE). -> (ChainEnd, [resolved in-shard hypotheses], [incomplete], number of
+        resolved hypotheses dropped as outside the shard). The ChainEnd is the first chain's (payload set when it gave a
+        final answer), or the continuation's error when that must fail the stage as v3 would (payload then None)."""
         events = self.tool_calls()
         host = [events[c["toolCallId"]] for c in ctx]
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
@@ -1081,9 +1111,12 @@ class Engine:
                               tools=SWEEP_TOOLS)
         unrendered = self.unrendered_ids(ctx, host)
 
+        allowance = (frozenset(paths), sweeps.disposition_allowance(len(paths)))
+
         def chain(turns):
             return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
-                                   turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
+                                   turns=turns, policy=self.policy, host_events=host, unrendered=unrendered,
+                                   dispositions=allowance)
 
         def build(d):
             return lambda hop, state: prompts.turn_request(
@@ -1091,34 +1124,41 @@ class Engine:
                 retrieval.RETRIEVAL_VERSION, tools=prompts.SWEEP_RETRIEVAL_TOOLS)
 
         rec = dict(stage=stage, agentId=agent, version=sweeps.DISPOSITION_RULE)
-        end = chain(self.policy.investigator_turns).run(build(doc))
+        first = chain(self.policy.investigator_turns)
+        end = first.run(build(doc))
         if end.payload is None:
             why = "stopped" if end.stop is not None else "call-failed" if end.error is not None else end.exhausted
             extra = {"errorCode": end.error["code"]} if why in ("stopped", "call-failed") else {}
             self.recorder.append("sweep.disposition", decision="no-answer", reason=why,
                                  missing=self._missing(agent, paths, []), **extra, **rec)
-            return end, [], []
-        found = self._hypotheses(agent, end.payload, end.final_call)
+            return end, [], [], 0
+        found, dropped = self._in_shard(self._hypotheses(agent, end.payload, end.final_call), paths)
         missing = self._missing(agent, paths, found)
         if not missing:
             self.recorder.append("sweep.disposition", decision="complete", answerCallId=end.final_call, missing=[],
                                  **rec)
-            return end, found, []
+            return end, found, [], dropped
+        skip = ("context-chars" if first.context_exhausted else "tool-calls" if first.disposition_left() <= 0 else None)
+        if skip is not None:                     # no disposition can be recorded any more: no continuation
+            self.recorder.append("sweep.disposition", decision="skipped", reason=skip, answerCallId=end.final_call,
+                                 missing=missing, **rec)
+            return end, found, [], dropped
         self.recorder.append("sweep.disposition", decision="continue", answerCallId=end.final_call, missing=missing,
                              **rec)
         second = chain(sweeps.CONTINUATION_HOPS).run(
             build(dict(doc, dispositionCheck=prompts.disposition_block(missing, end.payload))))
         if second.payload is not None:
             have = {h["id"] for h in found}
-            found = found + [h for h in self._hypotheses(agent, second.payload, second.final_call)
-                             if h["id"] not in have]
+            more, dropped2 = self._in_shard([h for h in self._hypotheses(agent, second.payload, second.final_call)
+                                             if h["id"] not in have], paths)
+            found = found + more
             self.recorder.append("sweep.disposition", decision="final", finalCallId=second.final_call,
                                  missing=self._missing(agent, paths, found), **rec)
-            return end, found, []
+            return end, found, [], dropped + dropped2
         if second.error is not None and (second.error["code"] in REPLAY_CODES
                                          or second.error["code"] in ("cancelled", "internal")
                                          or self.needs_reconciliation):
-            return second, [], []                 # never masked by the first answer: fail exactly as v3 would
+            return second, [], [], 0              # never masked by the first answer: fail exactly as v3 would
         inc = []
         if second.error is not None:
             code = second.error["code"]
@@ -1128,12 +1168,12 @@ class Engine:
             limit = ("deadline" if second.stop is not None or code == "deadline-exceeded"
                      else "budget" if code == "budget-exhausted" else None)
             if limit is not None:
-                inc = [self._inc_doc(stage, limit, f"sweep {agent}: the disposition continuation was stopped ({code}); "
+                inc = [self._inc_doc(stage, limit, f"sweep investigator {agent}: the disposition continuation was stopped ({code}); "
                                                    "files without a disposition are disclosed as uncovered")]
         else:
             self.recorder.append("sweep.disposition", decision="draft", reason=second.exhausted,
                                  missing=self._missing(agent, paths, found), **rec)
-        return end, found, inc
+        return end, found, inc, dropped
 
     @property
     def coverage_record(self) -> dict | None:
@@ -1203,15 +1243,20 @@ class Engine:
 
     def _sweep_lane(self, agent: str) -> list:
         """An impact@v4 sweep's VERIFY lane: the hypotheses of its first final answer, then those its disposition
-        continuation added (per its `sweep.disposition` events), as [(hypothesis id, draft)] without repeated ids."""
+        continuation added (per its `sweep.disposition` events), as [(hypothesis id, draft)] without repeated ids. A
+        draft located outside the sweep's shard is noted in self.off_shard (VERIFY drops it, sweeps.SCOPE_RULE)."""
         srcs = [e.get("answerCallId") or e["finalCallId"] for e in self.recorder.events
                 if e["type"] == "sweep.disposition" and e["agentId"] == agent
-                and e["decision"] in ("complete", "continue", "final")]
+                and e["decision"] in ("complete", "continue", "skipped", "final")]
+        cov = self.artifacts["INVESTIGATE"]["payload"].get("sweep") or {"shards": []}
+        mine = next((set(d["paths"]) for d in cov["shards"] if d["agentId"] == agent), set())
         lane, seen = [], set()
         for src in srcs:
             ev = self.model_event(src)
             for n, d in enumerate(((terminal_payload(ev) if ev is not None else None) or {"hypotheses": []})["hypotheses"]):
                 hid = hypothesis_id(agent, n, d["claim"], d["location"]["path"], d["location"]["line"])
+                if d["location"]["path"] not in mine:
+                    self.off_shard[hid] = agent
                 if hid not in seen:
                     seen.add(hid)
                     lane.append((hid, d))
@@ -1259,6 +1304,12 @@ class Engine:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
+            if stop is None and shards and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
+                stop = ("budget", typed_error(       # impact@v4: keep the JUDGE spend reserve (sweeps.JUDGE_RESERVE_BP)
+                    "budget-exhausted", "VERIFY stopped before this candidate to keep the JUDGE spend reserve "
+                    f"({sweeps.JUDGE_RESERVE_BP} bp of the run ceiling, {sweeps.BUDGET_RULE})", stage=stage,
+                    detail={"scope": "judge-reserve", "spentUsdMicros": self.run_spend(),
+                            "floorUsdMicros": sweeps.judge_reserve_floor(self.budget)}))
             if self.fatal and self.fatal["status"] == "failed" and self.fatal["stage"] == stage:
                 return True
             if stop is not None:
@@ -1300,6 +1351,11 @@ class Engine:
             return True
 
         for n, hid, draft in cands:
+            if hid in self.off_shard:           # impact@v4: a sweep's draft outside its own shard takes no slot
+                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "suppressed",
+                              "detail": f"located outside the shard of {self.off_shard[hid]} ({sweeps.SCOPE_RULE}); "
+                                        "that file is reviewed by its own sweep investigator"})
+                continue
             if hid not in hyps:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
                               "detail": "investigator citation or location did not resolve against the pinned snapshots, "

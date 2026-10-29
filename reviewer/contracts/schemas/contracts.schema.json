@@ -4770,7 +4770,7 @@
     },
     "SweepCoverage": {
       "additionalProperties": false,
-      "description": "investigator.impact@v4 only: the deterministic diff-shard partition of the reviewable changed files and, per swept file, the disposition its sweep investigator gave: issue (a resolved hypothesis of that sweep agent located in the file), no-issue (a logged file_disposition record of that agent, with its reason and toolCallId) or uncovered (neither, after the one bounded continuation). Changed files the partition left out are listed with the reason (deleted, generated, no text diff, shard limit).",
+      "description": "investigator.impact@v4 only: the deterministic diff-shard partition of the reviewable changed files and, per swept file, the disposition its sweep investigator gave: issue (a resolved hypothesis of that sweep agent located in the file), no-issue (a logged file_disposition record of that agent, with its reason and toolCallId) or uncovered (neither, after the one bounded continuation). Changed files the partition left out are listed with the reason (deleted, generated, no text diff, shard limit). outOfShardDropped counts sweep hypotheses located outside the reporting sweep's own shard, which are not kept (VERIFY drops them as suppressed).",
       "properties": {
         "excluded": {
           "items": {
@@ -4854,6 +4854,11 @@
         "note": {
           "maxLength": 500,
           "type": "string"
+        },
+        "outOfShardDropped": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
         },
         "reviewable": {
           "maximum": 1000000000,
@@ -5633,7 +5638,8 @@
                 "continue",
                 "final",
                 "draft",
-                "no-answer"
+                "no-answer",
+                "skipped"
               ]
             },
             "errorCode": {
@@ -5717,7 +5723,7 @@
           ],
           "type": "object",
           "x-invariants": [
-            "sweep-decision: investigator.impact@v4 per-file disposition check of one diff-shard sweep agent: complete/continue (+answerCallId: the first final answer; missing = shard files without a disposition), final (+finalCallId: the one continuation's final answer, whose hypotheses are added; missing = still without one), draft (+reason: the continuation ended without a final answer), no-answer (+reason: the sweep's first chain ended without a final answer)",
+            "sweep-decision: investigator.impact@v4 per-file disposition check of one diff-shard sweep agent: complete/continue (+answerCallId: the first final answer; missing = shard files without a disposition), final (+finalCallId: the one continuation's final answer, whose hypotheses are added; missing = still without one), draft (+reason: the continuation ended without a final answer), no-answer (+reason: the sweep's first chain ended without a final answer), skipped (+answerCallId, +reason tool-calls/context-chars: files are missing but no disposition could be recorded, so no continuation is sent)",
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },

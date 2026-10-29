@@ -28,6 +28,7 @@ from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROM
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
+DISPOSITION_TOOL = "file_disposition"     # investigator.impact@v4 sweep sessions only (Chain dispositions mode)
 MAX_HOPS = 15
 MAX_REQUESTS = 6
 INVESTIGATOR_PROMPT = "investigator.retrieve@v2"
@@ -202,7 +203,7 @@ class Chain:
 
     def __init__(self, eng, *, stage: str, role: str, agent: str, session, t0: float, turns: int,
                  policy: RetrievalPolicy, hypothesis_id: str | None = None, host_events: list,
-                 hyp_calls_used: int = 0, unrendered: frozenset = frozenset()):
+                 hyp_calls_used: int = 0, unrendered: frozenset = frozenset(), dispositions: tuple | None = None):
         self.eng, self.stage, self.role, self.agent = eng, stage, role, agent
         self.session, self.t0, self.turns, self.policy = session, t0, turns, policy
         self.hypothesis_id = hypothesis_id
@@ -217,12 +218,37 @@ class Chain:
         self.tools_exhausted = False
         self.context_exhausted = self.shown_chars >= policy.context_chars
         self.history: list[dict] = []
+        # investigator.impact@v4 diff-shard sweep only: (shard paths, allowance). file_disposition records then have their
+        # own allowance and never use (or are blocked by) the read budget; None keeps every other chain unchanged.
+        self.dispositions = dispositions
 
     # -- budgets
+    def _reads(self) -> int:
+        s = self.session
+        if self.dispositions is None:
+            return len(s.calls)
+        return sum(1 for c in s.calls if c.tool != DISPOSITION_TOOL)
+
+    def _hard_left(self) -> int:
+        """Sweep mode: calls the session may still log at all (host/Plan per-agent cap and the run cap)."""
+        eng = self.eng
+        run_used = sum(1 for e in eng.recorder.events if e["type"] == "tool.call")
+        return min(eng.session_hard_limit() - len(self.session.calls),
+                   min(self.policy.run_tool_calls, eng.budget["maxToolCalls"]) - run_used)
+
+    def disposition_left(self) -> int:
+        """Sweep mode: file_disposition records the agent may still make (its allowance, the hard caps)."""
+        if self.dispositions is None:
+            return 0
+        used = sum(1 for c in self.session.calls if c.tool == DISPOSITION_TOOL)
+        return max(0, min(self.dispositions[1] - used, self._hard_left()))
+
     def _allowed(self) -> int:
         """Tool calls still allowed right now (>= 0): the smallest remaining of every counter."""
         eng, s = self.eng, self.session
-        agent_left = min(eng.agent_limit(), self.policy.agent_tool_calls) - len(s.calls)    # run remainder: below
+        agent_left = min(eng.agent_limit(), self.policy.agent_tool_calls) - self._reads()   # run remainder: below
+        if self.dispositions is not None:
+            agent_left = min(agent_left, self._hard_left())
         run_used = sum(1 for e in eng.recorder.events if e["type"] == "tool.call")
         run_left = min(self.policy.run_tool_calls, eng.budget["maxToolCalls"]) - run_used
         left = min(agent_left, run_left)
@@ -264,6 +290,8 @@ class Chain:
             if i >= self.policy.requests_per_turn:
                 call = host_call(self.session, rq, f"Per-turn request cap ({self.policy.requests_per_turn}) reached; "
                                  "this request was not run.")
+            elif self.dispositions is not None and rq["tool"] == DISPOSITION_TOOL:
+                call = self._disposition(rq)
             else:
                 allowed = self._allowed()
                 self.session.limits = dataclasses.replace(self.session.limits, max_calls=len(self.session.calls) + allowed)
@@ -287,6 +315,27 @@ class Chain:
         if self._allowed() == 0 and not self.tools_exhausted:
             self.tools_exhausted = True
         return items, ids, None
+
+    def _disposition(self, rq: dict) -> ToolCall:
+        """Sweep mode: one file_disposition request, under its own allowance. A path outside the shard or a used-up
+        allowance is a logged denied result (never `unavailable`, which would end the chain's tool use)."""
+        path = rq["args"].get("path") if isinstance(rq["args"], dict) else None
+        if path not in self.dispositions[0]:
+            return host_call(self.session, rq, "Not a file of your shard (sweep.shardPaths): no disposition was "
+                             "recorded.")
+        if self.disposition_left() <= 0:
+            return host_call(self.session, rq, "The file_disposition allowance of this sweep is used up: no "
+                             "disposition was recorded.")
+        self.session.limits = dataclasses.replace(self.session.limits, max_calls=len(self.session.calls) + 1)
+        return self.session.call(rq["tool"], rq["args"])
+
+    def _stops(self, requests: list) -> bool:
+        """The tool-call limit ends the chain, except (sweep mode) for a turn that records dispositions it may still
+        record: those run and the rest is refused by the exhausted session."""
+        if not self.tools_exhausted:
+            return False
+        return not (self.dispositions is not None and self.disposition_left() > 0
+                    and any(r["tool"] == DISPOSITION_TOOL for r in requests))
 
     # -- the loop
     def run(self, build) -> ChainEnd:
@@ -317,6 +366,8 @@ class Chain:
                      "toolCallsRemaining": self._allowed(),
                      "contextCharsRemaining": max(0, self.policy.context_chars - self.shown_chars)}
             state["citableRefs"], state["refsOmitted"] = citable_refs(self.delivered)
+            if self.dispositions is not None:
+                state["dispositionCallsRemaining"] = self.disposition_left()
             req = build(hop, state)
             ordinal = eng.next_ordinal(self.stage, self.role, self.agent)
             out, err, attempts = eng.model_call(self.stage, self.role, self.agent, ordinal, req)
@@ -335,8 +386,9 @@ class Chain:
                 end.exhausted, end.unread = "turns", requests
                 end.tool_calls = self.requested_calls
                 return end
-            if self.tools_exhausted or self.context_exhausted:
-                end.exhausted = "tool-calls" if self.tools_exhausted else "context-chars"
+            stops = self._stops(requests)
+            if stops or self.context_exhausted:
+                end.exhausted = "tool-calls" if stops else "context-chars"
                 end.unread = requests
                 end.tool_calls = self.requested_calls
                 return end

@@ -1294,31 +1294,35 @@ SweepCoverage = define("SweepCoverage", Obj(
               "shards": Arr(SweepShard, max_items=50), "files": Arr(SweepFile, max_items=1000),
               "excluded": Arr(SweepExcluded, max_items=1000), "excludedTotal": Count,
               "summary": Obj(required={"swept": Count, "issue": Count, "noIssue": Count, "uncovered": Count})},
-    optional={"note": Str(max_len=500)},
+    optional={"note": Str(max_len=500), "outOfShardDropped": Count},
     description="investigator.impact@v4 only: the deterministic diff-shard partition of the reviewable changed files "
                 "and, per swept file, the disposition its sweep investigator gave: issue (a resolved hypothesis of that "
                 "sweep agent located in the file), no-issue (a logged file_disposition record of that agent, with its "
                 "reason and toolCallId) or uncovered (neither, after the one bounded continuation). Changed files the "
-                "partition left out are listed with the reason (deleted, generated, no text diff, shard limit)."))
+                "partition left out are listed with the reason (deleted, generated, no text diff, shard limit). "
+                "outOfShardDropped counts sweep hypotheses located outside the reporting sweep's own shard, which are "
+                "not kept (VERIFY drops them as suppressed)."))
 
 
 SWEEP_DISPOSITION_VERSION = "sweep-disposition@1"
-SWEEP_DECISIONS = ("complete", "continue", "final", "draft", "no-answer")
+SWEEP_DECISIONS = ("complete", "continue", "final", "draft", "no-answer", "skipped")
 SWEEP_DRAFT_REASONS = ("turns", "tool-calls", "context-chars", "stopped", "call-failed")
 
 
 def _sweep_ok(d):
     dec = d["decision"]
-    if ("answerCallId" in d) != (dec in ("complete", "continue")):
-        yield ".answerCallId", "present exactly when decision is complete or continue"
+    if ("answerCallId" in d) != (dec in ("complete", "continue", "skipped")):
+        yield ".answerCallId", "present exactly when decision is complete, continue or skipped"
     if ("finalCallId" in d) != (dec == "final"):
         yield ".finalCallId", "present exactly when decision is final"
-    if ("reason" in d) != (dec in ("draft", "no-answer")):
-        yield ".reason", "present exactly when decision is draft or no-answer"
+    if ("reason" in d) != (dec in ("draft", "no-answer", "skipped")):
+        yield ".reason", "present exactly when decision is draft, no-answer or skipped"
+    elif dec == "skipped" and d["reason"] not in ("tool-calls", "context-chars"):
+        yield ".reason", "a skipped continuation names tool-calls or context-chars"
     if ("errorCode" in d) != (d.get("reason") in ("stopped", "call-failed")):
         yield ".errorCode", "present exactly when the reason is a stop or a failed call"
-    if (dec == "complete") != (not d["missing"]) and dec in ("complete", "continue"):
-        yield ".missing", "complete has no missing file, continue has at least one"
+    if (dec == "complete") != (not d["missing"]) and dec in ("complete", "continue", "skipped"):
+        yield ".missing", "complete has no missing file, continue and skipped have at least one"
 
 
 TraceEvent = define("TraceEvent", Union("type", {
@@ -1371,7 +1375,9 @@ TraceEvent = define("TraceEvent", Union("type", {
                    "complete/continue (+answerCallId: the first final answer; missing = shard files without a "
                    "disposition), final (+finalCallId: the one continuation's final answer, whose hypotheses are "
                    "added; missing = still without one), draft (+reason: the continuation ended without a final "
-                   "answer), no-answer (+reason: the sweep's first chain ended without a final answer)", _sweep_ok)]),
+                   "answer), no-answer (+reason: the sweep's first chain ended without a final answer), skipped (+answerCallId, "
+                   "+reason tool-calls/context-chars: files are missing but no disposition could be recorded, so no "
+                   "continuation is sent)", _sweep_ok)]),
     "investigate.coverage": _event("investigate.coverage", {"stage": Enum("INVESTIGATE"), "coverage": SweepCoverage}),
     "checkpoint": _event("checkpoint", {"stage": Stage, "planVersion": Int(0, 100),
                                         "artifactDigest": Digest}),

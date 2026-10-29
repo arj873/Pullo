@@ -269,17 +269,26 @@ def retrieval_block(version: str, state: dict, requests_per_turn: int, tools: li
              "A repeated request is answered by pointing at the earlier result."]
     if state["lastTurn"]:
         rules.append("This is your last turn: give your final answer now. Requests made now will not be run.")
+    sweep = "dispositionCallsRemaining" in state         # investigator.impact@v4 diff-shard sweeps only
     if state["toolsExhausted"]:
         rules.append("The tool-call limit is reached: further requests will not be run. Give your final answer and "
-                     "say which context you could not obtain.")
+                     "say which context you could not obtain." if not sweep else
+                     "The tool-call limit for reads is reached: further read requests will not be run. "
+                     "file_disposition records still run while dispositionCallsRemaining is above zero. Give your "
+                     "final answer and say which context you could not obtain.")
     if state["contextExhausted"]:
         rules.append("The context budget is used up: further requests will not be run. Give your final answer "
                      "and say which context you could not obtain.")
-    return {"version": version, "turn": state["hop"], "turnsAllowed": state["turns"], "lastTurn": state["lastTurn"],
-            "requestsPerTurn": requests_per_turn, "toolCallsRemaining": state["toolCallsRemaining"],
-            "contextCharsRemaining": state["contextCharsRemaining"], "toolsExhausted": state["toolsExhausted"],
-            "contextExhausted": state["contextExhausted"], "tools": RETRIEVAL_TOOLS if tools is None else tools,
-            "rules": rules}
+    if sweep:
+        rules.append(SWEEP_ALLOWANCE_RULE)
+    out = {"version": version, "turn": state["hop"], "turnsAllowed": state["turns"], "lastTurn": state["lastTurn"],
+           "requestsPerTurn": requests_per_turn, "toolCallsRemaining": state["toolCallsRemaining"],
+           "contextCharsRemaining": state["contextCharsRemaining"], "toolsExhausted": state["toolsExhausted"],
+           "contextExhausted": state["contextExhausted"], "tools": RETRIEVAL_TOOLS if tools is None else tools,
+           "rules": rules}
+    if sweep:
+        out["dispositionCallsRemaining"] = state["dispositionCallsRemaining"]
+    return out
 
 
 def turn_request(profile, profile_ref, role: str, doc: dict, state: dict, requests_per_turn: int,
@@ -493,8 +502,11 @@ INVESTIGATOR_IMPACT_V4_PROMPT = "investigator.impact@v4"
 SWEEP_VERSION = "diff-shard-sweep@1"
 FILE_DISPOSITION_TOOL = {
     "tool": "file_disposition", "arguments": "path (one file of your shard); reason (one line, at most 300 characters: "
-    "what you checked and why it holds). Records that you examined that file and found no issue; it reads nothing and "
-    "returns no content"}
+    "what you checked and why it holds). Records that you examined that file and found no concrete defect; it reads "
+    "nothing, returns no content and does not use the tool-call limit for reads (it has its own allowance, "
+    "retrieval.dispositionCallsRemaining)"}
+SWEEP_ALLOWANCE_RULE = ("file_disposition records have their own allowance (dispositionCallsRemaining) and do not reduce "
+                        "toolCallsRemaining. A path outside sweep.shardPaths is refused and records nothing.")
 SWEEP_RETRIEVAL_TOOLS = IMPACT_RETRIEVAL_TOOLS + [FILE_DISPOSITION_TOOL]
 
 SWEEP_TASK = (
@@ -508,11 +520,13 @@ SWEEP_TASK = (
     "sweep.allChangedPaths lists them too. You may read any file, including other changed files, definitions, callers "
     "and tests, but report only issues located in your shard files. Work file by file: read its diff, open the "
     "definitions, callers or tests the changed lines depend on whenever the diff alone does not decide, and trace each "
-    "changed branch with concrete values. Disposition rule: EVERY file of your shard needs a disposition. Either report "
-    "at least one hypothesis located in that file, or record that you examined it and found no issue with a context "
-    "request to the file_disposition tool (arguments path and reason; the reason is one line saying what you checked). "
-    "Record dispositions in a request turn before your final answer; they may share a turn with other requests. A file "
-    "with neither is reported to the user as not covered. A search or reference result that shows only a signature or a "
+    "changed branch with concrete values. Disposition rule: EVERY file of your shard needs a disposition. For a file in "
+    "which you found no concrete defect, the normal and expected disposition is a file_disposition record (arguments "
+    "path and reason; the reason is one line saying what you checked); most files of a change get one. Report a "
+    "hypothesis only for a concrete, verifiable defect that you can support with exact cited lines; never report a "
+    "hypothesis just to give a file a disposition, and do not stretch a style remark or a guess into one. Record "
+    "dispositions in a request turn before your final answer; they may share a turn with other requests and do not use "
+    "your tool-call limit for reads. A file with neither is reported to the user as not covered. A search or reference result that shows only a signature or a "
     "call site does not show what the code does: when a claim depends on behavior, request the implementation before "
     "you report or dismiss it. Report only issues you can support with exact lines of the head snapshot that you have "
     "seen in the context or in a returned result. Each hypothesis needs a claim, category, suspectedSeverity, impact, a "
@@ -524,15 +538,17 @@ SWEEP_TASK = (
 )
 SWEEP_DISPOSITION_CONTINUATION = (
     "Your final answer left the shard files in dispositionCheck.missingDispositions without a disposition: no resolved "
-    "hypothesis located in them and no file_disposition record. Review each of them now. For each one, either report "
-    "hypotheses located in it, or record file_disposition with its path and a one-line reason saying what you checked. "
+    "hypothesis located in them and no file_disposition record. Review each of them now. For each one, record file_disposition "
+    "with its path and a one-line reason saying what you checked, or, only if you found a concrete, verifiable defect "
+    "there, report it as a hypothesis located in that file. Never report a hypothesis just to give a file a disposition. "
     "The hypotheses of your earlier final answer (earlierHypotheses, your own unverified output, not evidence) are "
     "already kept: do not repeat them; your next final answer adds new hypotheses only and may be empty. Citations "
     "must still follow citations.rules. This message is sent only once: a file still without a disposition afterwards "
     "is reported to the user as not covered."
 )
 IMPACT_V4_TEMPLATES = {**IMPACT_V3_TEMPLATES, "sweep": SWEEP_TASK, "sweepContinuation": SWEEP_DISPOSITION_CONTINUATION,
-                       "sweepTools": SWEEP_RETRIEVAL_TOOLS, "sweepListedPaths": 500}
+                       "sweepTools": SWEEP_RETRIEVAL_TOOLS, "sweepListedPaths": 500,
+                       "sweepAllowanceRule": SWEEP_ALLOWANCE_RULE}
 
 
 MAX_LISTED_PATHS = 500       # allChangedPaths shown to a sweep (the PREPARE diff listing has the same bound)

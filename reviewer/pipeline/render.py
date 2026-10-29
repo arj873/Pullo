@@ -70,10 +70,17 @@ def summary_line(status: str, comments: list, incomplete: list, error: dict | No
     return base[:8000]
 
 
-def sweep_section(cov: dict, limit: int = 60) -> list[str]:
-    """review.md lines of the impact@v4 diff-shard sweep coverage (per-file dispositions, bounded)."""
+def sweep_section(cov: dict, investigate: dict | None = None, limit: int = 60) -> list[str]:
+    """review.md lines of the impact@v4 diff-shard sweep coverage (sweep investigators, per-file dispositions)."""
     s = cov["summary"]
     out = ["## Diff-shard sweep coverage", ""]
+    agents = {a["agentId"]: a for a in (investigate or {}).get("agents", [])}
+    for d in cov["shards"]:
+        a = agents.get(d["agentId"], {"status": "not run"})
+        err = a.get("error")
+        n = sum(1 for h in (investigate or {}).get("hypotheses", []) if h["specialist"] == d["agentId"])
+        out.append(f"- Sweep investigator {d['agentId']} ({len(d['paths'])} file(s)): {a['status']}"
+                   + (f" (`{err['code']}`)" if err else "") + f"; {n} resolved hypothesis(es)")
     if not cov["shards"]:
         out += [f"- No diff shards: {cov.get('note', 'no reviewable changed files')}."]
     else:
@@ -92,6 +99,8 @@ def sweep_section(cov: dict, limit: int = 60) -> list[str]:
         shown = ", ".join(f"`{x['path']}` ({x['reason']})" for x in cov["excluded"][:20])
         more = f" (+{cov['excludedTotal'] - 20} more)" if cov["excludedTotal"] > 20 else ""
         out.append(f"- Changed files not swept: {cov['excludedTotal']}: {shown}{more}")
+    if cov.get("outOfShardDropped"):
+        out.append(f"- Sweep hypotheses outside the reporting sweep's own shard, not kept: {cov['outOfShardDropped']}")
     out += ["- A disposition is the sweep investigator's own statement; 'no issue' is not a certificate that the file "
             "is free of defects.", ""]
     return out
@@ -157,16 +166,20 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
         for h in specialists["hypotheses"]:
             n[h["specialist"]] = n.get(h["specialist"], 0) + 1
         out += ["## Specialist investigators", ""]
+        swept = set() if sweep is None else {d["agentId"] for d in sweep["shards"]}
         for a in specialists["agents"]:
+            if a["agentId"] in swept:        # impact@v4: sweeps are listed in their own section
+                continue
             err = a.get("error")
             out.append(f"- {a['agentId']}: {a['status']}" + (f" (`{err['code']}`)" if err else "")
                        + f"; {n.get(a['agentId'], 0)} resolved hypothesis(es)")
         merged = sum(len(m["mergedIds"]) for m in specialists["merges"])
-        out += [f"- Duplicates merged across specialists before verification: {merged}",
+        out += [f"- Duplicates merged across specialists{' and sweeps' if sweep is not None else ''} before "
+                f"verification: {merged}",
                 "- A specialist that did not complete did not review its focus; its share of the review is missing.",
                 ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
-        out += sweep_section(sweep)
+        out += sweep_section(sweep, specialists)
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

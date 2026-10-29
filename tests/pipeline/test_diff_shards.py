@@ -233,9 +233,19 @@ class ShardRule(unittest.TestCase):
         self.assertEqual(sweeps.time_slices(600, 3), [400, 500, 600])
         self.assertEqual(sweeps.time_slices(600, 1), [600])
         self.assertIsNone(sweeps.time_slices(None, 2))
-        self.assertEqual(sweeps.tool_ceilings(30, [3, 5, 1]), [45, 62, 75])
-        self.assertEqual(sweeps.spend_ceilings(100, 1000, 3), [400, 700, 1000])
-        self.assertEqual(sweeps.spend_ceilings(1500, 1000, 2), [1000, 1000])     # share used up: nothing left
+        self.assertEqual(sweeps.tool_ceilings(30, 3), [42, 54, 66])               # reads only
+        self.assertEqual(sweeps.disposition_allowance(3), 6)
+        live = {"maxUsdMicros": 4_000_000, "verifyReserveBp": 3000}
+        # S2: all sweeps together <= 25% of the ceiling, INVESTIGATE <= 50%, VERIFY keeps 7.5% for JUDGE
+        self.assertEqual(sweeps.sweep_spend_top(300_000, live), 1_300_000)
+        self.assertEqual(sweeps.sweep_spend_top(1_500_000, live), 2_000_000)     # the 50% downstream reserve binds
+        self.assertEqual(sweeps.sweep_spend_top(2_500_000, live), 2_500_000)     # already above: nothing more
+        self.assertEqual(sweeps.spend_ceilings(300_000, live, 2), [800_000, 1_300_000])
+        self.assertEqual(sweeps.spend_ceilings(2_500_000, live, 2), [2_500_000, 2_500_000])
+        self.assertEqual(sweeps.judge_reserve_floor(live), 3_700_000)
+        self.assertLessEqual(4_000_000 - sweeps.sweep_spend_top(0, live), 4_000_000)
+        for s0 in range(0, 2_800_001, 100_000):                                   # VERIFY + JUDGE keep >= $2.00
+            self.assertGreaterEqual(4_000_000 - sweeps.sweep_spend_top(s0, live), min(2_000_000, 4_000_000 - s0))
         self.assertEqual([sweeps.verify_cap(k) for k in (0, 1, 2, 5, 6)], [20, 24, 28, 40, 40])
         self.assertEqual([sweeps.verifier_agent(p, 0) for p in (0, 9, 10, 35)], ["verifier"] * 4)
         self.assertEqual([sweeps.verifier_agent(p, 2) for p in (0, 9, 10, 19, 20, 39)],
@@ -277,7 +287,7 @@ class DispositionTool(DiffShardRig):
         self.assertEqual((ok.result["status"], ok.result["evidence"]), ("ok", []))
         self.assertIn("examined, no issue", ok.result["notice"])
         gone = s.call("file_disposition", {"path": "src/app/old.py", "reason": "deleted"})
-        self.assertEqual(gone.result["status"], "unavailable")
+        self.assertEqual(gone.result["status"], "denied")       # S3c: never `unavailable` (= tools exhausted)
         for args in ({"path": "src/app/io.py"}, {"path": "src/app/io.py", "reason": ""},
                      {"path": "src/app/io.py", "reason": "two\nlines"}, {"path": "src/app/io.py", "reason": "x" * 301},
                      {"path": "src/app/io.py", "reason": 3}, {"path": "src/app/io.py", "reason": "ok", "extra": 1},
@@ -359,6 +369,12 @@ class EndToEnd(DiffShardRig):
         self.assertIn("Swept files with a disposition: 6 of 6 (3 with a resolved hypothesis, 3 examined with no issue)",
                       md)
         self.assertIn("`src/app/old.py` (deleted)", md)
+        # N2: sweeps are named as sweep investigators, not specialists
+        spec = md.split("## Specialist investigators", 1)[1].split("##", 1)[0]
+        self.assertNotIn("sweep-0", spec)
+        self.assertIn("Duplicates merged across specialists and sweeps before verification: 1", spec)
+        self.assertIn("- Sweep investigator sweep-01 (3 file(s)): completed; 1 resolved hypothesis(es)", md)
+        self.assertIn("- Sweep investigator sweep-02 (3 file(s)): completed; 2 resolved hypothesis(es)", md)
 
     def test_strict_replay_reproduces_a_v4_run_and_load_rederives_it(self):
         from reviewer.pipeline import runner
@@ -420,7 +436,9 @@ class Dispositions(DiffShardRig):
         self.assertEqual((got["src/app/conf.py"], got["src/app/core.py"]), ("uncovered", "uncovered"))
         self.assertEqual(got["src/app/io.py"], "no-issue")          # only sweep-02's own record counts for its file
         statuses = [e["result"]["status"] for e in tool_calls(res, "INVESTIGATE") if e["agentId"] == "sweep-01"]
-        self.assertEqual(statuses, ["ok", "ok", "unavailable", "denied"])
+        # S3c: another shard's file, a deleted file and an invalid reason are all denied (the chain goes on)
+        self.assertEqual(statuses, ["ok", "denied", "denied", "denied"])
+        self.assertEqual([(a, d) for a, d, _ in sweep_events(res)][:2], [("sweep-01", "continue"), ("sweep-01", "final")])
 
     def test_a_failed_continuation_keeps_the_first_answer_and_discloses_the_files(self):
         m = self.big()
@@ -441,6 +459,40 @@ class Dispositions(DiffShardRig):
         self.assertEqual(cov["summary"]["uncovered"], 2)
 
 
+class Scope(DiffShardRig):
+    def test_a_sweep_hypothesis_outside_its_shard_is_dropped_and_disclosed(self):
+        m = self.big()
+        hc, hu = self.h_core(m), self.h_util(m)                 # util.py belongs to sweep-02's shard
+        scr = script(*self.specialists_part(m),
+                     sturn("sweep-01", 0, [disp("docs/guide.md"), disp("src/app/conf.py")]),
+                     sfinal("sweep-01", 1, hu, hc),
+                     sturn("sweep-02", 0, [disp(p) for p in SHARD2]), sfinal("sweep-02", 1),
+                     vfinal(0, m, path="src/app/core.py", line=3), judge(w([shid("sweep-01", 1, hc)])))
+        res, _ = self.record_v4(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual([(h["specialist"], h["location"]["path"]) for h in res.hypotheses],
+                         [("sweep-01", "src/app/core.py")])
+        pay = self.payload(res)["payload"]
+        self.assertEqual(pay["sweep"]["outOfShardDropped"], 1)
+        self.assertEqual({f["path"]: f["disposition"] for f in pay["sweep"]["files"]}["src/app/util.py"], "no-issue")
+        vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
+        self.assertEqual([(d["subjectIds"], d["reason"]) for d in vpay["drops"]], [([shid("sweep-01", 0, hu)], "suppressed")])
+        self.assertIn(sweeps.SCOPE_RULE, vpay["drops"][0]["detail"])
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")], [shid("sweep-01", 1, hc)])
+        self.assertIn("outside the reporting sweep's own shard, not kept: 1", Path(res.review_path).read_text())
+
+
+class Prompt(unittest.TestCase):
+    def test_no_issue_is_the_normal_disposition_and_hypotheses_stay_concrete(self):
+        for text in (prompts.SWEEP_TASK, prompts.SWEEP_DISPOSITION_CONTINUATION):
+            low = " ".join(text.split()).lower()
+            self.assertIn("never report a hypothesis just to give a file a disposition", low)
+            self.assertIn("concrete, verifiable defect", low)
+        self.assertIn("the normal and expected disposition is a file_disposition record",
+                      " ".join(prompts.SWEEP_TASK.split()))
+        self.assertIn("own allowance", prompts.FILE_DISPOSITION_TOOL["arguments"])
+
+
 class Tolerance(DiffShardRig):
     def test_one_failed_sweep_does_not_fail_the_run(self):
         m = self.big()
@@ -454,7 +506,8 @@ class Tolerance(DiffShardRig):
         self.assertEqual([(a["agentId"], a["status"]) for a in agents][3:], [("sweep-01", "failed"),
                                                                              ("sweep-02", "completed")])
         inc = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
-        self.assertEqual([(i["reason"], i["detail"].split(":")[0]) for i in inc], [("agent-failure", "specialist sweep-01")])
+        self.assertEqual([(i["reason"], i["detail"].split(":")[0]) for i in inc],
+                         [("agent-failure", "sweep investigator sweep-01")])
         cov = self.payload(res)["payload"]["sweep"]
         self.assertEqual({f["path"] for f in cov["files"] if f["disposition"] == "uncovered"}, set(SHARD1))
         self.assertEqual(sweep_events(res)[0][:2], ("sweep-01", "no-answer"))
@@ -500,7 +553,8 @@ class Tolerance(DiffShardRig):
         agents = self.payload(res)["payload"]["agents"]
         self.assertEqual(agents[3]["agentId"], "sweep-01")
         self.assertEqual(agents[3]["error"]["code"], "deadline-exceeded")
-        self.assertIn("time slice of specialist sweep-01 reached (1800s of the 2400s", agents[3]["error"]["message"])
+        self.assertIn("time slice of sweep investigator sweep-01 reached (1800s of the 2400s",
+                      agents[3]["error"]["message"])
         self.assertEqual(agents[4]["status"], "completed")
         stops = [e["code"] for e in events_of(res) if e["type"] == "host.stop" and e["stage"] == "INVESTIGATE"]
         self.assertEqual(stops, ["stage-deadline"])
@@ -508,26 +562,76 @@ class Tolerance(DiffShardRig):
         self.assertEqual((rep.status, rep.error), (res.status, None))
         self.assertEqual(rep.receipt["artifactDigests"]["INVESTIGATE"], res.receipt["artifactDigests"]["INVESTIGATE"])
 
-    def test_sweep_budgets_follow_the_cumulative_ceilings(self):
+    def test_reads_follow_the_cumulative_ceilings_and_never_block_dispositions(self):
         m = self.big()
         reads = [treq("read_file", side="head", path="src/app/use.py", start_line=k, end_line=k) for k in range(1, 6)]
-        with mock.patch.object(sweeps, "SWEEP_TOOL_CALLS", 1):            # shares: 1 + 3 files = 4 per sweep
+        with mock.patch.object(sweeps, "SWEEP_TOOL_CALLS", 2):            # read shares: 2 per sweep, cumulative
             scr = script(*self.specialists_part(m),
-                         sturn("sweep-01", 0, reads[:2]), sturn("sweep-01", 1, [disp(p) for p in SHARD1]),
-                         sfinal("sweep-01", 2), sfinal("sweep-01", 3),
-                         sturn("sweep-02", 0, [disp(p) for p in SHARD2]), sfinal("sweep-02", 1), judge())
+                         sturn("sweep-01", 0, reads[:3]),                     # the third read is over its share
+                         sturn("sweep-01", 1, [reads[3]] + [disp(p) for p in SHARD1]),   # out of reads: records still run
+                         sfinal("sweep-01", 2),
+                         sturn("sweep-02", 0, [disp(p) for p in SHARD2] + reads[4:5]), sfinal("sweep-02", 1), judge())
             res, spy = self.record_v4(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
         got = [(e["agentId"], e["tool"], e["result"]["status"]) for e in tool_calls(res, "INVESTIGATE")
                if e["agentId"].startswith("sweep-")]
-        # sweep-01: 2 reads + 2 records fit its 4, the third record is refused (unavailable), so core.py is uncovered
-        self.assertEqual([s for a, _, s in got if a == "sweep-01"], ["ok", "ok", "ok", "ok", "unavailable"])
-        # sweep-02's ceiling is cumulative (base + 4 + 4): 8 - 5 calls logged by sweep-01 leaves exactly its 3 records
-        self.assertEqual([s for a, _, s in got if a == "sweep-02"], ["ok", "ok", "ok"])
+        self.assertEqual([(t, st) for a, t, st in got if a == "sweep-01"],
+                         [("read_file", "ok"), ("read_file", "ok"), ("read_file", "unavailable"),
+                          ("read_file", "unavailable")] + [("file_disposition", "ok")] * 3)
+        # sweep-02's read ceiling is base + 2 + 2: sweep-01 logged 4 reads, so none is left; its records all run
+        self.assertEqual([(t, st) for a, t, st in got if a == "sweep-02"],
+                         [("file_disposition", "ok")] * 3 + [("read_file", "unavailable")])
         cov = self.payload(res)["payload"]["sweep"]
-        self.assertEqual({f["path"]: f["disposition"] for f in cov["files"]}["src/app/core.py"], "uncovered")
-        firsts = [doc_of(r)["retrieval"]["toolCallsRemaining"] for r in spy.requests
+        self.assertEqual(cov["summary"], {"swept": 6, "issue": 0, "noIssue": 6, "uncovered": 0})
+        firsts = [doc_of(r)["retrieval"] for r in spy.requests
                   if r["role"] == "investigator" and r["hop"] == 0 and "sweep" in doc_of(r)]
-        self.assertEqual(firsts[0], 4)
+        self.assertEqual([(f["toolCallsRemaining"], f["dispositionCallsRemaining"]) for f in firsts], [(2, 6), (0, 6)])
+        self.assertIn(prompts.SWEEP_ALLOWANCE_RULE, firsts[0]["rules"])
+
+    def test_no_continuation_when_no_disposition_can_be_recorded(self):
+        m = self.big()
+        with mock.patch.object(sweeps, "DISPOSITION_CALLS_PER_FILE", 1):     # allowance 3 per sweep
+            scr = script(*self.specialists_part(m),
+                         sturn("sweep-01", 0, [disp("src/app/io.py"), disp("src/app/util.py"), disp("docs/guide.md")]),
+                         sturn("sweep-01", 1, [disp("src/app/conf.py")]),     # refused: allowance used up (denied)
+                         sfinal("sweep-01", 2),
+                         sturn("sweep-02", 0, [disp(p) for p in SHARD2]), sfinal("sweep-02", 1), judge())
+            res, spy = self.record_v4(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        ev = [e for e in events_of(res) if e["type"] == "sweep.disposition" and e["agentId"] == "sweep-01"]
+        self.assertEqual([(e["decision"], e.get("reason")) for e in ev], [("skipped", "tool-calls")])
+        self.assertEqual(ev[0]["missing"], ["src/app/conf.py", "src/app/core.py"])
+        self.assertFalse(any("dispositionCheck" in doc_of(r) for r in spy.requests if r["role"] == "investigator"))
+        statuses = [e["result"]["status"] for e in tool_calls(res, "INVESTIGATE") if e["agentId"] == "sweep-01"]
+        self.assertEqual(statuses, ["denied", "denied", "ok", "denied"])     # off-shard and over-allowance: denied
+        self.assertEqual(validate_trace(events_of(res)), [])
+
+    def test_sweep_spend_is_capped_and_the_specialists_are_untouched(self):
+        m = self.big()
+        with mock.patch.object(sweeps, "SWEEP_SPEND_BP", 0):                  # no room at all for sweeps
+            scr = script(*self.specialists_part(m), judge())
+            res, _ = self.record_v4(m, scr)
+        agents = self.payload(res)["payload"]["agents"]
+        self.assertEqual([a["status"] for a in agents], ["completed"] * 3 + ["budget", "budget"])
+        self.assertEqual(agents[3]["error"]["detail"]["scope"], "sweep-share")
+        self.assertEqual(agents[3]["error"]["detail"]["rule"], sweeps.BUDGET_RULE)
+        self.assertIn("sweep investigator sweep-01 reached its INVESTIGATE spend share", agents[3]["error"]["message"])
+        self.assertEqual(sweep_calls(res), [])                                # refused before any provider contact
+        self.assertEqual({i["reason"] for i in res.incomplete if i["stage"] == "INVESTIGATE"}, {"budget"})
+
+    def test_verify_keeps_the_judge_reserve_and_discloses_the_truncation(self):
+        m = self.big()
+        scr, _ = self.e2e_script(m)
+        with mock.patch.object(sweeps, "judge_reserve_floor", lambda budget: 0):   # the reserve is already reached
+            res, _ = self.record_v4(m, scr)
+        self.assertEqual(res.status, "partial")
+        self.assertEqual(model_calls(res, "VERIFY"), [])
+        vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
+        self.assertEqual({d["reason"] for d in vpay["drops"]} - {"merged"}, {"budget"})
+        self.assertIn("JUDGE spend reserve", vpay["drops"][0]["detail"])
+        self.assertIn({"stage": "VERIFY", "reason": "budget"}, [{k: i[k] for k in ("stage", "reason")}
+                                                                for i in res.incomplete])
+        self.assertIn("budget", Path(res.review_path).read_text(encoding="utf-8"))
 
 
 class VerifyFairness(DiffShardRig):
