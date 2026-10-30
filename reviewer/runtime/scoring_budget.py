@@ -1,15 +1,16 @@
 """Trusted scoring-budget maxima (SCORE-RT-01). Constants and a pure validator; no I/O.
 
-Scoring spends inside the original $50 trial aggregate: a scoring sub-cap of 16M micros (8M until 2026-10-29) and a scoring-time
-aggregate ceiling of 20M (50M total minus the 30M kept for reviews). The host passes tighter-or-equal bounds
+Scoring spends inside the original $50 trial aggregate: a scoring sub-cap of 30M micros (8M until 2026-10-29, 16M until
+2026-10-30) and a scoring-time aggregate ceiling of 34M (raised from 20M by the same +14M, so the ~4M of non-scoring headroom
+inside it is unchanged; the review reserve that remains under the 50M total shrinks accordingly). The host passes tighter-or-equal bounds
 from pinned policy; model output and request params never reach these values."""
 
 from __future__ import annotations
 
 CATEGORIES = ("review", "scoring")
 DEFAULT_CATEGORY = "review"
-SCORING_CATEGORY_CAP_MAX = 16_000_000                 # raised from 8M by the user (2026-10-29): "you can do $16"
-SCORING_AGGREGATE_CEILING_MAX = 20_000_000
+SCORING_CATEGORY_CAP_MAX = 30_000_000                 # 8M -> 16M (2026-10-29, "you can do $16") -> 30M (2026-10-30, "raise to 30")
+SCORING_AGGREGATE_CEILING_MAX = 34_000_000            # 20M -> 34M (2026-10-30): +14M with the scoring cap, other headroom unchanged
 REVIEW_RESERVE_USD_MICROS = 30_000_000
 
 
