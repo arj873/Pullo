@@ -377,15 +377,22 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 #               call's worst case, keeps all of INVESTIGATE <= $2.80 as a hard bound)
 #               a v3 lane i (i < 3) may start an investigator call while INVESTIGATE spend < share*(i+1)//3 with the
 #               v3 share = investigation_limit(budget) ($2.80 of $4: exactly v3's numbers); an alternate lane j may
-#               start one while INVESTIGATE spend < min(S + alt*(j+1)//A, share), where S is the INVESTIGATE spend when
-#               the first alternate lane started (from the logged cost records, so replay re-derives it) and alt =
-#               V10_ALT_SPEND_BP of the ceiling ($1.20: the alternate model spends at most that, $0.40 per lane with
-#               unused room rolling forward). Unused v3 room never rolls into the alternate lanes.
+#               start one while INVESTIGATE spend < S + (share - S)*(j+1)//A, where S is the INVESTIGATE spend when the
+#               first alternate lane started (from the logged cost records, so replay re-derives it): the alternate
+#               lanes split ALL the INVESTIGATE room the v3 lanes left, evenly, unused room rolling forward (v3 lanes at
+#               $0.7-0.9 leave $1.9-2.1: about $0.63-0.70 per alternate lane).
 # All of INVESTIGATE therefore stays within v3's own investigation share (hard-bounded at $2.80 by the gateway's
 # admission, whatever the per-lane overshoot), so VERIFY and JUDGE keep at least what v3 reserves for them
 # (verifyReserveBp, 30% = $1.20).
-# On v3 Terra traces (about $0.23-0.33 per lane) a v10 run's INVESTIGATE reaches roughly $1.0 + $1.2 at most, leaving
-# about $1.8 for VERIFY and JUDGE.
+#
+# Final-answer reserve (V10_FINAL_RULE). Before each alternate-lane hop that is not already its last turn, with r = the
+# gateway's worst-case reservation of that request on the alternate model (reservation(price, estimated input tokens,
+# maxOutputTokens): about $0.29-0.42 for gpt-5.6-terra at 40k-90k input tokens), the lane may explore only while
+# INVESTIGATE spend + V10_FINAL_RESERVE_CALLS * r <= its ceiling (this call plus one final-answer call of the same
+# size at worst case). Otherwise the hop is sent as the lane's final-answer turn (the retrieval "last turn": no tools
+# run, it must answer from what it has seen), and the exploration floor is skipped (reason `turns`). A lane that starts
+# below its ceiling therefore always makes its final-answer call; only if that call itself fails or is refused does the
+# coverage-note path apply.
 #
 # Optional alternate lanes (V10_ALT_OPTIONAL_TEXT, v10_optional_error). An alternate lane that reaches its OWN cap
 # (its spend share, its tool calls, its time slice - the last lane's slice is the stage ceiling) or whose model call
@@ -411,13 +418,18 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 V10_AGENTS = prompts.V10_AGENTS
 V10_ALT_AGENTS = prompts.V10_ALT_AGENTS
 V10_BEHAVIOR = "v3-cross-model-lanes@1"
-V10_BUDGET_RULE = "v3-cross-model-budget-split@1"
-V10_ALT_SPEND_BP = 3000               # the alternate model's own INVESTIGATE spend cap (30% of the ceiling)
+V10_BUDGET_RULE = "v3-cross-model-budget-split@2"
 V10_BUDGET_TEXT = ("K = 6 lanes in V10_AGENTS order (the three v3 specialists, then their alternate-model lanes); tool "
                    "calls < (2*pool)*(i+1)//K with the v3 pool; time C*(i+1)//K s with C twice the v3 INVESTIGATE "
                    "ceiling; spend: v3 lane i < share*(i+1)//3 with share = investigation_limit (exactly v3); "
-                   "alternate lane j < min(S + alt*(j+1)//A, share) with S = INVESTIGATE spend when the first "
-                   "alternate lane started and alt = V10_ALT_SPEND_BP of the ceiling; per-agent caps unchanged")
+                   "alternate lane j < S + (share - S)*(j+1)//A with S = INVESTIGATE spend when the first alternate "
+                   "lane started (all remaining INVESTIGATE room, split evenly, rolling forward); per-agent caps "
+                   "unchanged")
+V10_FINAL_RULE = "alt-final-answer-reserve@1"
+V10_FINAL_RESERVE_CALLS = 2           # explore only while spend + 2 * worst-case reservation <= the lane's ceiling
+V10_FINAL_TEXT = ("an alternate lane's hop that is not its last turn is sent as its final-answer turn (last turn, no "
+                  "tools run; the exploration floor is skipped) when INVESTIGATE spend + V10_FINAL_RESERVE_CALLS * r "
+                  "> its spend ceiling, r = the gateway's worst-case reservation of that request on the alternate model")
 V10_VERIFY_TEXT = ("v3 VERIFY unchanged on the v3 lanes (round-robin in v3 order, output order inside a lane; beyond "
                    "specialists.MAX_VERIFY_CANDIDATES -> 'over-cap'; the merge retry), then the alternate lanes' kept "
                    "candidates round-robin within the same cap; alternate restatements -> 'merged' without a retry")
@@ -545,13 +557,16 @@ def v10_primary_spend_cumulative(budget: dict) -> list[int]:
     return specialists.cumulative(investigation_limit(budget))
 
 
-def v10_alt_spend_top(budget: dict) -> int:
-    return min(v10_spend_top(budget), budget["maxUsdMicros"] * V10_ALT_SPEND_BP // 10_000)
-
-
 def v10_alt_spend_ceiling(start: int, j: int, budget: dict) -> int:
-    """v10 alternate lane j (0-based): INVESTIGATE spend ceiling given S = `start`, the spend when the first started."""
-    return min(start + specialists.cumulative(v10_alt_spend_top(budget), len(V10_ALT_AGENTS))[j], v10_spend_top(budget))
+    """v10 alternate lane j (0-based): INVESTIGATE spend ceiling given S = `start`, the spend when the first started:
+    S plus the cumulative even split of all the room left under the INVESTIGATE share (never above it)."""
+    top = v10_spend_top(budget)
+    return min(start + specialists.cumulative(max(0, top - start), len(V10_ALT_AGENTS))[j], top)
+
+
+def v10_final_answer_due(spent: int, ceiling: int, r: int) -> bool:
+    """V10_FINAL_RULE: True when this alternate-lane hop must be its final-answer turn."""
+    return spent + V10_FINAL_RESERVE_CALLS * r > ceiling
 
 
 def v10_time_slices(ceiling_sec: int | None) -> list[int] | None:
@@ -567,9 +582,10 @@ def v10_budget_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_cal
                           "pool": v10_tool_pool(policy, budget, tool_max_calls),
                           "cumulative": v10_tool_cumulative(policy, budget, tool_max_calls)},
             "spendUsdMicros": {"share": v10_spend_top(budget), "cumulative": v10_primary_spend_cumulative(budget),
-                               "altTop": v10_alt_spend_top(budget),
-                               "altCumulative": specialists.cumulative(v10_alt_spend_top(budget), a),
-                               "altSpendBp": V10_ALT_SPEND_BP},
+                               "alt": "S + (share - S)*(j+1)//A, S = INVESTIGATE spend when the first alternate "
+                                      f"lane started, A = {a}",
+                               "finalAnswer": {"rule": V10_FINAL_RULE, "text": V10_FINAL_TEXT,
+                                               "reserveCalls": V10_FINAL_RESERVE_CALLS}},
             "timeSec": {"ceiling": c, "cumulative": v10_time_slices(c)},
             "perAgent": {"investigatorTurns": policy.investigator_turns, "agentToolCalls": policy.agent_tool_calls,
                          "hostMaxCalls": tool_max_calls, "contextChars": policy.context_chars,

@@ -23,7 +23,8 @@ import json
 from reviewer.contracts import (check_finding_provenance, citable_tool_calls, is_turn_schema, require, terminal_payload,
                                 validate)
 from reviewer.contracts.budget import (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state,
-                                      investigation_limit, stage_ceiling, stage_deadline_exceeded)
+                                      estimate_input_tokens, investigation_limit, reservation, stage_ceiling,
+                                      stage_deadline_exceeded)
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
@@ -736,6 +737,19 @@ class Engine:
         an alternate lane (systemic codes, a run hard or soft deadline) is an incomplete entry exactly as in v3."""
         return self.v10 and prompts.is_alt_lane(agent) and lanes.v10_optional_error(err)
 
+    def final_answer_due(self, stage: str, role: str, agent: str, request: dict) -> bool:
+        """impact@v10 (lanes.V10_FINAL_RULE): an alternate-lane investigator hop must be sent as its final-answer turn
+        when exploring could leave no worst-case reservation for one final-answer call under its spend ceiling.
+        False for every other chain (no change to any other version)."""
+        if not (self.v10 and prompts.is_alt_lane(agent) and stage == "INVESTIGATE" and role == "investigator"
+                and self._spend_ceiling is not None):
+            return False
+        spec = self.lane_profile(agent)["roles"]["investigator"]
+        if spec["price"] is None:
+            return False
+        r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
+        return lanes.v10_final_answer_due(self.stage_spend(stage), self._spend_ceiling, r)
+
     def lane_profile(self, agent: str) -> dict:
         """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
         lane, else the run's profile."""
@@ -821,7 +835,8 @@ class Engine:
         draft_id = draft_end.final_call
         rec = dict(stage=stage, agentId=agent, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
         turns_left = self.policy.investigator_turns - draft_end.hops
-        skip = ("turns" if turns_left < 2 else "tool-calls" if first.tools_exhausted or first._allowed() == 0
+        skip = ("turns" if turns_left < 2 or draft_end.forced_final       # v10 alt: its final-answer turn was sent
+                else "tool-calls" if first.tools_exhausted or first._allowed() == 0
                 else "context-chars" if first.context_exhausted else None)
         if skip is not None:
             self.recorder.append("retrieval.floor", decision="skipped", reason=skip, **rec)

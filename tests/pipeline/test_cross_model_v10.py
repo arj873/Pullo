@@ -316,14 +316,33 @@ class Rules(unittest.TestCase):
             self.assertEqual(d["timeSec"]["cumulative"], secs)                                # v3 lanes keep their slices
             s = d["spendUsdMicros"]
             self.assertEqual(s["cumulative"], [933_333, 1_866_666, 2_800_000])               # exactly v3's
-            self.assertEqual((s["share"], s["altTop"], s["altCumulative"]),
-                             (2_800_000, 1_200_000, [400_000, 800_000, 1_200_000]))
+            self.assertEqual(s["share"], 2_800_000)
+            self.assertEqual(s["finalAnswer"]["rule"], lanes.V10_FINAL_RULE)
         b = {"maxUsdMicros": 4_000_000, "verifyReserveBp": 3000}
-        self.assertEqual([lanes.v10_alt_spend_ceiling(1_000_000, j, b) for j in range(3)],
-                         [1_400_000, 1_800_000, 2_200_000])
-        # v3 lanes that spent nearly their whole share leave the alternate model only up to v3's investigation share
-        self.assertEqual([lanes.v10_alt_spend_ceiling(2_600_000, j, b) for j in range(3)], [2_800_000] * 3)
+        # the alternate lanes split ALL the room the v3 lanes left under v3's $2.80 share, evenly, rolling forward:
+        # v3 lanes at $0.70 / $0.85 / $0.90 leave $0.70 / $0.65 / $0.63 per alternate lane
+        self.assertEqual([lanes.v10_alt_spend_ceiling(700_000, j, b) for j in range(3)],
+                         [1_400_000, 2_100_000, 2_800_000])
+        self.assertEqual([lanes.v10_alt_spend_ceiling(850_000, j, b) for j in range(3)],
+                         [1_500_000, 2_150_000, 2_800_000])
+        self.assertEqual([lanes.v10_alt_spend_ceiling(900_000, j, b) for j in range(3)],
+                         [1_533_333, 2_166_666, 2_800_000])
+        self.assertEqual([lanes.v10_alt_spend_ceiling(2_600_000, j, b) for j in range(3)],
+                         [2_666_666, 2_733_333, 2_800_000])
+        for start in (0, 1, 999_999, 2_799_999, 2_800_000, 3_100_000):     # never above v3's INVESTIGATE share
+            self.assertTrue(all(lanes.v10_alt_spend_ceiling(start, j, b) <= 2_800_000 for j in range(3)), start)
         self.assertEqual(b["maxUsdMicros"] - lanes.v10_spend_top(b), 1_200_000)     # VERIFY + JUDGE keep v3's >= 30%
+
+    def test_final_answer_reserve_rule(self):
+        # explore only while spend + 2 * r <= ceiling (this call and one final-answer call, both at worst case)
+        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_700_000, 350_000))
+        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_699_999, 350_000))
+        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_000_001, 1))
+        from reviewer.contracts.budget import reservation
+        from reviewer.pilot import repository_profile as RP
+        alt = RP.repository_profile(True, terra(), impact_version=10)["alternates"]["investigator"]
+        self.assertEqual([reservation(alt["price"], t, alt["caps"]["maxOutputTokens"]) for t in (40_000, 90_000)],
+                         [292_000, 417_000])                  # gpt-5.6-terra worst case at 40k / 90k input tokens
 
 
 # ---------------------------------------------------------------- end to end
@@ -436,7 +455,7 @@ class EndToEnd(V10Rig):
     def test_no_alternate_answer_at_all_makes_the_run_partial(self):
         m = self.big()
         main, alt = self.v3_only_script(m)
-        with mock.patch.object(lanes, "V10_ALT_SPEND_BP", 1):            # $0.0004 for all alternate lanes
+        with mock.patch.object(lanes, "v10_alt_spend_ceiling", lambda start, j, budget: start):   # no room at all
             res, spy = self.record_v10(m, script(*main), script(*alt))
             rep = self.replay_v10(m, res)
         self.assertEqual(res.status, "partial")
@@ -445,8 +464,56 @@ class EndToEnd(V10Rig):
         notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete)
         self.assertEqual(notes, [f"alt-lane-capped: {a} (`budget-exhausted`; status budget)" for a in ALT]
                          + ["no-alternate-answer: no alternate lane answered (counted as incomplete)"])
-        self.assertEqual(spy.inner[ALT_MODEL].calls, 1)
+        self.assertEqual(spy.inner[ALT_MODEL].calls, 0)
         self.assertEqual((rep.status, rep.incomplete), (res.status, res.incomplete))
+
+    def test_a_tight_alternate_share_still_gets_an_answer_through_the_final_answer_turn(self):
+        m = self.big()
+        hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
+        main, _ = self.v3_only_script(m)
+        # every alternate hop is "too expensive to explore": each lane's first hop is its final-answer turn
+        alt = [answered_by(e, ALT_MODEL) for e in (sfinal("contracts.alt", 0, hio), sfinal("logic.alt", 0),
+                                                    sfinal("safety.alt", 0))]
+        main = main[:-1] + [vfinal(2, m, path="src/app/io.py", line=2),
+                            judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hu)]),
+                                  w([shid("contracts.alt", 0, hio)]))]
+        with mock.patch.object(lanes, "V10_FINAL_RESERVE_CALLS", 10 ** 6):
+            res, spy = self.record_v10(m, script(*main), script(*alt))
+            rep = self.replay_v10(m, res)
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        self.assertEqual((rep.status, rep.incomplete), ("completed", []))
+        alt_reqs = [r for r in spy.requests if r["model"] == ALT_MODEL]
+        self.assertEqual(len(alt_reqs), 3)                                 # one final-answer call per lane
+        self.assertTrue(all("This is your last turn" in json.dumps(doc_of(r)["retrieval"]) for r in alt_reqs))
+        self.assertFalse(any(json.dumps(doc_of(r)["retrieval"]).count("This is your last turn")
+                             for r in spy.requests if r["model"] == MAIN_MODEL and r["role"] == "investigator"))
+        self.assertFalse(any(e["agentId"] in ALT for e in events_of(res) if e["type"] == "tool.call"))
+        floors = [(e["agentId"], e["decision"], e.get("reason")) for e in events_of(res)
+                  if e["type"] == "retrieval.floor" and e["agentId"] in ALT]
+        self.assertEqual(floors, [(a, "skipped", "turns") for a in ALT])  # no floor continuation past the reserve
+        self.assertEqual([a["status"] for a in self.payload(res)["payload"]["agents"]], ["completed"] * 6)
+        self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "contracts.alt", "logic"])
+
+    def test_investigate_stays_within_v3s_share_and_verify_keeps_its_floor(self):
+        m = self.big()
+        main, alt, _ = self.e2e(m)
+        res, _ = self.record_v10(m, main, alt)
+        costs = [e["record"] for e in events_of(res) if e["type"] == "cost"]
+        inv = sum(c["usdMicros"] for c in costs if c["stage"] == "INVESTIGATE")
+        budget = V10_PLAN["budget"]
+        self.assertLessEqual(inv, investigation_limit(budget))
+        self.assertGreaterEqual(budget["maxUsdMicros"] - investigation_limit(budget), 1_200_000)
+        # the alternate lanes' ceilings are the even split of what the v3 lanes left, never above the share
+        errs_seen = []
+        orig = lanes.v10_alt_spend_ceiling
+
+        def spy(start, j, b):
+            errs_seen.append(orig(start, j, b))
+            return errs_seen[-1]
+        with mock.patch.object(lanes, "v10_alt_spend_ceiling", spy):
+            self.record_v10(self.big(), *self.e2e(self.big())[:2], eval_id="evr_" + "d" * 16)
+        self.assertEqual(len(errs_seen), 3)
+        self.assertEqual(errs_seen[-1], investigation_limit(budget))
 
     def test_live_calls_disabled_on_the_alternate_lanes_makes_the_run_partial(self):
         m = self.big()
@@ -710,7 +777,8 @@ class Identity(V10Rig):
         v7 = self.spec(m, backend, profile=V7_PROFILE, plan=V7_PLAN, retrieval=V7_POLICY)
         base, b3, b7 = (identity.config_snapshot_id(s) for s in (spec, v3, v7))
         self.assertEqual(len({base, b3, b7}), 3)
-        for name, value in (("V10_ALT_SPEND_BP", 2000), ("V10_BUDGET_TEXT", "x"), ("V10_VERIFY_TEXT", "x"),
+        for name, value in (("V10_FINAL_RESERVE_CALLS", 3), ("V10_FINAL_TEXT", "x"), ("V10_BUDGET_TEXT", "x"),
+                            ("V10_VERIFY_TEXT", "x"),
                             ("V10_BEHAVIOR", "x")):
             orig = getattr(lanes, name)
             try:

@@ -225,6 +225,7 @@ class ChainEnd:
     stop: tuple | None = None              # (incomplete reason, TypedError) from a gate during execution
     hops: int = 0
     tool_calls: int = 0
+    forced_final: bool = False             # impact@v10 alternate lane: a hop was sent as its final-answer turn
 
 
 class Chain:
@@ -398,6 +399,11 @@ class Chain:
             if self.dispositions is not None:
                 state["dispositionCallsRemaining"] = self.disposition_left()
             req = build(hop, state)
+            forced = False
+            if not state["lastTurn"] and eng.final_answer_due(self.stage, self.role, self.agent, req):
+                state["lastTurn"] = forced = True       # impact@v10 alternate lane: its final-answer reserve
+                req = build(hop, state)
+                end.forced_final = True
             ordinal = eng.next_ordinal(self.stage, self.role, self.agent)
             out, err, attempts = eng.model_call(self.stage, self.role, self.agent, ordinal, req)
             end.call_ids += [a.call_id for a in attempts if a.call_id]
@@ -411,7 +417,7 @@ class Chain:
                 end.tool_calls = self.requested_calls
                 return end
             requests = out["contextRequests"]
-            if hop == self.turns - 1:
+            if hop == self.turns - 1 or forced:
                 end.exhausted, end.unread = "turns", requests
                 end.tool_calls = self.requested_calls
                 return end
