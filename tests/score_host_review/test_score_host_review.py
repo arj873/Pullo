@@ -6,7 +6,7 @@ import unittest
 from tests.score_host_review.common import CFG, EVR, EVR2, OPUS, ROOT, S, SCOPE, SENT, URL, Env
 from reviewer.runtime import RuntimeLedger
 from reviewer.runtime.catalog import worst_case_router_micros
-from reviewer.runtime.scoring_budget import SCORING_CATEGORY_CAP_MAX
+from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
 
 NEAR_CAP = SCORING_CATEGORY_CAP_MAX - 300_000          # prior scoring spend: phase 1/2 fit, the 12-pair set does not
 
@@ -80,7 +80,7 @@ class Boundaries(Env):
         self.setUp()
         L = RuntimeLedger(self.ledger_path, 50_000_000)
         self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
-        L.finish("rev", outcome="processed", routerCostUsdMicros=19_999_000, tokenPricedUsdMicros=19_999_000, upstreamInferenceCostUsdMicros=None, isByok=None)
+        L.finish("rev", outcome="processed", routerCostUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 1_000, tokenPricedUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 1_000, upstreamInferenceCostUsdMicros=None, isByok=None)
         r = self.host().execute_offline()
         self.assertFalse(r["complete"])
         self.assertNotIn("ScorePair", NAMES(self.transport))
@@ -104,7 +104,7 @@ class Boundaries(Env):
             self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
             L.finish("rev", outcome="processed", routerCostUsdMicros=review, tokenPricedUsdMicros=review, upstreamInferenceCostUsdMicros=None, isByok=None)
             return self.host().execute_offline()
-        edge = 20_000_000 - c4 - W
+        edge = SCORING_AGGREGATE_CEILING_MAX - c4 - W
         self.assertTrue(run(edge)["complete"])
         r = run(edge + 1)
         self.assertEqual((r["fitRefusal"], r["complete"]), ("aggregate-ceiling", False))

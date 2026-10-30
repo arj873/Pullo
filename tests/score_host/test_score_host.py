@@ -14,7 +14,7 @@ from pathlib import Path
 from reviewer.benchmark.model import Golden, RawComment, ScorerCase, ToolReview
 from reviewer.contracts.budget import authorization_digest
 from reviewer.gateway import SpendBook, trusted_authorization
-from reviewer.runtime.scoring_budget import SCORING_CATEGORY_CAP_MAX
+from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
 from reviewer import score_host as S
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS, worst_case_router_micros
@@ -152,7 +152,7 @@ class Composition(Env):
     def test_aggregate_ceiling_blocks_with_prior_review_spend(self):
         L = RuntimeLedger(self.ledger_path, 50_000_000)
         self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
-        L.finish("rev", outcome="processed", routerCostUsdMicros=19_950_000, tokenPricedUsdMicros=19_950_000,
+        L.finish("rev", outcome="processed", routerCostUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 50_000, tokenPricedUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 50_000,
                  upstreamInferenceCostUsdMicros=None, isByok=None)
         rep = self.host().execute_offline()
         self.assertFalse(rep["complete"])
