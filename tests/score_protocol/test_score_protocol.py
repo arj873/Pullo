@@ -128,7 +128,8 @@ class Config(unittest.TestCase):
         self.assertEqual({r: PROFILE["roles"][r]["caps"]["maxOutputTokens"] for r in ("extractor", "deduper")}, {"extractor": 8000, "deduper": 4000})
         # golden pins: any later cap/profile/policy change must update these explicitly
         self.assertEqual(CFG.digest, "sha256:531809f94508f4471aa51d37a4ad48f4e1a87d3751597932b65aeea8ec728b69")
-        self.assertEqual(SH.policy_digest(), "2508ee10258a81cc34cee118122be861673c1d2fafffbe1187004b41f9d1d3a2")   # binds the 16M scoring cap (user, 2026-10-29)
+        # binds the 30M scoring cap / 34M aggregate (user, 2026-10-30; was 2508ee10...d3a2 at 16M/20M, 2026-10-29)
+        self.assertEqual(SH.policy_digest(), "4f54097fbb65a25e82eff635ec30cbf2218bd5b18a6a901b7ab4bb966c892883")
 
     def test_tighter_values_are_allowed(self):
         t = CONFIG.read_text().replace("max_output_tokens = 8000", "max_output_tokens = 4000").replace("max_candidates_per_tool_case = 200", "max_candidates_per_tool_case = 50")
