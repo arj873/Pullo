@@ -377,10 +377,11 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 #               call's worst case, keeps all of INVESTIGATE <= $2.80 as a hard bound)
 #               a v3 lane i (i < 3) may start an investigator call while INVESTIGATE spend < share*(i+1)//3 with the
 #               v3 share = investigation_limit(budget) ($2.80 of $4: exactly v3's numbers); an alternate lane j may
-#               start one while INVESTIGATE spend < S + (share - S)*(j+1)//A, where S is the INVESTIGATE spend when the
-#               first alternate lane started (from the logged cost records, so replay re-derives it): the alternate
-#               lanes split ALL the INVESTIGATE room the v3 lanes left, evenly, unused room rolling forward (v3 lanes at
-#               $0.7-0.9 leave $1.9-2.1: about $0.63-0.70 per alternate lane).
+#               start one while INVESTIGATE spend < S + room*(j+1)//A, where S is the INVESTIGATE spend when the first
+#               alternate lane started (from the logged cost records, so replay re-derives it) and room =
+#               min(share, S + V10_ALT_ROOM_USD_MICROS) - S: the alternate lanes split at most $1.50 (never past v3's
+#               share), evenly, unused room rolling forward ($0.50 per alternate lane for v3 lanes at $0.7-0.9; all of
+#               INVESTIGATE then reaches at most $2.20-2.40, leaving VERIFY + JUDGE at least $1.60-1.80).
 # All of INVESTIGATE therefore stays within v3's own investigation share (hard-bounded at $2.80 by the gateway's
 # admission, whatever the per-lane overshoot), so VERIFY and JUDGE keep at least what v3 reserves for them
 # (verifyReserveBp, 30% = $1.20).
@@ -388,11 +389,17 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 # Final-answer reserve (V10_FINAL_RULE). Before each alternate-lane hop that is not already its last turn, with r = the
 # gateway's worst-case reservation of that request on the alternate model (reservation(price, estimated input tokens,
 # maxOutputTokens): about $0.29-0.42 for gpt-5.6-terra at 40k-90k input tokens), the lane may explore only while
-# INVESTIGATE spend + V10_FINAL_RESERVE_CALLS * r <= its ceiling (this call plus one final-answer call of the same
-# size at worst case). Otherwise the hop is sent as the lane's final-answer turn (the retrieval "last turn": no tools
-# run, it must answer from what it has seen), and the exploration floor is skipped (reason `turns`). A lane that starts
-# below its ceiling therefore always makes its final-answer call; only if that call itself fails or is refused does the
-# coverage-note path apply.
+# INVESTIGATE spend + r + r_final <= its ceiling, r_final = r * V10_FINAL_GROWTH_BP (125%: the final request carries
+# this hop's results too); the LAST alternate lane, whose ceiling is the cap itself, also keeps a margin of r *
+# V10_LAST_LANE_MARGIN_BP (25%). Otherwise the hop is sent as the lane's final-answer turn (the retrieval "last turn":
+# no tools run, it must answer from what it has seen), and the exploration floor is skipped (reason `turns`). A lane
+# that starts below its ceiling therefore always makes its final-answer call; only if that call itself fails or is
+# refused does the coverage-note path apply (a final-answer turn that still requests context is noted as `turns`).
+#
+# VERIFY keeps the JUDGE reserve (as v4/v5: sweeps.judge_reserve_floor, 7.5% of the ceiling), so JUDGE always runs. A
+# reserve stop that cuts only alternate-lane candidates (verified after all of v3's) is a coverage note
+# ("alt-candidates-unverified: ..."), not an incomplete entry; one that cuts a v3 candidate is a VERIFY budget
+# incomplete entry.
 #
 # Optional alternate lanes (V10_ALT_OPTIONAL_TEXT, v10_optional_error). An alternate lane that reaches its OWN cap
 # (its spend share, its tool calls, its time slice - the last lane's slice is the stage ceiling) or whose model call
@@ -425,11 +432,17 @@ V10_BUDGET_TEXT = ("K = 6 lanes in V10_AGENTS order (the three v3 specialists, t
                    "alternate lane j < S + (share - S)*(j+1)//A with S = INVESTIGATE spend when the first alternate "
                    "lane started (all remaining INVESTIGATE room, split evenly, rolling forward); per-agent caps "
                    "unchanged")
-V10_FINAL_RULE = "alt-final-answer-reserve@1"
-V10_FINAL_RESERVE_CALLS = 2           # explore only while spend + 2 * worst-case reservation <= the lane's ceiling
+V10_ALT_ROOM_USD_MICROS = 1_500_000  # the alternate lanes split at most $1.50 of INVESTIGATE (never past v3's share)
+V10_FINAL_RULE = "alt-final-answer-reserve@2"
+V10_FINAL_GROWTH_BP = 12_500          # the final-answer call's worst case: 125% of this hop's (input growth)
+V10_LAST_LANE_MARGIN_BP = 2_500       # the last alternate lane also keeps 25% of r below its ceiling (the cap)
 V10_FINAL_TEXT = ("an alternate lane's hop that is not its last turn is sent as its final-answer turn (last turn, no "
-                  "tools run; the exploration floor is skipped) when INVESTIGATE spend + V10_FINAL_RESERVE_CALLS * r "
-                  "> its spend ceiling, r = the gateway's worst-case reservation of that request on the alternate model")
+                  "tools run; the exploration floor is skipped) when INVESTIGATE spend + r + r*V10_FINAL_GROWTH_BP > "
+                  "its spend ceiling (the last alternate lane: minus r*V10_LAST_LANE_MARGIN_BP), r = the gateway's "
+                  "worst-case reservation of that request on the alternate model")
+V10_VERIFY_RESERVE_TEXT = ("VERIFY starts no candidate once the run's spend reaches the JUDGE reserve "
+                           "(sweeps.judge_reserve_floor); a stop that cuts only alternate-lane candidates is a coverage "
+                           "note, one that cuts a v3 candidate a VERIFY budget incomplete entry")
 V10_VERIFY_TEXT = ("v3 VERIFY unchanged on the v3 lanes (round-robin in v3 order, output order inside a lane; beyond "
                    "specialists.MAX_VERIFY_CANDIDATES -> 'over-cap'; the merge retry), then the alternate lanes' kept "
                    "candidates round-robin within the same cap; alternate restatements -> 'merged' without a retry")
@@ -443,7 +456,7 @@ V10_ALT_OPTIONAL_TEXT = ("an alternate lane that reaches its own cap (spend shar
                          "other end (systemic codes, a run hard or soft deadline) is an INVESTIGATE incomplete entry as "
                          "in v3; no alternate answer at all is an agent-failure incomplete entry (no-alternate-answer); "
                          "host-level ends (replay, cancellation, internal, spend book) fail as in v3")
-V10_CAPPED_CODES = ("budget-exhausted", "deadline-exceeded", "tool-calls-exhausted")
+V10_CAPPED_CODES = ("budget-exhausted", "deadline-exceeded", "tool-calls-exhausted", "turns")
 V10_OPTIONAL_PROVIDER_CODES = ("provider-error", "provider-timeout", "repair-exhausted", "schema-invalid")
 V10_LANE_TIME_PREFIXES = ("INVESTIGATE time slice of ", "INVESTIGATE stage ceiling reached")   # Engine.gate messages
 NO_ALT_ANSWER = "no-alternate-answer"
@@ -501,7 +514,23 @@ def _cause(code: str, err: dict | None) -> str:
     return f"`{code}`"
 
 
-def v10_alt_coverage(payload: dict, events: list, incomplete: list = ()) -> list[str]:
+JUDGE_RESERVE_DROP = "VERIFY stopped before this candidate to keep the JUDGE spend reserve"   # Engine.verify text
+
+
+def _last_turn_sent(lane: str, events: list) -> bool:
+    """Whether the lane's last INVESTIGATE request was its last turn (a final-answer turn that still asked for context
+    ends `turns`, not at a tool-call limit)."""
+    import json as _json
+    for e in reversed(events):
+        if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == lane:
+            try:
+                return bool(_json.loads(e["request"]["messages"][1]["content"])["retrieval"]["lastTurn"])
+            except (ValueError, KeyError, IndexError, TypeError):
+                return False
+    return False
+
+
+def v10_alt_coverage(payload: dict, events: list, incomplete: list = (), verify_drops: list = ()) -> list[str]:
     """impact@v10 coverage notes for the alternate lanes (a pure function of the INVESTIGATE payload, the trace and the
     run's incomplete entries): every alternate lane that ended before its own answer, or whose exploration-floor
     continuation ended without one so its first-hop draft was used. An optional end (v10_optional_error) is
@@ -513,7 +542,8 @@ def v10_alt_coverage(payload: dict, events: list, incomplete: list = ()) -> list
             continue
         if a["status"] != "completed":
             err = a.get("error")
-            code = err["code"] if err is not None else "tool-calls-exhausted"
+            code = err["code"] if err is not None else ("turns" if _last_turn_sent(lane, events)
+                                                         else "tool-calls-exhausted")
             if v10_optional_error(err):
                 kind = "alt-lane-capped" if code in V10_CAPPED_CODES else "alt-lane-failed"
                 out.append(f"{kind}: {lane} ({_cause(code, err)}; status {a['status']})")
@@ -532,6 +562,12 @@ def v10_alt_coverage(payload: dict, events: list, incomplete: list = ()) -> list
                 else:
                     kind = "alt-lane-capped" if e["errorCode"] in V10_CAPPED_CODES else "alt-lane-failed"
                     out.append(f"{kind}: {lane} (`{e['errorCode']}`; its first-hop draft answer was used)")
+    alt_ids = {h["id"] for h in payload.get("hypotheses", ()) if prompts.is_alt_lane(h["specialist"])}
+    cut = [d for d in verify_drops if d["reason"] == "budget" and d.get("detail", "").startswith(JUDGE_RESERVE_DROP)
+           and set(d["subjectIds"]) <= alt_ids]
+    if cut:
+        out.append(f"alt-candidates-unverified: {len(cut)} alternate-lane candidate(s) not verified (`budget-exhausted`:"
+                   " VERIFY kept the JUDGE reserve)")
     if any(prompts.is_alt_lane(a["agentId"]) for a in payload.get("agents", ())) \
             and not any(prompts.is_alt_lane(a["agentId"]) and a["status"] == "completed" for a in payload["agents"]):
         out.append(f"{NO_ALT_ANSWER}: no alternate lane answered (counted as incomplete)")
@@ -557,16 +593,23 @@ def v10_primary_spend_cumulative(budget: dict) -> list[int]:
     return specialists.cumulative(investigation_limit(budget))
 
 
+def v10_alt_top(start: int, budget: dict) -> int:
+    """The alternate lanes' cumulative INVESTIGATE cap: min(v3's share, S + V10_ALT_ROOM_USD_MICROS)."""
+    return min(v10_spend_top(budget), start + V10_ALT_ROOM_USD_MICROS)
+
+
 def v10_alt_spend_ceiling(start: int, j: int, budget: dict) -> int:
     """v10 alternate lane j (0-based): INVESTIGATE spend ceiling given S = `start`, the spend when the first started:
-    S plus the cumulative even split of all the room left under the INVESTIGATE share (never above it)."""
-    top = v10_spend_top(budget)
-    return min(start + specialists.cumulative(max(0, top - start), len(V10_ALT_AGENTS))[j], top)
+    S plus the cumulative even split of the alternate room (v10_alt_top - S), never above v3's share."""
+    top = v10_alt_top(start, budget)
+    return min(start + specialists.cumulative(max(0, top - start), len(V10_ALT_AGENTS))[j], v10_spend_top(budget))
 
 
-def v10_final_answer_due(spent: int, ceiling: int, r: int) -> bool:
-    """V10_FINAL_RULE: True when this alternate-lane hop must be its final-answer turn."""
-    return spent + V10_FINAL_RESERVE_CALLS * r > ceiling
+def v10_final_answer_due(spent: int, ceiling: int, r: int, last: bool = False) -> bool:
+    """V10_FINAL_RULE: True when this alternate-lane hop must be its final-answer turn (`last`: the last alt lane)."""
+    r_final = -(-r * V10_FINAL_GROWTH_BP // 10_000)
+    margin = -(-r * V10_LAST_LANE_MARGIN_BP // 10_000) if last else 0
+    return spent + r + r_final > ceiling - margin
 
 
 def v10_time_slices(ceiling_sec: int | None) -> list[int] | None:
@@ -584,8 +627,12 @@ def v10_budget_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_cal
             "spendUsdMicros": {"share": v10_spend_top(budget), "cumulative": v10_primary_spend_cumulative(budget),
                                "alt": "S + (share - S)*(j+1)//A, S = INVESTIGATE spend when the first alternate "
                                       f"lane started, A = {a}",
+                               "altRoomUsdMicros": V10_ALT_ROOM_USD_MICROS,
                                "finalAnswer": {"rule": V10_FINAL_RULE, "text": V10_FINAL_TEXT,
-                                               "reserveCalls": V10_FINAL_RESERVE_CALLS}},
+                                               "growthBp": V10_FINAL_GROWTH_BP,
+                                               "lastLaneMarginBp": V10_LAST_LANE_MARGIN_BP},
+                               "verifyJudgeReserve": {"text": V10_VERIFY_RESERVE_TEXT,
+                                                      "judgeReserveBp": sweeps.JUDGE_RESERVE_BP}},
             "timeSec": {"ceiling": c, "cumulative": v10_time_slices(c)},
             "perAgent": {"investigatorTurns": policy.investigator_turns, "agentToolCalls": policy.agent_tool_calls,
                          "hostMaxCalls": tool_max_calls, "contextChars": policy.context_chars,

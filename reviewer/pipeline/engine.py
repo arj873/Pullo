@@ -128,7 +128,8 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                           alternate_models=sorted({e["request"]["model"] for e in events if e["type"] == "model.call"
                                                    and e["stage"] == "INVESTIGATE"
                                                    and prompts.is_alt_lane(e["agentId"])}) or None,
-                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events, incomplete)
+                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events, incomplete,
+                                                               artifacts["VERIFY"]["payload"].get("drops", ()))
                                         if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
@@ -748,7 +749,8 @@ class Engine:
         if spec["price"] is None:
             return False
         r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
-        return lanes.v10_final_answer_due(self.stage_spend(stage), self._spend_ceiling, r)
+        return lanes.v10_final_answer_due(self.stage_spend(stage), self._spend_ceiling, r,
+                                          last=agent == lanes.V10_ALT_AGENTS[-1])
 
     def lane_profile(self, agent: str) -> dict:
         """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
@@ -1418,7 +1420,7 @@ class Engine:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
-            if stop is None and shards and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
+            if stop is None and (shards or self.v10) and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
                 stop = ("budget", typed_error(       # impact@v4: keep the JUDGE spend reserve (sweeps.JUDGE_RESERVE_BP)
                     "budget-exhausted", "VERIFY stopped before this candidate to keep the JUDGE spend reserve "
                     f"({sweeps.JUDGE_RESERVE_BP} bp of the run ceiling, {sweeps.BUDGET_RULE})", stage=stage,
@@ -1428,7 +1430,9 @@ class Engine:
                 return True
             if stop is not None:
                 reason, err = stop
-                inc.append(self._inc(stage, reason))
+                # impact@v10: the JUDGE-reserve stop cutting alternate-lane candidates only is a coverage note
+                if not (alt_phase[0] and (err.get("detail") or {}).get("scope") == "judge-reserve"):
+                    inc.append(self._inc(stage, reason))
                 if reason == "cancelled":
                     self.set_fatal(stage, err)
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
@@ -1503,6 +1507,7 @@ class Engine:
         retry_groups = [g for g in merges if not (self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE)]
         alt_groups = [g for g in merges if self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE]
         halted_all = False
+        alt_phase = [False]                     # impact@v10: True while VERIFY takes the alternate lanes' candidates
         for n, hid, draft in primary:
             if consider(n, hid):
                 halted_all = True
@@ -1527,6 +1532,7 @@ class Engine:
                 for m in dups:
                     drops.append(merged_drop(m, g))
             if self.v10 and not halted_all:
+                alt_phase[0] = True
                 for n, hid, draft in extra:
                     if consider(n, hid):
                         halted_all = True

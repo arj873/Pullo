@@ -319,14 +319,14 @@ class Rules(unittest.TestCase):
             self.assertEqual(s["share"], 2_800_000)
             self.assertEqual(s["finalAnswer"]["rule"], lanes.V10_FINAL_RULE)
         b = {"maxUsdMicros": 4_000_000, "verifyReserveBp": 3000}
-        # the alternate lanes split ALL the room the v3 lanes left under v3's $2.80 share, evenly, rolling forward:
-        # v3 lanes at $0.70 / $0.85 / $0.90 leave $0.70 / $0.65 / $0.63 per alternate lane
-        self.assertEqual([lanes.v10_alt_spend_ceiling(700_000, j, b) for j in range(3)],
-                         [1_400_000, 2_100_000, 2_800_000])
-        self.assertEqual([lanes.v10_alt_spend_ceiling(850_000, j, b) for j in range(3)],
-                         [1_500_000, 2_150_000, 2_800_000])
-        self.assertEqual([lanes.v10_alt_spend_ceiling(900_000, j, b) for j in range(3)],
-                         [1_533_333, 2_166_666, 2_800_000])
+        # the alternate lanes split at most $1.50 (never past v3's $2.80 share), evenly, rolling forward:
+        # v3 lanes at $0.70 / $0.85 / $0.90 -> $0.50 per alternate lane, INVESTIGATE <= $2.20 / $2.35 / $2.40,
+        # VERIFY + JUDGE >= $1.80 / $1.65 / $1.60
+        for start, ceilings in ((700_000, [1_200_000, 1_700_000, 2_200_000]),
+                                (850_000, [1_350_000, 1_850_000, 2_350_000]),
+                                (900_000, [1_400_000, 1_900_000, 2_400_000])):
+            self.assertEqual([lanes.v10_alt_spend_ceiling(start, j, b) for j in range(3)], ceilings)
+            self.assertEqual(b["maxUsdMicros"] - ceilings[-1], 4_000_000 - start - 1_500_000)
         self.assertEqual([lanes.v10_alt_spend_ceiling(2_600_000, j, b) for j in range(3)],
                          [2_666_666, 2_733_333, 2_800_000])
         for start in (0, 1, 999_999, 2_799_999, 2_800_000, 3_100_000):     # never above v3's INVESTIGATE share
@@ -334,9 +334,11 @@ class Rules(unittest.TestCase):
         self.assertEqual(b["maxUsdMicros"] - lanes.v10_spend_top(b), 1_200_000)     # VERIFY + JUDGE keep v3's >= 30%
 
     def test_final_answer_reserve_rule(self):
-        # explore only while spend + 2 * r <= ceiling (this call and one final-answer call, both at worst case)
-        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_700_000, 350_000))
-        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_699_999, 350_000))
+        # explore only while spend + r + 1.25 r <= ceiling (the last alternate lane: also a 0.25 r margin)
+        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_675_000, 300_000))
+        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_674_999, 300_000))
+        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_750_000, 300_000, last=True))
+        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_749_999, 300_000, last=True))
         self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_000_001, 1))
         from reviewer.contracts.budget import reservation
         from reviewer.pilot import repository_profile as RP
@@ -477,7 +479,7 @@ class EndToEnd(V10Rig):
         main = main[:-1] + [vfinal(2, m, path="src/app/io.py", line=2),
                             judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hu)]),
                                   w([shid("contracts.alt", 0, hio)]))]
-        with mock.patch.object(lanes, "V10_FINAL_RESERVE_CALLS", 10 ** 6):
+        with mock.patch.object(lanes, "V10_FINAL_GROWTH_BP", 10 ** 12):
             res, spy = self.record_v10(m, script(*main), script(*alt))
             rep = self.replay_v10(m, res)
         self.assertEqual((res.status, res.incomplete), ("completed", []))
@@ -513,7 +515,9 @@ class EndToEnd(V10Rig):
         with mock.patch.object(lanes, "v10_alt_spend_ceiling", spy):
             self.record_v10(self.big(), *self.e2e(self.big())[:2], eval_id="evr_" + "d" * 16)
         self.assertEqual(len(errs_seen), 3)
-        self.assertEqual(errs_seen[-1], investigation_limit(budget))
+        # S + $0.50, S + $1.00, S + $1.50 (the alternate room), all under v3's $2.80 share
+        self.assertEqual([errs_seen[1] - errs_seen[0], errs_seen[2] - errs_seen[1]], [500_000, 500_000])
+        self.assertLessEqual(errs_seen[-1], investigation_limit(budget))
 
     def test_live_calls_disabled_on_the_alternate_lanes_makes_the_run_partial(self):
         m = self.big()
@@ -634,6 +638,8 @@ class Refusal(V10Rig):
 
 
 class V3Verify(V10Rig):
+    v3_only_script = EndToEnd.v3_only_script
+
     def test_verify_is_v3s_output_order_round_robin_with_the_v3_cap(self):
         m = self.big()
         hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
@@ -696,13 +702,64 @@ class V3Verify(V10Rig):
         self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
                          [shid("contracts", 0, hc), shid("logic", 0, dup), shid("contracts.alt", 0, hio)])
 
-    def test_verify_has_no_judge_reserve_stop_as_in_v3(self):
+    @staticmethod
+    def floor_after(n):
+        """A JUDGE-reserve floor that is out of reach for the first `n` VERIFY checks, then reached."""
+        calls = [0]
+
+        def floor(budget):
+            calls[0] += 1
+            return 10 ** 12 if calls[0] <= n else 0
+        return floor
+
+    def reserve_script(self, m):
+        hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
+        main, alt = self.lanes6(contracts=[hc], logic=[hu], **{"contracts.alt": [hio]})
+        return main, alt, (hc, hu, hio)
+
+    def test_a_judge_reserve_stop_that_cuts_only_alternate_candidates_is_a_coverage_note(self):
         m = self.big()
-        main, alt, _ = self.e2e(m)
-        with mock.patch.object(sweeps, "judge_reserve_floor", lambda budget: 0):
-            res, _ = self.record_v10(m, main, alt)
-        self.assertEqual(len(model_calls(res, "VERIFY")), 4)
-        self.assertEqual(res.status, "completed", res.incomplete)
+        main, alt, (hc, hu, hio) = self.reserve_script(m)
+        main += [vfinal(0, m, path="src/app/core.py", line=3), vfinal(1, m, path="src/app/util.py", line=2),
+                 judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hu)]))]
+        with mock.patch.object(sweeps, "judge_reserve_floor", self.floor_after(2)):
+            res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
+                         [shid("contracts", 0, hc), shid("logic", 0, hu)])
+        vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
+        self.assertEqual([(d["subjectIds"], d["reason"]) for d in vpay["drops"]],
+                         [([shid("contracts.alt", 0, hio)], "budget")])
+        notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete, vpay["drops"])
+        self.assertEqual(notes, ["alt-candidates-unverified: 1 alternate-lane candidate(s) not verified "
+                                 "(`budget-exhausted`: VERIFY kept the JUDGE reserve)"])
+        self.assertIn("alt-candidates-unverified: 1", Path(res.review_path).read_text(encoding="utf-8"))
+        self.assertEqual(len(model_calls(res, "JUDGE")), 1)                  # JUDGE ran
+
+    def test_a_judge_reserve_stop_that_cuts_a_v3_candidate_is_incomplete(self):
+        m = self.big()
+        main, alt, (hc, hu, hio) = self.reserve_script(m)
+        main += [vfinal(0, m, path="src/app/core.py", line=3), judge(w([shid("contracts", 0, hc)]))]
+        with mock.patch.object(sweeps, "judge_reserve_floor", self.floor_after(1)):
+            res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([(i["stage"], i["reason"]) for i in res.incomplete], [("VERIFY", "budget")])
+        vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
+        self.assertEqual([d["subjectIds"] for d in vpay["drops"] if d["reason"] == "budget"],
+                         [[shid("logic", 0, hu)], [shid("contracts.alt", 0, hio)]])
+        self.assertEqual(len(model_calls(res, "JUDGE")), 1)
+
+    def test_a_final_answer_turn_that_still_requests_context_is_noted_as_turns(self):
+        m = self.big()
+        main, _ = self.v3_only_script(m)
+        alt = [answered_by(e, ALT_MODEL) for e in (ask("contracts.alt", 0), sfinal("logic.alt", 0),
+                                                    sfinal("safety.alt", 0))]
+        with mock.patch.object(lanes, "V10_FINAL_GROWTH_BP", 10 ** 12):
+            res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete)
+        self.assertEqual(notes, ["alt-lane-capped: contracts.alt (`turns`; status failed)"])
+        self.assertFalse(any(e["agentId"] == "contracts.alt" for e in events_of(res) if e["type"] == "tool.call"))
 
 
 class AltDeadlines(V10Rig):
@@ -777,7 +834,8 @@ class Identity(V10Rig):
         v7 = self.spec(m, backend, profile=V7_PROFILE, plan=V7_PLAN, retrieval=V7_POLICY)
         base, b3, b7 = (identity.config_snapshot_id(s) for s in (spec, v3, v7))
         self.assertEqual(len({base, b3, b7}), 3)
-        for name, value in (("V10_FINAL_RESERVE_CALLS", 3), ("V10_FINAL_TEXT", "x"), ("V10_BUDGET_TEXT", "x"),
+        for name, value in (("V10_FINAL_GROWTH_BP", 15_000), ("V10_LAST_LANE_MARGIN_BP", 0),
+                            ("V10_ALT_ROOM_USD_MICROS", 1_000_000), ("V10_FINAL_TEXT", "x"), ("V10_BUDGET_TEXT", "x"),
                             ("V10_VERIFY_TEXT", "x"),
                             ("V10_BEHAVIOR", "x")):
             orig = getattr(lanes, name)
