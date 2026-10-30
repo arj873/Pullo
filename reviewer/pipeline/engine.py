@@ -1162,7 +1162,8 @@ class Engine:
                 else:
                     if unit_tool is None:        # the units start: keep VERIFY room for the known lens candidates
                         lens_n = min(deepcov.MAX_VERIFY, self._lens_candidates(hyps))
-                        utop = deepcov.unit_top(self.budget, lens_n)
+                        utop = deepcov.unit_top(self.budget, lens_n, self._max_reservation(stage),
+                                                self._lens_merge_groups(hyps))
                         req = self._requested_reads(stage)
                         used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
                         cap = deepcov.unit_read_cap(req, min(self.policy.run_tool_calls, self.budget["maxToolCalls"])
@@ -1219,6 +1220,15 @@ class Engine:
         lens = [h for h in hyps if h["specialist"] in deepcov.LENS_AGENTS]
         gone = {m for g in specialists.merge(lens) for m in g["mergedIds"]}
         return sum(1 for h in lens if h["id"] not in gone)
+
+    def _max_reservation(self, stage: str) -> int:
+        """The largest investigator reservation logged so far (a worst-case final-answer call)."""
+        return max((e["record"]["reservedUsdMicros"] for e in self.recorder.events if e["type"] == "cost"
+                    and e["record"].get("stage") == stage and e["record"]["role"] == "investigator"), default=0)
+
+    @staticmethod
+    def _lens_merge_groups(hyps: list) -> int:
+        return len(specialists.merge([h for h in hyps if h["specialist"] in deepcov.LENS_AGENTS]))
 
     def _reread_used(self) -> int:
         return sum(1 for e in self.recorder.events if e["type"] == "tool.call"
@@ -1707,6 +1717,10 @@ class Engine:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
+            if stop is None and self.v12 and alt_phase[0] and self.needs_reconciliation:
+                stop = ("verifier-failure", typed_error(   # impact@v12: no further provider call for unit candidates
+                    "internal", "VERIFY started no further coverage-unit candidate: the spend book needs operator "
+                    "reconciliation", stage=stage, detail={"scope": "needs-reconciliation"}))
             if stop is None and self.v12 and alt_phase[0]:     # impact@v12: unit candidates need run tool calls left
                 used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
                 left = min(self.policy.run_tool_calls, self.budget["maxToolCalls"]) - used
@@ -1729,11 +1743,12 @@ class Engine:
                 # impact@v10: the JUDGE-reserve stop cutting alternate-lane candidates only is a coverage note
                 # impact@v12: any non-cancel stop cutting unit candidates only is a coverage note (deepcov.coverage_lines)
                 if not (alt_phase[0] and ((err.get("detail") or {}).get("scope") == "judge-reserve"
-                                          or (self.v12 and reason != "cancelled"))):
+                                          or (self.v12 and reason != "cancelled" and not self.needs_reconciliation))):
                     inc.append(self._inc(stage, reason))
                 if reason == "cancelled":
                     self.set_fatal(stage, err)
-                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
+                drops.append({"subjectIds": [hid], "stage": "VERIFY",
+                              "reason": {"verifier-failure": "verifier-failed"}.get(reason, reason),
                               "detail": err["message"][:500]})
                 return False
             name = (deepcov.verifier_agent(kept - 1) if self.v12
@@ -2055,7 +2070,8 @@ class Engine:
             reason, drop = "budget", "budget"
         else:
             reason, drop = "verifier-failure", "verifier-failed"
-        if reason == "cancelled" or not self._verify_note_only:
+        if reason == "cancelled" or not self._verify_note_only or err["code"] in deepcov.VERIFY_NEVER_NOTES \
+                or self.needs_reconciliation:      # v12 unit candidate: a note only for limit and provider ends
             inc.append(self._inc("VERIFY", reason, err["code"]))
         if reason == "cancelled":
             self.set_fatal("VERIFY", err)

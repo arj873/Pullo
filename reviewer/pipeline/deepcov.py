@@ -131,7 +131,7 @@ _L10N_NAME = re.compile(r"^messages(_[a-z]{2,3}([_-][a-z0-9]{2,4})?)?\.propertie
 TEST_DIRS = frozenset({"test", "tests", "__tests__", "testsuite", "spec", "specs", "__mocks__", "testing", "e2e"})
 _TEST_NAME = re.compile(r"^(test_.*\.py|.*_test\.(py|go|rb|js|ts|jsx|tsx)|conftest\.py"
                         r"|.*\.(test|spec|mock)\.[cm]?[jt]sx?|.*_spec\.rb)$", re.I)
-_TEST_CLASS = re.compile(r"^(Test[A-Z0-9_]\w*|\w*Tests?|\w*IT|\w*Spec)\.(java|kt|cs|swift|scala|groovy)$")
+_TEST_CLASS = re.compile(r"^((Test[A-Z0-9_]\w*|\w*Tests?|\w*[a-z0-9]IT)\.(java|kt|cs|swift|scala|groovy)|\w*Spec\.groovy)$")
 SKIP_REASONS = ("deleted", "generated", "no-text-diff", "binary", "oversized", "no-code-change", "docs", "localisation",
                 "tests")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -368,10 +368,13 @@ def lens_top(budget: dict) -> int:
     return min(spend_top(budget), _bp(budget, LENS_SPEND_BP))
 
 
-def unit_top(budget: dict, lens_candidates: int) -> int:
+def unit_top(budget: dict, lens_candidates: int, overshoot: int = 0, retries: int = 0) -> int:
     """The units' INVESTIGATE top: spend_top, lowered so the run keeps the JUDGE reserve plus LENS_VERIFY_RESERVE_BP for
-    each lens candidate already known when the units start (lens candidates are never cut by the units' spend)."""
-    keep = _bp(budget, sweeps.JUDGE_RESERVE_BP) + lens_candidates * _bp(budget, LENS_VERIFY_RESERVE_BP)
+    each lens candidate already known when the units start and for one merge retry per lens merge group (`retries`),
+    and `overshoot` for the last unit's final-answer call, which FINAL_RULE lets end above its ceiling (the engine
+    passes the largest investigator reservation logged so far). Lens candidates are never cut by the units' spend."""
+    keep = (_bp(budget, sweeps.JUDGE_RESERVE_BP) + (lens_candidates + retries) * _bp(budget, LENS_VERIFY_RESERVE_BP)
+            + overshoot)
     return max(0, min(spend_top(budget), budget["maxUsdMicros"] - keep))
 
 
@@ -682,6 +685,7 @@ def coverage_lines(plan_doc: dict, payload: dict, events: list, verify_drops=(),
 
 
 UNIT_NOTE_DROPS = ("budget", "deadline", "verifier-failed", "over-cap")
+VERIFY_NEVER_NOTES = ("internal", "contract-violation")   # always incompletes, as v3 and v12 INVESTIGATE treat them
 
 
 def unit_files(unit: dict) -> dict:

@@ -987,3 +987,90 @@ class GateFixes(V12Rig):
         agents = {a["agentId"]: a for a in payload(res, "INVESTIGATE")["agents"]}
         self.assertEqual((agents["cover-01"]["status"], agents["cover-02"]["status"]), ("failed", "failed"))
         self.assertNotIn("INVESTIGATE", [i["stage"] for i in res.incomplete], res.incomplete)
+
+
+# ---------------------------------------------------------------- 10. re-gate fixes (fb48656 GO-WITH-FIXES)
+
+class RegateFixes(V12Rig):
+    base_script = GateFixes.base_script
+
+    def test_r1_spec_and_it_names_outside_tests_are_eligible(self):
+        for p in ("operator/src/main/java/org/k/KeycloakSpec.java", "operator/RealmSpec.kt", "src/AUDIT.java",
+                  "src/Latest.java", "src/Contest.kt", "src/Spec.java"):
+            self.assertFalse(deepcov.is_test(p), p)
+        for p in ("src/FooIT.java", "src/FooTest.java", "src/FooTests.kt", "src/TestFoo.java", "src/FooSpec.groovy",
+                  "operator/src/test/java/org/k/KeycloakSpec.java"):
+            self.assertTrue(deepcov.is_test(p), p)
+
+    def test_r2_a_spend_book_failure_on_a_unit_candidate_stays_incomplete_and_stops_later_units(self):
+        from unittest import mock
+        from reviewer.gateway import SettlementError
+        from reviewer.gateway.gateway import Gateway
+        m = self.case12()
+        e, (hl, hb, hs) = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1),
+                                               vdone("verifier-03", m, path="src/svc.py", line=2)])
+        real = Gateway.call
+
+        def call(gw, stage, role, agent, *a, **kw):
+            if stage == "VERIFY" and agent == "verifier-02":
+                raise SettlementError("scripted spend-book failure")
+            return real(gw, stage, role, agent, *a, **kw)
+        with mock.patch.object(Gateway, "call", call):
+            res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "partial")
+        self.assertIn(("VERIFY", "verifier-failure"), [(i["stage"], i["reason"]) for i in res.incomplete])
+        self.assertEqual([c["agentId"] for c in model_calls(res, "VERIFY")], ["verifier-01"])   # no further unit call
+        drops = {d["subjectIds"][0]: d for d in payload(res, "VERIFY")["drops"]}
+        self.assertIn("needs operator reconciliation", drops[hid("cover-02", 0, hs)]["detail"])
+
+    def test_r2_a_contract_violation_on_a_unit_candidate_stays_incomplete(self):
+        from unittest import mock
+        from reviewer.gateway import typed_error
+        from reviewer.pipeline import engine as E
+        from reviewer.pipeline.retrieval import ChainEnd
+        m = self.case12()
+        e, _ = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1),
+                                    vdone("verifier-03", m, path="src/svc.py", line=2)])
+        real = E.Engine._verifier_chain
+
+        def chain(eng, session, *a, **kw):
+            if session.agent_id == "verifier-02":
+                return ChainEnd(call_ids=[], error=typed_error("contract-violation", "scripted", stage="VERIFY"))
+            return real(eng, session, *a, **kw)
+        with mock.patch.object(E.Engine, "_verifier_chain", chain):
+            res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "partial")
+        self.assertIn(("VERIFY", "verifier-failure", "contract-violation"),
+                      [(i["stage"], i["reason"], i.get("detail")) for i in res.incomplete])
+
+    def test_r3_unit_top_keeps_verify_room_for_14_lens_candidates_overshoot_and_retries(self):
+        b = V12_PLAN["budget"]
+        top = deepcov.unit_top(b, 14, overshoot=300_000, retries=2)
+        self.assertEqual(top, 1_800_000)
+        # worst case: INVESTIGATE ends one final-answer call above the units' top; what is left still covers the
+        # JUDGE reserve plus $0.10 for each lens candidate and each merge retry
+        left = b["maxUsdMicros"] - (top + 300_000)
+        self.assertGreaterEqual(left, b["maxUsdMicros"] - sweeps.judge_reserve_floor(b) + 16 * 100_000)
+        self.assertEqual(deepcov.unit_top(b, 0), 2_600_000)
+
+    def test_r3_the_engine_passes_the_largest_logged_reservation_and_merge_groups(self):
+        from unittest import mock
+        m = self.case12()
+        e, (hl, hb, hs) = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1),
+                                               vdone("verifier-02", m, path="src/handlers/b.py", line=2),
+                                               vdone("verifier-03", m, path="src/svc.py", line=2)])
+        seen, real = [], deepcov.agent_ceiling
+
+        def spy(unit, j, spent, budget, k, top=None):
+            if unit:
+                seen.append(top)
+            return real(unit, j, spent, budget, k, top)
+        with mock.patch.object(deepcov, "agent_ceiling", spy):
+            res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "completed", res.incomplete)
+        units_start = next(n for n, x in enumerate(events_of(res)) if x["type"] == "model.call"
+                           and x["agentId"] == "cover-01")
+        r = max(x["record"]["reservedUsdMicros"] for x in events_of(res)[:units_start] if x["type"] == "cost"
+                and x["record"]["role"] == "investigator")
+        self.assertEqual(seen, [deepcov.unit_top(V12_PLAN["budget"], 1, r, 0)] * 2)
+        self.assertGreater(r, 0)
