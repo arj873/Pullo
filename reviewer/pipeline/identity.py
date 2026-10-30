@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import lanes, prompts, repocov, retrieval, specialists, sweeps
+from . import deepcov, lanes, prompts, repocov, retrieval, specialists, sweeps
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -101,6 +101,8 @@ def plan_specialists(spec) -> list[str]:
     pol = retrieval_policy(spec)
     if isinstance(pol, retrieval.RetrievalPolicy) and pol.specialists is not None \
             and "investigator" in turn_roles(spec.profile):
+        if pol.coverage_forced:                  # impact@v12: the lens lanes, then the coverage-unit marker
+            return deepcov.plan_specialists()
         return sweeps.plan_specialists() if pol.diff_sweep else list(pol.specialists)
     return ["generalist"]
 
@@ -157,7 +159,10 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
-        if pol.cross_v3:                         # investigator.impact@v10 only => v1-v7 run ids are unchanged
+        if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
+            extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                                  spec.host.comment_cap)
+        elif pol.cross_v3:                       # investigator.impact@v10 only => v1-v7 run ids are unchanged
             extra["impact"]["specialists"] = lanes.v10_identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                     spec.profile)
         elif pol.cross_model:                    # investigator.impact@v7 only => v1-v5 run ids are unchanged

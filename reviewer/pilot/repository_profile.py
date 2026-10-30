@@ -22,7 +22,11 @@ model in its reasons (V7_* below). 10 (explicit only) is investigator.impact@v10
 three specialists with v3's lens texts and per-lane tool/spend/time numbers, v3 VERIFY and verifier) plus the same three
 lenses again as `contracts.alt`, `logic.alt`, `safety.alt` on the ALTERNATE investigator model (refused without one,
 exactly as v7), merged restatement-only; its Plan lists the six lanes and names the alternate model in its reasons
-(V10_* below). 1 is exactly the IMPACT-01 profile and policy
+(V10_* below). 12 (explicit only) is investigator.impact@v12: coverage-forced deep investigation on the primary
+investigator model only (no alternate): the three v3 lenses with a depth paragraph, then one coverage investigator per
+unit of a deterministic changed-file partition, a host-enforced depth floor, per-candidate verifier sessions and a
+dynamic comment cap (reviewer.pipeline.deepcov); its Plan lists the lenses and the coverage-unit marker (V12_* below).
+1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
 
@@ -31,12 +35,13 @@ from __future__ import annotations
 from reviewer.pipeline import RetrievalPolicy
 import copy
 
-from reviewer.pipeline import lanes
+from reviewer.pipeline import deepcov, lanes
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
                                        INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                        INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                                        INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
-                                       INVESTIGATOR_IMPACT_V10_PROMPT, SPECIALIST_AGENTS, V5_AGENTS, V7_AGENTS,
+                                       INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT, SPECIALIST_AGENTS,
+                                       V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
                                        VERIFIER_CONTEXT_CHECK_PROMPT, VERIFIER_IMPACT_PROMPT)
@@ -60,7 +65,7 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
 
 IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT,
                    4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT,
-                   10: INVESTIGATOR_IMPACT_V10_PROMPT}
+                   10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -97,6 +102,18 @@ V10_MAX_TOOL_CALLS = 220
 V10_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 600, "VERIFY": 450, "JUDGE": 200}
 V10_LIVE_WALL_CLOCK_SEC, V10_LIVE_SOFT_DEADLINE_SEC = 1_650, 1_350
 V10_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 240}     # 6 x the legacy 40 s per lane
+# investigator.impact@v12 Plan scaling (only for v12; deepcov). INVESTIGATE runs the three lens lanes (deepcov.LENS_TIME_BP
+# = 40% of the ceiling: 120 s each live, the v3 lanes' 100 s plus one more request turn) and up to deepcov.MAX_UNITS
+# coverage investigators with a depth floor (the other 60%: 135 s each for four units, at ~20 s per Terra hop 3-5 hops
+# plus continuations); VERIFY gets 540 s for up to ~16 verified candidates of 1-3 hops each before the JUDGE reserve
+# binds (v3 used <= 194 s for 12); JUDGE keeps 200 s; the run deadlines move to fit. The run tool-call cap covers PREPARE
+# of a ~30-file diff, the lens reads (3 x 16), the unit reads (6 + 3 per file each), re-shown reads of continuations and
+# per-candidate verifier sessions. The $4 ceiling and the 30% verify reserve are unchanged (deepcov keeps INVESTIGATE <=
+# 65%, so VERIFY + JUDGE keep >= 35%).
+V12_MAX_TOOL_CALLS = 400
+V12_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 900, "VERIFY": 540, "JUDGE": 200}
+V12_LIVE_WALL_CLOCK_SEC, V12_LIVE_SOFT_DEADLINE_SEC = 2_000, 1_700
+V12_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 280}     # 3 x 40 s lens lanes + 4 x 40 s units
 
 
 def _prompts(impact: bool, impact_version: int = DEFAULT_IMPACT_VERSION) -> tuple[str, str]:
@@ -143,6 +160,20 @@ def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep
     marker and the V4_* budget scaling (every other profile keeps the one generalist, same Plan bytes)."""
     inv = profile["roles"]["investigator"]["promptVersion"]
+    if inv == INVESTIGATOR_IMPACT_V12_PROMPT:    # the v12 scaling (V12_*); primary model only
+        if "alternates" in profile:
+            raise ProfileError("investigator.impact@v12 runs on the primary investigator model only (no alternates)")
+        plan = live_plan(profile, **({"stage_ceilings_sec": V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
+                                      "wall_clock_sec": V12_LIVE_WALL_CLOCK_SEC,
+                                      "soft_deadline_sec": V12_LIVE_SOFT_DEADLINE_SEC}
+                                     if live_stage_timing else {"stage_ceilings_sec": V12_LEGACY_STAGE_CEILINGS_SEC}))
+        plan["budget"] = dict(plan["budget"], maxToolCalls=V12_MAX_TOOL_CALLS,
+                              maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+        plan["specialists"] = deepcov.plan_specialists()
+        plan["reasons"] = ["pilot-repository: fixed standard Plan, retries/repairs off, complete pinned repository imports",
+                           "investigator.impact@v12: lens lanes contracts, logic, safety, then coverage investigators "
+                           f"over at most {deepcov.MAX_UNITS} changed-file units (primary investigator model only)"]
+        return plan
     if inv == INVESTIGATOR_IMPACT_V10_PROMPT:    # the v10 scaling (V10_*); the alternate model is named in the reasons
         problem = lanes.alternate_problem(profile)
         if problem is not None:
@@ -221,4 +252,6 @@ def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V7_MAX_TOOL_CALLS)
     if inv == INVESTIGATOR_IMPACT_V10_PROMPT:        # and v10
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V10_MAX_TOOL_CALLS)
+    if inv == INVESTIGATOR_IMPACT_V12_PROMPT:        # and v12
+        return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V12_MAX_TOOL_CALLS)
     return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)

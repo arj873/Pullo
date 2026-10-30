@@ -66,7 +66,8 @@ def is_specialist_plan(plan: dict) -> bool:
     return (is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
             or plan.get("specialists") == list(prompts.V5_AGENTS)       # impact@v5: five lanes (pipeline.lanes)
             or plan.get("specialists") == list(prompts.V7_AGENTS)       # impact@v7: v5 lanes + alternate-model lanes
-            or plan.get("specialists") == list(prompts.V10_AGENTS))     # impact@v10: v3 lanes + alternate-model lanes
+            or plan.get("specialists") == list(prompts.V10_AGENTS)      # impact@v10: v3 lanes + alternate-model lanes
+            or plan.get("specialists") == list(AGENTS) + ["coverage-units"])   # impact@v12 (deepcov.PLAN_MARKER)
 
 
 def time_slices(ceiling_sec: int | None, k: int = len(AGENTS)) -> list[int] | None:

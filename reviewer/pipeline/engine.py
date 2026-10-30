@@ -34,7 +34,7 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
                             import_view, omissions_from_records)
 
 from . import coverage as cov_mod
-from . import identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists, sweeps
+from . import deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists, sweeps
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -130,8 +130,20 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                                                    and prompts.is_alt_lane(e["agentId"])}) or None,
                           alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events, incomplete,
                                                                artifacts["VERIFY"]["payload"].get("drops", ()))
-                                        if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
+                                        if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
+                          deep_coverage=(deepcov.coverage_lines(deep_plan(files, events), artifacts["INVESTIGATE"]["payload"],
+                                                                events, artifacts["VERIFY"]["payload"].get("drops", ()))
+                                         if deepcov.is_v12_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
+
+
+def deep_plan(files: list, events: list) -> dict:
+    """investigator.impact@v12: the coverage plan (deepcov.plan) of the PREPARE file list and its logged per-file diffs."""
+    diffs = {}
+    for e in events:
+        if e["type"] == "tool.call" and e["stage"] == "PREPARE" and e["tool"] == "diff" and e["args"].get("path") is not None:
+            diffs.setdefault(e["args"]["path"], e)
+    return deepcov.plan(files, diffs)
 
 
 def coverage_doc(cov: dict, limit: int = 50) -> dict:
@@ -186,6 +198,9 @@ class Engine:
         self.cross = bool(self.impact and self.policy.cross_model)
         # investigator.impact@v10: the v3 specialists unchanged, then their lenses on the alternate model (lanes.V10_*)
         self.v10 = bool(self.impact and self.policy.cross_v3)
+        # investigator.impact@v12: the v3 lenses with a depth floor, then coverage investigators (reviewer.pipeline.deepcov)
+        self.v12 = bool(self.impact and self.policy.coverage_forced)
+        self._reread: dict = {}                 # v12: `<agent>.reread` sessions that re-show earlier reads to a continuation
         self.alt_profile = None
         if self.cross and lanes.alternate(spec.profile) is not None:
             self.alt_profile = copy.deepcopy(spec.profile)
@@ -376,7 +391,10 @@ class Engine:
             detail={"kind": "snapshot-tamper"}))
 
     def agent_label(self, agent: str) -> str:
-        """How messages name an INVESTIGATE agent: 'specialist' (always under v3), 'sweep investigator' for a v4 sweep."""
+        """How messages name an INVESTIGATE agent: 'specialist' (always under v3), 'sweep investigator' for a v4 sweep,
+        'coverage investigator' for a v12 coverage unit."""
+        if self.v12 and deepcov.is_unit(agent):
+            return "coverage investigator"
         return "sweep investigator" if self.sweep and agent not in specialists.AGENTS else "specialist"
 
     def session_hard_limit(self) -> int:
@@ -430,14 +448,17 @@ class Engine:
             if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
                 sweep = self.agent_label(agent) != "specialist"
                 alt = self.cross and prompts.is_alt_lane(agent)
+                detail = ({"scope": "unit-share" if deepcov.is_unit(agent) else "lens-share", "rule": deepcov.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling} if self.v12 else
+                          {"scope": "sweep-share" if sweep else "alternate-model-share" if alt
+                           else "specialist-share",
+                           "rule": sweeps.BUDGET_RULE if sweep
+                           else (lanes.V10_BUDGET_RULE if alt else specialists.BUDGET_RULE)
+                           if self.v10 else lanes.CROSS_BUDGET_RULE
+                           if self.cross else specialists.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
                 err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
-                                  stage=stage, detail={"scope": "sweep-share" if sweep else "alternate-model-share" if alt
-                                                       else "specialist-share",
-                                                       "rule": sweeps.BUDGET_RULE if sweep
-                                                       else (lanes.V10_BUDGET_RULE if alt else specialists.BUDGET_RULE)
-                                                       if self.v10 else lanes.CROSS_BUDGET_RULE
-                                                       if self.cross else specialists.BUDGET_RULE,
-                                                       "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
+                                  stage=stage, detail=detail)
                 self.recorder.append("error", error=err)
                 return None, err, []
         try:
@@ -698,6 +719,8 @@ class Engine:
         stage = "INVESTIGATE"
         if self.fatal:
             return self.skipped(stage)
+        if self.v12:                            # investigator.impact@v12 (reviewer.pipeline.deepcov)
+            return self._investigate_v12(stage, t0)
         if self.specialists is not None:
             return self._investigate_v3(stage, t0)
         g = self.gate(stage, t0, new_agent=True)
@@ -741,7 +764,14 @@ class Engine:
     def final_answer_due(self, stage: str, role: str, agent: str, request: dict) -> bool:
         """impact@v10 (lanes.V10_FINAL_RULE): an alternate-lane investigator hop must be sent as its final-answer turn
         when exploring could leave no worst-case reservation for one final-answer call under its spend ceiling.
-        False for every other chain (no change to any other version)."""
+        False for every other chain (no change to any other version). impact@v12 (deepcov.FINAL_RULE): every v12 agent
+        under its own spend ceiling."""
+        if self.v12 and stage == "INVESTIGATE" and role == "investigator" and self._spend_ceiling is not None:
+            spec = self.profile["roles"]["investigator"]
+            if spec["price"] is None:
+                return False
+            r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
+            return deepcov.final_answer_due(self.stage_spend(stage), self._spend_ceiling, r)
         if not (self.v10 and prompts.is_alt_lane(agent) and stage == "INVESTIGATE" and role == "investigator"
                 and self._spend_ceiling is not None):
             return False
@@ -1048,6 +1078,223 @@ class Engine:
             self.set_fatal("INVESTIGATE", err, reason="soft-deadline")
         return "failed", {"hypotheses": [], "agents": agents, "merges": []}, err, []
 
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v12 coverage-forced depth
+    def unit_plan(self) -> dict:
+        """investigator.impact@v12: the deterministic coverage plan of this run's PREPARE artifact (deepcov.plan)."""
+        return deep_plan(self.artifacts["PREPARE"]["payload"]["files"], self.recorder.events)
+
+    def _requested_reads(self, stage: str) -> int:
+        """INVESTIGATE tool calls an agent requested (the v12 read budgets; re-shown reads are host calls)."""
+        return sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage
+                   and "requestedBy" in e)
+
+    def _v12_optional(self, agent: str, err: dict | None) -> bool:
+        """impact@v12: a coverage investigator ended by its OWN cap (spend share, reads, time slice) or by a
+        provider-level failure ends alone (lanes.v10_optional_error): a coverage note, not an incomplete entry. A lens
+        lane keeps v3's rules."""
+        return self.v12 and deepcov.is_unit(agent) and lanes.v10_optional_error(err)
+
+    def _unit_context(self, paths: list[str]) -> tuple[list, list]:
+        """A coverage investigator's prefetched context: the impact map, the changed-path listing and its files' diffs."""
+        mine = set(paths)
+        items = prompts.context_items(self.recorder.events, "PREPARE")
+        keep = ([i for i in items if i["tool"] == "impact_scan"]
+                + [i for i in items if i["tool"] == "diff" and (i["args"].get("path") is None or i["args"]["path"] in mine)])
+        return self._cap_host_results(*self.bounded_context(keep))
+
+    def _investigate_v12(self, stage, t0):
+        """investigator.impact@v12: the three lens lanes (v3 lens task + depth paragraph), then one coverage
+        investigator per unit of deepcov.plan, each under its cumulative read, spend and time ceilings
+        (deepcov.BUDGET_RULE) and the depth floor (deepcov.FLOOR_RULE). Failure handling is v3's for the lens lanes;
+        a coverage investigator's own cap or provider failure is a coverage note (Engine._v12_optional). The payload
+        carries every resolved hypothesis (agent order, then output order) and deepcov.merge."""
+        plan_doc = self.unit_plan()
+        units = plan_doc["units"]
+        k = len(units)
+        ceiling = stage_ceiling(stage, self.budget)
+        lens_slices, unit_slices = deepcov.time_slices(ceiling, max(k, 1))
+        lens_tool = deepcov.lens_tool_cumulative()
+        all_paths = sorted(f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"])
+        jobs = [(a, None) for a in deepcov.LENS_AGENTS] + [(u["agentId"], u) for u in units]
+        agents, hyps, inc = [], [], []
+        errs: list = []                      # (error, reason) of failed or stopped agents, lens lanes first
+        usable = 0
+        ctx = notes = None
+        unit_tool = None
+
+        def failed(agent, err, why):
+            agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+            if not self._v12_optional(agent, err):
+                inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: "
+                                                     f"{err['message']}"))
+
+        for i, (agent, unit) in enumerate(jobs):
+            j = i - len(deepcov.LENS_AGENTS)
+            slices = lens_slices if unit is None else unit_slices
+            end_s = None if slices is None else slices[i if unit is None else j]
+            self._time_slice = None if end_s is None or end_s >= ceiling else (agent, end_s, ceiling)
+            try:
+                g = self.gate(stage, t0, new_agent=True)
+                if g is not None:
+                    reason, err = g
+                    if err["code"] == "cancelled":
+                        agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err),
+                                       "error": err})
+                        return self._v3_failed(agents, err, reason)
+                    failed(agent, err, reason)
+                    errs.append((err, reason))
+                    continue
+                if unit is None:
+                    if ctx is None:
+                        ctx, notes = self._cap_host_results(*self._investigate_context())
+                    c, n, task = ctx, notes, prompts.v12_lens_task(agent)
+                    tool_c = lens_tool[i]
+                    spend_c = deepcov.agent_ceiling(False, i, self.stage_spend(stage), self.budget,
+                                                    len(deepcov.LENS_AGENTS))
+                else:
+                    if unit_tool is None:        # the unit read ceilings start from what the lens lanes used
+                        unit_tool = deepcov.unit_tool_ceilings(self._requested_reads(stage),
+                                                               [len(u["files"]) for u in units])
+                    c, n = self._unit_context([f["path"] for f in unit["files"]])
+                    task = prompts.V12_UNIT_TASK
+                    tool_c = unit_tool[j]
+                    spend_c = deepcov.agent_ceiling(True, j, self.stage_spend(stage), self.budget, k)
+                self._tool_share = max(0, tool_c - self._requested_reads(stage))
+                self._spend_ceiling = spend_c
+                try:
+                    end, more = self._v12_agent(stage, t0, agent, c, n, task, unit, j, k, plan_doc, all_paths)
+                finally:
+                    self._tool_share = self._spend_ceiling = None
+            finally:
+                self._time_slice = None
+            inc.extend(more)
+            if end.error is not None:
+                err, reason = end.error, (end.stop[0] if end.stop else None)
+                if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
+                    agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                    return self._v3_failed(agents, err, reason)
+                limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
+                failed(agent, err, limit or "agent-failure")
+                errs.append((err, reason))
+                if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further agent
+                    for later, _ in jobs[i + 1:]:
+                        e2 = typed_error(err["code"], f"not started: {self.agent_label(agent)} {agent} failed with "
+                                         f"{err['code']} (systemic or unknown provider outcome), which must not be "
+                                         "repeated by every investigator", stage=stage)
+                        agents.append({"agentId": later, "specialist": later, "status": _agent_status(e2), "error": e2})
+                        inc.append(self._inc_doc(stage, "agent-failure", f"{self.agent_label(later)} {later}: "
+                                                                         f"{e2['code']}: {e2['message']}"))
+                    break
+            elif end.exhausted is not None:
+                agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                if not self._v12_optional(agent, None):
+                    inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                             f"specialist {agent}: " + self._exhausted_detail(end)))
+                usable += 1
+            else:
+                agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                hyps.extend(self._hypotheses(agent, end.payload, end.final_call))
+                usable += 1
+            if self.fatal:                       # e.g. a snapshot tamper during this agent's tool calls
+                break
+        if not usable:
+            return self._v3_failed(agents, *errs[0])
+        payload = {"hypotheses": hyps, "agents": agents, "merges": deepcov.merge(hyps)}
+        return ("partial" if inc else "completed"), payload, None, inc
+
+    def _v12_agent(self, stage, t0, agent, ctx, notes, task, unit, j, k, plan_doc, all_paths):
+        """One impact@v12 agent: its retrieval chain, then the depth floor (deepcov.FLOOR_RULE). -> (ChainEnd of the
+        accepted answer, or of the failure that must fail the stage as v3 would; [incomplete]). An answer that misses
+        the floor and is not waived (deepcov.waiver) is a draft: the host re-shows the agent's earlier reads as
+        host-prepared calls of `<agent>.reread` (so they stay citable) and sends one continuation chain with the
+        depthFloor block, at most deepcov.MAX_CONTINUATIONS times. A continuation without a final answer leaves the
+        latest answer in force; a replay failure, cancellation, internal error or spend-book failure fails as v3."""
+        events = self.tool_calls()
+        host = [events[c["toolCallId"]] for c in ctx]
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(), task=task)
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        files = None
+        if unit is not None:
+            files = [f["path"] for f in unit["files"]]
+            mine = set(files)
+            doc["coverageUnit"] = prompts.unit_block(j + 1, k, unit["files"], [p for p in all_paths if p not in mine],
+                                                     plan_doc["skipped"], deepcov.FLOOR_TEXT)
+        session = self.new_session(stage, agent)
+
+        def chain(turns, hev, items):
+            return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
+                                   turns=turns, policy=self.policy, host_events=hev,
+                                   unrendered=self.unrendered_ids(items, hev))
+
+        def build(d):
+            return lambda hop, state: prompts.turn_request(
+                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools())
+
+        end = chain(self.policy.investigator_turns, host, ctx).run(build(doc))
+        while end.payload is not None:
+            ev = self.recorder.events
+            st = deepcov.floor_status(ev, agent, files)
+            if st["met"] or deepcov.waiver(ev, agent, end.final_call, self.policy.investigator_turns) is not None:
+                return end, []
+            n = deepcov.continuations(ev, agent) + 1
+            more_ctx, more_host = self._reshow(stage, t0, agent, retrieval.MAX_HOST_RESULTS - len(host))
+            if self.fatal:
+                return end, []
+            turns = min(self.policy.investigator_turns - len(deepcov.agent_calls(self.recorder.events, agent)),
+                        deepcov.CONTINUATION_HOPS)
+            items2, host2 = ctx + more_ctx, host + more_host
+            d2 = dict(doc, context=items2,
+                      depthFloor=prompts.depth_floor_block(end.payload, deepcov.unmet(st, files), n,
+                                                           deepcov.MAX_CONTINUATIONS))
+            second = chain(turns, host2, items2).run(build(d2))
+            if second.payload is not None:
+                second.hops, second.call_ids = end.hops + second.hops, end.call_ids + second.call_ids
+                end = second
+                continue
+            if second.error is not None and (second.error["code"] in REPLAY_CODES
+                                             or second.error["code"] in ("cancelled", "internal")
+                                             or self.needs_reconciliation):
+                return second, []                # never masked by the draft: fail exactly as v3 would
+            inc = []
+            if second.error is not None:
+                code = second.error["code"]
+                limit = ("deadline" if second.stop is not None or code == "deadline-exceeded"
+                         else "budget" if code == "budget-exhausted" else None)
+                if limit is not None and not self._v12_optional(agent, second.error):
+                    inc = [self._inc(stage, limit, f"{self.agent_label(agent)} {agent}: the depth-floor continuation "
+                                                   f"was stopped ({code}); its earlier answer "
+                                                   f"({len(end.payload['hypotheses'])} hypothesis(es)) was used")]
+            end.hops, end.call_ids = end.hops + second.hops, end.call_ids + second.call_ids
+            return end, inc
+        return end, []
+
+    def _reshow(self, stage, t0, agent, room: int) -> tuple[list, list]:
+        """impact@v12: re-run the agent's earlier distinct reads (deepcov.reread_events, at most `room`) as
+        host-prepared tool calls of the session `<agent>.reread`, so a continuation chain (a new chain, whose hop 0
+        may show only host-prepared results) can see and cite them. -> (context items, logged tool.call events)."""
+        name = agent + deepcov.REREAD_SUFFIX
+        session = self._reread.get(name)
+        if session is None:
+            used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
+            lim = dataclasses.replace(identity.tool_limits(self.spec),
+                                      max_calls=max(0, min(self.session_hard_limit(),
+                                                           self.budget["maxToolCalls"] - used)))
+            session = self._reread[name] = ToolSession(self.view, stage=stage, agent_id=name, limits=lim,
+                                                       clock=self.clock, tools=IMPACT_TOOLS)
+        logged = []
+        for ev in deepcov.reread_events(self.recorder.events, agent)[:max(0, room)]:
+            call, why = self.tool(session, ev["tool"], ev["args"], t0)
+            if call is None:
+                break
+            logged.append(self.tool_calls()[call.tool_call_id])
+            if self.fatal:
+                break
+        items = prompts.context_items(logged, stage)
+        return items, logged
+
     # ------------------------------------------------------------------ INVESTIGATE: impact@v4 diff-shard sweeps
     def shard_plan(self) -> tuple[list, list, list, list]:
         """-> (reviewable [(path, chars)], shards [[(path, chars)]], excluded [{path, reason}], all changed paths),
@@ -1324,15 +1571,19 @@ class Engine:
         order (contracts 0, logic 0, safety 0, contracts 1, ...), as [(running index, hypothesis id, draft)]. The
         running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key).
         impact@v10: exactly v3's list over the three v3 lanes, then the alternate lanes' own round-robin after it."""
-        if self.v10:
+        if self.v12:                     # impact@v12: the lens lanes as v3, then the units' candidates by value
+            out = (self._lane_candidates(lambda a: not deepcov.is_unit(a))
+                   + self._lane_candidates(deepcov.is_unit, by_value=True))
+        elif self.v10:
             out = (self._lane_candidates(lambda a: not prompts.is_alt_lane(a))
                    + self._lane_candidates(prompts.is_alt_lane))
         else:
             out = self._lane_candidates(lambda a: True)
         return [(i, hid, d) for i, (hid, d) in enumerate(out)]
 
-    def _lane_candidates(self, keep) -> list:
-        """[(hypothesis id, draft)] of the completed INVESTIGATE agents `keep` selects, round-robin in agent order."""
+    def _lane_candidates(self, keep, by_value: bool | None = None) -> list:
+        """[(hypothesis id, draft)] of the completed INVESTIGATE agents `keep` selects, round-robin in agent order.
+        `by_value` (default: impact@v5's rule) orders each agent's drafts by lanes.value_key first."""
         lane_list = []
         for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
             if a["status"] != "completed" or not keep(a["agentId"]):
@@ -1346,8 +1597,9 @@ class Engine:
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
                            and (src is None or e["callId"] == src)
                            and (p := terminal_payload(e)) is not None), [])
-            order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n)) if self.five
-                     else range(len(drafts)))          # impact@v5: a lane's most valuable hypotheses first
+            order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n))
+                     if (self.five if by_value is None else by_value)
+                     else range(len(drafts)))          # impact@v5 (and v12 units): a lane's most valuable first
             lane_list.append([(hypothesis_id(agent, n, drafts[n]["claim"], drafts[n]["location"]["path"],
                                          drafts[n]["location"]["line"]), drafts[n]) for n in order])
         return [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
@@ -1402,6 +1654,8 @@ class Engine:
         scaled = self.sweep or self.five
         if self.five:                                 # impact@v5: the cap scales with the extra lanes
             shards, cap = lanes.extra_lanes(self.specialists), lanes.verify_cap(len(self.specialists))
+        if self.v12:                                  # impact@v12: its own cap; one verifier session per candidate
+            cap = deepcov.MAX_VERIFY
         collapsed = {m: g["keptIds"] for g in (self.artifacts["INVESTIGATE"]["payload"].get("collapses", ())
                                                if self.five else ()) for m in g["collapsedIds"]}
         sessions = {VERIFIER_AGENT: session}
@@ -1420,7 +1674,8 @@ class Engine:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
-            if stop is None and (shards or self.v10) and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
+            if stop is None and (shards or self.v10 or self.v12) \
+                    and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
                 stop = ("budget", typed_error(       # impact@v4: keep the JUDGE spend reserve (sweeps.JUDGE_RESERVE_BP)
                     "budget-exhausted", "VERIFY stopped before this candidate to keep the JUDGE spend reserve "
                     f"({sweeps.JUDGE_RESERVE_BP} bp of the run ceiling, {sweeps.BUDGET_RULE})", stage=stage,
@@ -1438,7 +1693,8 @@ class Engine:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
                               "detail": err["message"][:500]})
                 return False
-            name = sweeps.verifier_agent(kept - 1, shards) if scaled else VERIFIER_AGENT
+            name = (deepcov.verifier_agent(kept - 1) if self.v12
+                    else sweeps.verifier_agent(kept - 1, shards) if scaled else VERIFIER_AGENT)
             if name not in sessions:
                 sessions[name] = self.new_session(stage, name)
             rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
@@ -1461,7 +1717,10 @@ class Engine:
             if kept <= cap:
                 return False
             drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
-                          "detail": (f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
+                          "detail": (f"more than {cap} distinct lens-lane and coverage-unit hypotheses "
+                                     f"({deepcov.VERIFY_RULE}); later ones (the lens lanes in v3 order, then the "
+                                     "units round-robin by value) are not verified" if self.v12 else
+                                     f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
                                      f"({sweeps.VERIFY_RULE}); later ones (round-robin across specialist and sweep "
                                      "lanes) are not verified" if self.sweep else
                                      f"more than {cap} distinct specialist lane hypotheses ({lanes.VERIFY_RULE}); later "
@@ -1502,10 +1761,12 @@ class Engine:
 
         # impact@v10: v3's VERIFY runs first, unchanged, on the v3 lanes' candidates and v3 merge groups; then the
         # alternate lanes' surviving candidates (within the same cap); an alternate restatement is dropped as merged
-        k = len(self._lane_candidates(lambda a: not prompts.is_alt_lane(a))) if self.v10 else len(cands)
-        primary, extra = cands[:k], cands[k:]          # v10: _v3_candidates lists the v3 lanes' candidates first
-        retry_groups = [g for g in merges if not (self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE)]
-        alt_groups = [g for g in merges if self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE]
+        k = (len(self._lane_candidates(lambda a: not deepcov.is_unit(a))) if self.v12
+             else len(self._lane_candidates(lambda a: not prompts.is_alt_lane(a))) if self.v10 else len(cands))
+        primary, extra = cands[:k], cands[k:]          # v10/v12: _v3_candidates lists the v3/lens lanes' candidates first
+        split = self.v10 or self.v12
+        retry_groups = [g for g in merges if not (split and g["rule"] == lanes.CROSS_MERGE_RULE)]
+        alt_groups = [g for g in merges if split and g["rule"] == lanes.CROSS_MERGE_RULE]
         halted_all = False
         alt_phase = [False]                     # impact@v10: True while VERIFY takes the alternate lanes' candidates
         for n, hid, draft in primary:
@@ -1531,7 +1792,7 @@ class Engine:
                     dups = dups[1:]                  # over-cap already recorded its drop
                 for m in dups:
                     drops.append(merged_drop(m, g))
-            if self.v10 and not halted_all:
+            if split and not halted_all:
                 alt_phase[0] = True
                 for n, hid, draft in extra:
                     if consider(n, hid):
@@ -1808,7 +2069,7 @@ class Engine:
         by_id = {f["id"]: (f, c) for f, c in entries}
         # issue-key equality only nominates candidate duplicates: nothing is merged unless the judge proposes it
         groups = judging.candidate_groups([f for f, _ in entries])
-        top, over = judging.rank_and_cap(entries, self.host.comment_cap)
+        top, over = judging.rank_and_cap(entries, self.comment_cap(entries))
         top_ids = {f["id"] for f, _ in top}
         in_play = [g for g in groups if any(i in top_ids for i in g)]
         judged = top + [(f, c) for f, c in over if any(f["id"] in g for g in in_play)]
@@ -1864,10 +2125,14 @@ class Engine:
                                                                    f["location"].get("endLine", f["location"]["line"])),
                                           tool_calls=tools, title=title, body=body, suggestion=sug)
             final.append((f, c))
-        top, over = judging.rank_and_cap(final, self.host.comment_cap)
+        cap = self.comment_cap(final)
+        top, over = judging.rank_and_cap(final, cap)
         for f, c in over:
             drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "over-cap",
-                          "detail": f"ranked below the cap of {self.host.comment_cap}"})
+                          "detail": (f"ranked below the dynamic cap of {cap} ({deepcov.CAP_RULE}: base "
+                                     f"{self.host.comment_cap}, up to {deepcov.MAX_COMMENTS} while the next comment is "
+                                     "P0/P1 with strong evidence)") if self.v12
+                          else f"ranked below the cap of {self.host.comment_cap}"})
         comments = []
         for f, c in top:
             extra = [i for fid in c["findingIds"] for i in same_claim.get(fid, []) if i not in c["findingIds"]]
@@ -1882,6 +2147,10 @@ class Engine:
                 return [], [], []
             comments.append(c)
         return comments, drops, inc
+
+    def comment_cap(self, entries: list) -> int:
+        """The JUDGE comment cap: the host's (every version but v12), or impact@v12's dynamic cap (deepcov.CAP_RULE)."""
+        return deepcov.comment_cap(entries, self.host.comment_cap) if self.v12 else self.host.comment_cap
 
     # ------------------------------------------------------------------ PUBLISH
     def publish(self, t0):

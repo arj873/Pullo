@@ -162,7 +162,7 @@ class ImpactVersionOption(TBH.Base):
                 with self.assertRaises(B.BenchmarkLaunchError):
                     B.run_benchmark(self.w.options(impact_version=v, store=str(self.tmp / "missing"),
                                                    cutoff_proof=str(self.tmp / "missing.json")), key_loader=self.boom)
-        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4, 5, 7, 10] (or unset for the profile default)"})
+        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4, 5, 7, 10, 12] (or unset for the profile default)"})
         self.assertEqual(self.refused(impact_version=3, retrieval=False),
                          "impact_version needs the retrieval profile (--retrieval on)")
         self.assertEqual(self.w.state_bytes(), before)

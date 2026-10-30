@@ -24,7 +24,7 @@ from reviewer.gateway import Recorder, TraceError, bytes_digest, load_trace
 from reviewer.tools import Limits
 
 from . import coverage as cov_mod
-from . import identity, impactcov, lanes, repocov, retrieval, specialists, stagereplay, sweeps
+from . import deepcov, identity, impactcov, lanes, repocov, retrieval, specialists, stagereplay, sweeps
 from .compare import first_difference, split_recording
 from .engine import Engine, render_outputs
 from .errors import PipelineError
@@ -70,10 +70,12 @@ def validate_spec(spec: ReviewSpec) -> None:
         v = ("v4" if identity.plan_specialists(spec) == sweeps.plan_specialists()
              else "v5" if identity.plan_specialists(spec) == list(lanes.AGENTS)
              else "v7" if identity.plan_specialists(spec) == list(lanes.V7_AGENTS)
-             else "v10" if identity.plan_specialists(spec) == list(lanes.V10_AGENTS) else "v3")
+             else "v10" if identity.plan_specialists(spec) == list(lanes.V10_AGENTS)
+             else "v12" if identity.plan_specialists(spec) == deepcov.plan_specialists() else "v3")
         raise PipelineError("invalid-input", f"investigator.impact@{v} needs Plan.specialists "
                             f"{identity.plan_specialists(spec)} (the specialist investigators, in run order"
-                            + (", then the diff-shard sweep marker)" if v == "v4" else ")"))
+                            + (", then the diff-shard sweep marker)" if v == "v4"
+                               else ", then the coverage-unit marker)" if v == "v12" else ")"))
     pol = identity.retrieval_policy(spec)
     cross = identity.impact_mode(spec) and pol.cross_model
     if cross and lanes.alternate_problem(prof) is not None:      # impact@v7/@v10: refused before any model call
@@ -521,6 +523,7 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
     if specialists.is_specialist_plan(tplan):    # impact@v3/@v4: the merge record is re-derived
         try:
             again = (specialists.merge(inv["hypotheses"], sweeps.merge_order(inv["agents"])) if sweeps.is_v4_plan(tplan)
+                     else deepcov.merge(inv["hypotheses"]) if deepcov.is_v12_plan(tplan)
                      else lanes.lane_merge(tplan, inv["hypotheses"]) if lanes.lane_order(tplan)
                      or lanes.is_v10_plan(tplan)
                      else specialists.merge(inv["hypotheses"]))
