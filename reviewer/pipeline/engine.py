@@ -126,7 +126,9 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                           sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"),
                           alternate_models=sorted({e["request"]["model"] for e in events if e["type"] == "model.call"
                                                    and e["stage"] == "INVESTIGATE"
-                                                   and prompts.is_alt_lane(e["agentId"])}) or None)
+                                                   and prompts.is_alt_lane(e["agentId"])}) or None,
+                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events)
+                                        if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -727,6 +729,12 @@ class Engine:
             items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
         return self.bounded_context(items)
 
+    def alt_optional(self, agent: str) -> bool:
+        """impact@v10: an alternate-model lane is additive and optional. Its cap or failure ends only that lane (what it
+        already answered is kept) and is disclosed as an alternate-model coverage note
+        (lanes.v10_alt_coverage), never as an incomplete entry: it does not make the run partial."""
+        return self.v10 and prompts.is_alt_lane(agent)
+
     def lane_profile(self, agent: str) -> dict:
         """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
         lane, else the run's profile."""
@@ -838,8 +846,9 @@ class Engine:
             if limit is not None:                # a real run limit, not just a missing second answer
                 n = len(draft_end.payload["hypotheses"])
                 who = "" if agent == SPECIALIST else f"specialist {agent}: "
-                inc = [self._inc(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
-                                               f"first-hop draft answer ({n} hypothesis(es)) was used")]
+                note = self._inc_doc if self.alt_optional(agent) else self._inc      # v10 alt lane: no incomplete
+                inc = [note(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
+                                          f"first-hop draft answer ({n} hypothesis(es)) was used")]
         else:
             self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
         draft_end.hops, draft_end.call_ids = end.hops, end.call_ids
@@ -896,13 +905,16 @@ class Engine:
         alt_start = None                         # impact@v7: INVESTIGATE spend when the first alternate lane started
         agents, hyps, inc = [], [], []
         first_err = None                     # (error, reason) of the first specialist that failed or was stopped
+        alt_err = None                       # impact@v10: the same for the optional alternate lanes
         usable = 0
         ctx = notes = None
         systemic = False                     # impact@v4: a systemic failure also starts no sweep
 
         def failed(agent, err, why):
             agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-            inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: {err['message']}"))
+            if not self.alt_optional(agent):     # impact@v10: an alternate lane's end is a coverage note only
+                inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: "
+                                                     f"{err['message']}"))
 
         for i, agent in enumerate(self.specialists):
             # the agent's cumulative time slice gates its start and each of its tool and model calls (the last
@@ -917,7 +929,10 @@ class Engine:
                                        "error": err})
                         return self._v3_failed(agents, err, reason)
                     failed(agent, err, reason)
-                    first_err = first_err or (err, reason)
+                    if self.alt_optional(agent):
+                        alt_err = alt_err or (err, reason)
+                    else:
+                        first_err = first_err or (err, reason)
                     continue
                 if ctx is None:
                     ctx, notes = self._cap_host_results(*self._investigate_context())
@@ -938,7 +953,8 @@ class Engine:
                     self._tool_share = self._spend_ceiling = None
             finally:
                 self._time_slice = None
-            inc.extend(floor_inc)
+            if not self.alt_optional(agent):
+                inc.extend(floor_inc)
             if end.error is not None:
                 err, reason = end.error, (end.stop[0] if end.stop else None)
                 if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
@@ -946,7 +962,10 @@ class Engine:
                     return self._v3_failed(agents, err, reason)
                 limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
                 failed(agent, err, limit or "agent-failure")
-                first_err = first_err or (err, reason)
+                if self.alt_optional(agent):
+                    alt_err = alt_err or (err, reason)
+                else:
+                    first_err = first_err or (err, reason)
                 if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further specialist
                     for later in self.specialists[i + 1:]:
                         failed(later, typed_error(
@@ -957,8 +976,9 @@ class Engine:
                     break
             elif end.exhausted is not None:
                 agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
-                inc.append(self._inc_doc(stage, "tool-calls-exhausted",
-                                         f"specialist {agent}: " + self._exhausted_detail(end)))
+                if not self.alt_optional(agent):
+                    inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                             f"specialist {agent}: " + self._exhausted_detail(end)))
                 usable += 1
             else:
                 agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
@@ -975,7 +995,7 @@ class Engine:
             usable += n_usable
             first_err = first_err or err_reason
         if not usable:
-            return self._v3_failed(agents, *first_err)
+            return self._v3_failed(agents, *(first_err or alt_err))
         if self.five:                            # impact@v5: merge in lane order, then the near-duplicate cap
             merges = (lanes.cross_merge(hyps) if self.cross      # impact@v7: merge only true near-duplicates
                       else specialists.merge(hyps, list(self.specialists)))
@@ -1276,10 +1296,20 @@ class Engine:
     def _v3_candidates(self) -> list:
         """investigator.impact@v3: every completed specialist's accepted answer, interleaved round-robin in specialist
         order (contracts 0, logic 0, safety 0, contracts 1, ...), as [(running index, hypothesis id, draft)]. The
-        running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key)."""
+        running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key).
+        impact@v10: exactly v3's list over the three v3 lanes, then the alternate lanes' own round-robin after it."""
+        if self.v10:
+            out = (self._lane_candidates(lambda a: not prompts.is_alt_lane(a))
+                   + self._lane_candidates(prompts.is_alt_lane))
+        else:
+            out = self._lane_candidates(lambda a: True)
+        return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+
+    def _lane_candidates(self, keep) -> list:
+        """[(hypothesis id, draft)] of the completed INVESTIGATE agents `keep` selects, round-robin in agent order."""
         lane_list = []
         for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
-            if a["status"] != "completed":
+            if a["status"] != "completed" or not keep(a["agentId"]):
                 continue
             agent = a["agentId"]
             if self.sweep and agent not in specialists.AGENTS:      # impact@v4 diff-shard sweep lane
@@ -1294,8 +1324,7 @@ class Engine:
                      else range(len(drafts)))          # impact@v5: a lane's most valuable hypotheses first
             lane_list.append([(hypothesis_id(agent, n, drafts[n]["claim"], drafts[n]["location"]["path"],
                                          drafts[n]["location"]["line"]), drafts[n]) for n in order])
-        out = [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
-        return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+        return [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
 
     def _sweep_lane(self, agent: str) -> list:
         """An impact@v4 sweep's VERIFY lane: the hypotheses of its first final answer, then those its disposition
@@ -1414,49 +1443,73 @@ class Engine:
                                      "hypotheses; later ones (round-robin specialist order) are not verified")})
             return True
 
-        for n, hid, draft in cands:
+        def consider(n, hid) -> bool:
+            """One kept-candidate decision (skip, drop or verify). -> True to stop the stage loop (fatal)."""
             if hid in self.off_shard:           # impact@v4: a sweep's draft outside its own shard takes no slot
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "suppressed",
                               "detail": f"located outside the shard of {self.off_shard[hid]} ({sweeps.SCOPE_RULE}); "
                                         "that file is reviewed by its own sweep investigator"})
-                continue
+                return False
             if hid not in hyps:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
                               "detail": "investigator citation or location did not resolve against the pinned snapshots, "
                                         "or lies outside the files this change modified"})
-                continue
+                return False
             if hid in merged_into:              # v3: a later specialist's duplicate, decided after its kept one
-                continue
+                return False
             if hid in collapsed:                # impact@v5: a true near-duplicate, decided after its kept member(s)
-                continue
+                return False
             if over_cap(hid):
-                continue
-            if attempt(n, hid):
+                return False
+            return attempt(n, hid)
+
+        def merged_drop(m, g) -> dict:
+            return {"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
+                    "detail": f"duplicate of {g['keptId']} ({lanes.CROSS_MERGE_RULE}: a near-duplicate "
+                              "claim at an overlapping spot, same head path and category; the earlier "
+                              "lane's is kept)" if g["rule"] == lanes.CROSS_MERGE_RULE else
+                              f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
+                              f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
+                              "earlier specialist's is kept)"}
+
+        # impact@v10: v3's VERIFY runs first, unchanged, on the v3 lanes' candidates and v3 merge groups; then the
+        # alternate lanes' surviving candidates (within the same cap); an alternate restatement is dropped as merged
+        k = len(self._lane_candidates(lambda a: not prompts.is_alt_lane(a))) if self.v10 else len(cands)
+        primary, extra = cands[:k], cands[k:]          # v10: _v3_candidates lists the v3 lanes' candidates first
+        retry_groups = [g for g in merges if not (self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE)]
+        alt_groups = [g for g in merges if self.v10 and g["rule"] == lanes.CROSS_MERGE_RULE]
+        halted_all = False
+        for n, hid, draft in primary:
+            if consider(n, hid):
+                halted_all = True
                 break
-        else:
+        if not halted_all:
             # v3: a kept hypothesis that yielded no finding hands VERIFY its first merged duplicate (within the cap);
             # every other duplicate is dropped as merged, without a verifier call
             index = {hid: n for n, hid, _ in cands}
             # impact@v5: the near-duplicate fallback first, so a collapsed merge keptId verified without a finding
             # still hands VERIFY its own first merged duplicate below (lanes.NEAR_DUP_RULE)
             halted = self.five and self._verify_collapsed(index, hyps, outcome, attempt, over_cap, drops, lambda: stop)
-            for g in sorted(merges if not halted else (), key=lambda g: index.get(g["keptId"], len(index))):
+            for g in sorted(retry_groups if not halted else (), key=lambda g: index.get(g["keptId"], len(index))):
                 dups = [m for m in g["mergedIds"] if m in hyps and m in index]
                 retry = bool(dups) and outcome.get(g["keptId"]) is False and stop is None
                 if retry and not over_cap(dups[0]):
                     if attempt(index[dups[0]], dups[0]):
+                        halted_all = True
                         break
                     dups = dups[1:]
                 elif retry:
                     dups = dups[1:]                  # over-cap already recorded its drop
                 for m in dups:
-                    drops.append({"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
-                                  "detail": f"duplicate of {g['keptId']} ({lanes.CROSS_MERGE_RULE}: a near-duplicate "
-                                            "claim at an overlapping spot, same head path and category; the earlier "
-                                            "lane's is kept)" if g["rule"] == lanes.CROSS_MERGE_RULE else
-                                            f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
-                                            f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
-                                            "earlier specialist's is kept)"})
+                    drops.append(merged_drop(m, g))
+            if self.v10 and not halted_all:
+                for n, hid, draft in extra:
+                    if consider(n, hid):
+                        halted_all = True
+                        break
+                else:
+                    for g in alt_groups:
+                        drops.extend(merged_drop(m, g) for m in g["mergedIds"] if m in hyps and m in index)
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
         for sess in sessions.values():

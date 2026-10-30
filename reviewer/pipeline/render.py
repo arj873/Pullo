@@ -110,7 +110,7 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
               coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
               specialists: dict | None = None, sweep: dict | None = None,
-              alternate_models: list | None = None) -> str:
+              alternate_models: list | None = None, alt_coverage: list | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -186,6 +186,9 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
             out[-1:] = [f"- Lanes ending in `.alt` re-ran those lenses on the alternate investigator model "
                         f"{', '.join(alternate_models)}; their duplicates of earlier lanes were merged before "
                         "verification.", ""]
+        if alt_coverage:                     # investigator.impact@v10 only: the optional alternate lanes' ends
+            out[-1:] = ["- Alternate-model coverage (the `.alt` lanes are additive: these did not make the run "
+                        "partial):", *[f"  - {n}" for n in alt_coverage], ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
         out += sweep_section(sweep, specialists)
     out += [f"## Comments ({len(comments)})", ""]

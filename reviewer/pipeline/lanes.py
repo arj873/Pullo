@@ -383,13 +383,23 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 # On v3 Terra traces (about $0.23-0.33 per lane) a v10 run's INVESTIGATE reaches roughly $1.0 + $1.2 at most, leaving
 # about $1.8 for VERIFY and JUDGE.
 #
-# Merge (CROSS_MERGE_RULE over V10_AGENTS order, every cross-lane merge of a v10 run): a later lane's hypothesis is
-# merged into an earlier lane's kept one only when it is a restatement - the v3 merge predicate (same head path and
-# category, start lines within 3) AND the near-duplicate test (overlapping location ranges, claim Jaccard >=
-# NEAR_DUP_SIMILARITY, identical distinctive tokens). There is no near-duplicate cap (no `collapses`).
-# VERIFY and the verifier are v3's, unchanged: candidates round-robin across the completed lanes in V10_AGENTS order
-# (output order inside a lane), at most specialists.MAX_VERIFY_CANDIDATES (20; the rest `over-cap`), then the merge
-# retry (a kept hypothesis without a finding hands VERIFY its first merged duplicate within the cap).
+# Optional alternate lanes (V10_ALT_OPTIONAL_TEXT). The alternate lanes are additive: an alternate lane that reaches its
+# spend, tool-call or time share, or whose model call fails (provider error, timeout, ...), ends only that lane. What
+# it already answered is kept (an exploration-floor draft included), its agent status says why it ended, and
+# v10_alt_coverage discloses it as a coverage note ("alt-lane-capped: <lane> (<code>)" or "alt-lane-failed: ...") in
+# review.md - never as an INVESTIGATE incomplete entry, so it never makes the run partial. Host-level ends (replay
+# failure, cancellation, an internal or spend-book error) still fail the stage exactly as in v3. Only a v3 lane, VERIFY
+# or JUDGE shortfall makes a v10 run partial.
+#
+# Merge (V10_MERGE_TEXT). First the three v3 lanes' hypotheses are merged exactly as v3 merges them
+# (specialists.merge, specialist-merge@2, v3 order). Then each alternate-lane hypothesis (V10_AGENTS order, output
+# order) is merged into the first kept hypothesis of an earlier lane (a v3 lane's, or an earlier alternate lane's) only
+# when it restates it - the v3 predicate AND the near-duplicate test (overlapping location ranges, claim Jaccard >=
+# NEAR_DUP_SIMILARITY, identical distinctive tokens): cross-model-merge@1; otherwise it is kept. No near-duplicate cap.
+# VERIFY and the verifier are v3's, unchanged, on the v3 lanes: their candidates round-robin in v3 order, at most
+# specialists.MAX_VERIFY_CANDIDATES (20; the rest `over-cap`), then v3's merge retry. Only then the alternate lanes'
+# kept candidates (round-robin across the alternate lanes) are verified within the same cap; an alternate restatement
+# is dropped as `merged` without a retry. With no alternate hypothesis, VERIFY is exactly v3's.
 
 V10_AGENTS = prompts.V10_AGENTS
 V10_ALT_AGENTS = prompts.V10_ALT_AGENTS
@@ -401,9 +411,17 @@ V10_BUDGET_TEXT = ("K = 6 lanes in V10_AGENTS order (the three v3 specialists, t
                    "ceiling; spend: v3 lane i < share*(i+1)//3 with share = investigation_limit (exactly v3); "
                    "alternate lane j < min(S + alt*(j+1)//A, share) with S = INVESTIGATE spend when the first "
                    "alternate lane started and alt = V10_ALT_SPEND_BP of the ceiling; per-agent caps unchanged")
-V10_VERIFY_TEXT = ("v3 VERIFY unchanged: round-robin across the completed lanes in V10_AGENTS order, output order inside "
-                   "a lane; kept beyond specialists.MAX_VERIFY_CANDIDATES -> 'over-cap'; a kept hypothesis without a "
-                   "finding sends its first merged duplicate to VERIFY within the cap; other duplicates -> 'merged'")
+V10_VERIFY_TEXT = ("v3 VERIFY unchanged on the v3 lanes (round-robin in v3 order, output order inside a lane; beyond "
+                   "specialists.MAX_VERIFY_CANDIDATES -> 'over-cap'; the merge retry), then the alternate lanes' kept "
+                   "candidates round-robin within the same cap; alternate restatements -> 'merged' without a retry")
+V10_MERGE_TEXT = ("the v3 lanes merged exactly as v3 (specialist-merge@2); then an alternate-lane hypothesis merges into "
+                  "the first kept hypothesis of an earlier lane only when it restates it (cross-model-merge@1: same "
+                  "head path and category, |line - line| <= MERGE_LINE_WINDOW, overlapping location ranges, claim "
+                  "word-set Jaccard >= NEAR_DUP_SIMILARITY, identical distinctive tokens); otherwise it is kept")
+V10_ALT_OPTIONAL_TEXT = ("an alternate lane that reaches its share or whose model call fails ends alone: its answer so far "
+                         "is kept and it is disclosed as a coverage note (alt-lane-capped / alt-lane-failed), not as an "
+                         "incomplete entry; host-level ends (replay, cancellation, internal, spend book) fail as in v3")
+V10_CAPPED_CODES = ("budget-exhausted", "deadline-exceeded", "tool-calls-exhausted")
 
 
 def is_v10_plan(plan: dict) -> bool:
@@ -411,8 +429,47 @@ def is_v10_plan(plan: dict) -> bool:
 
 
 def v10_merge(hypotheses: list[dict]) -> list[dict]:
-    """impact@v10 merges ([{keptId, mergedIds, rule: CROSS_MERGE_RULE}]): restatements only, over V10_AGENTS order."""
-    return specialists.merge(hypotheses, list(V10_AGENTS), predicate=cross_duplicate, rule=CROSS_MERGE_RULE)
+    """impact@v10 merges: the v3 lanes' groups exactly as v3 gives them (specialist-merge@2), then the alternate
+    restatement groups (cross-model-merge@1) in kept order. A kept v3 hypothesis may head one group of each rule."""
+    v3 = [h for h in hypotheses if h["specialist"] in specialists.AGENTS]
+    out = specialists.merge(v3)
+    gone = {m for g in out for m in g["mergedIds"]}
+    order = {a: i for i, a in enumerate(V10_AGENTS)}
+    kept = [h for h in v3 if h["id"] not in gone]
+    merged: dict[str, list[str]] = {}
+    for h in hypotheses:
+        if h["specialist"] not in V10_ALT_AGENTS:
+            continue
+        into = next((k for k in kept if order[k["specialist"]] < order[h["specialist"]] and cross_duplicate(k, h)),
+                    None)
+        if into is None:
+            kept.append(h)
+        else:
+            merged.setdefault(into["id"], []).append(h["id"])
+    return out + [{"keptId": k["id"], "mergedIds": merged[k["id"]], "rule": CROSS_MERGE_RULE}
+                  for k in kept if k["id"] in merged]
+
+
+def v10_alt_coverage(payload: dict, events: list) -> list[str]:
+    """impact@v10 coverage notes for the optional alternate lanes (a pure function of the INVESTIGATE payload and the
+    trace): every alternate lane that ended before its own answer, or whose exploration-floor continuation ended
+    without one so its first-hop draft was used. An empty list when every alternate lane completed normally."""
+    out = []
+    for a in payload.get("agents", ()):
+        lane = a["agentId"]
+        if not prompts.is_alt_lane(lane):
+            continue
+        if a["status"] != "completed":
+            code = a["error"]["code"] if "error" in a else "tool-calls-exhausted"
+            kind = "alt-lane-capped" if code in V10_CAPPED_CODES else "alt-lane-failed"
+            out.append(f"{kind}: {lane} (`{code}`; status {a['status']})")
+            continue
+        for e in events:
+            if e["type"] == "retrieval.floor" and e["agentId"] == lane and e["decision"] == "draft" \
+                    and "errorCode" in e:
+                kind = "alt-lane-capped" if e["errorCode"] in V10_CAPPED_CODES else "alt-lane-failed"
+                out.append(f"{kind}: {lane} (`{e['errorCode']}`; its first-hop draft answer was used)")
+    return out
 
 
 def v10_tool_pool(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int) -> int:
@@ -475,6 +532,7 @@ def v10_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_c
             "altLanes": {a: prompts.lens_of(a) for a in V10_ALT_AGENTS},
             "alternateInvestigator": None if alt is None else {k: alt[k] for k in ("provider", "model", "family")},
             "budget": v10_budget_doc(policy, budget, tool_max_calls),
-            "merge": {"rule": CROSS_MERGE_RULE, "text": CROSS_MERGE_TEXT, "lineWindow": specialists.MERGE_LINE_WINDOW,
-                      "similarity": NEAR_DUP_SIMILARITY},
+            "merge": {"v3Rule": specialists.MERGE_RULE, "rule": CROSS_MERGE_RULE, "text": V10_MERGE_TEXT,
+                      "lineWindow": specialists.MERGE_LINE_WINDOW, "similarity": NEAR_DUP_SIMILARITY},
+            "altLanesOptional": {"text": V10_ALT_OPTIONAL_TEXT, "cappedCodes": list(V10_CAPPED_CODES)},
             "verify": {"text": V10_VERIFY_TEXT, "maxCandidates": specialists.MAX_VERIFY_CANDIDATES}}

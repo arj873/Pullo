@@ -28,7 +28,7 @@ from tests.pipeline.helpers import events_of, hyp, judge, model_calls, script, v
 from tests.pipeline.test_cross_model_v7 import (ALT_MODEL, ALT_PRICE, MAIN_MODEL, V1_V5_REPO, V7_PLAN, V7_POLICY,
                                                 V7_PROFILE, CrossRig, PerModel, answered_by, repo_identity)
 from tests.pipeline.test_impact_pipeline import doc_of, w
-from tests.pipeline.test_specialists import V3_PLAN, V3_POLICY, V3_PROFILE, ask, inv_calls, sfinal, shid
+from tests.pipeline.test_specialists import V3_PLAN, V3_POLICY, V3_PROFILE, ask, inv_calls, sfail, sfinal, shid
 
 ROOT = Path(__file__).resolve().parents[2]
 INV10, VER = prompts.INVESTIGATOR_IMPACT_V10_PROMPT, prompts.VERIFIER_IMPACT_PROMPT
@@ -263,10 +263,17 @@ class Rules(unittest.TestCase):
         apart = H(4, "safety.alt", "util.py", 12, claim="clamp swaps lo and hi")               # within 3, no overlap
         field = H(5, "safety", "util.py", 10, claim="clamp swaps `lo` and hi")                 # other distinctive token
         hs = [kept, field, other, same, apart]
-        # the v3 rule (specialist-merge@2) would merge every later one into `kept`
-        self.assertEqual(specialists.merge([kept, field], list(V3_LANES))[0]["mergedIds"], [field["id"]])
-        self.assertEqual(lanes.v10_merge(hs), [{"keptId": kept["id"], "mergedIds": [same["id"]],
-                                                "rule": "cross-model-merge@1"}])
+        # among the v3 lanes, exactly v3's merge (specialist-merge@2 merges `field` into `kept`); the alternate lanes
+        # are merged into that result only when they restate a kept hypothesis (cross-model-merge@1)
+        v3_groups = specialists.merge([kept, field])
+        self.assertEqual(v3_groups, [{"keptId": kept["id"], "mergedIds": [field["id"]], "rule": "specialist-merge@2"}])
+        self.assertEqual(lanes.v10_merge(hs), v3_groups + [{"keptId": kept["id"], "mergedIds": [same["id"]],
+                                                            "rule": "cross-model-merge@1"}])
+        self.assertEqual(lanes.v10_merge([kept, field]), specialists.merge([kept, field]))      # no alt: exactly v3
+        # an alternate restatement of a hypothesis v3 merged away is compared with the kept ones only: `field` names
+        # another distinctive token than `kept`, so its alternate restatement is a new candidate
+        self.assertEqual(lanes.v10_merge([kept, field, dict(field, id="hyp_" + "f" * 16, specialist="safety.alt")]),
+                         v3_groups)
         self.assertEqual(lanes.lane_merge(V10_PLAN, hs), lanes.v10_merge(hs))
         self.assertEqual(validate("StagePayload", {"stage": "INVESTIGATE", "hypotheses": [], "agents": [],
                                                    "merges": lanes.v10_merge(hs)}), [])
@@ -359,31 +366,84 @@ class EndToEnd(V10Rig):
             self.replay_v10(m, res, profile=other, eval_id="evr_" + "9" * 16)
         self.assertEqual(c.exception.code, "identity-mismatch")
 
-    def test_alternate_model_spend_is_capped_without_touching_the_v3_lanes(self):
+    def v3_only_script(self, m, **alt_finals):
+        """v3 lanes find hc and hu (both confirmed); the alternate lanes' scripted answers are `alt_finals`."""
+        hc, hu = self.h_core(m), self.h_util(m)
+        main, alt = self.lanes6(contracts=[hc], logic=[hu], **alt_finals)
+        main += [vfinal(0, m, path="src/app/core.py", line=3), vfinal(1, m, path="src/app/util.py", line=2),
+                 judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hu)]))]
+        return main, alt
+
+    def test_alternate_lane_budget_exhaustion_keeps_the_run_completed_with_a_coverage_note(self):
         m = self.big()
-        main, alt, _ = self.e2e(m)
+        main, alt = self.v3_only_script(m, **{"contracts.alt": [self.h_io(m)]})
         with mock.patch.object(lanes, "V10_ALT_SPEND_BP", 1):            # $0.0004 for all alternate lanes
-            res, spy = self.record_v10(m, main, alt)
-        self.assertEqual(res.status, "partial")
-        agents = {a["agentId"]: a for a in self.payload(res)["payload"]["agents"]}
+            res, spy = self.record_v10(m, script(*main), script(*alt))
+            rep = self.replay_v10(m, res)                               # the same rules (bound into the identity)
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        inv = self.payload(res)
+        self.assertEqual(inv["status"], "completed")
+        notes = lanes.v10_alt_coverage(inv["payload"], events_of(res))
+        self.assertEqual(notes, [f"alt-lane-capped: {a} (`budget-exhausted`; status budget)" for a in ALT])
+        md = Path(res.review_path).read_text(encoding="utf-8")
+        self.assertIn("did not make the run partial", md)
+        self.assertIn("  - alt-lane-capped: contracts.alt (`budget-exhausted`; status budget)", md)
+        self.assertNotIn("## Incomplete", md)
+        self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "logic"])
+        agents = {a["agentId"]: a for a in inv["payload"]["agents"]}
         self.assertTrue(all(agents[a]["status"] == "completed" for a in V3_LANES))
         self.assertEqual([agents[a]["status"] for a in ALT], ["budget"] * 3)
         errs = [e["error"] for e in events_of(res) if e["type"] == "error"
                 and (e["error"].get("detail") or {}).get("scope") == "alternate-model-share"]
         self.assertEqual({e["detail"]["rule"] for e in errs}, {lanes.V10_BUDGET_RULE})
         self.assertEqual(spy.inner[ALT_MODEL].calls, 1)                 # the first call was admitted below the cap
-        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")][:2],
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
                          [shid("contracts", 0, self.h_core(m)), shid("logic", 0, self.h_util(m))])
+        # replay and load re-derive the completed status and the review.md coverage note
+        self.assertEqual((rep.status, rep.incomplete), ("completed", []))
+        from reviewer.pipeline import runner
+        self.assertEqual(runner.load_result(self.out, res.run_id).status, "completed")
 
-    def test_a_v3_lane_over_its_v3_share_names_the_v3_rule(self):
+    def test_alternate_model_failure_keeps_the_run_completed_with_a_coverage_note(self):
         m = self.big()
-        main, alt, _ = self.e2e(m)
-        with mock.patch.object(lanes, "v10_primary_spend_cumulative", lambda budget: [1, 1, 1]):
-            res, _ = self.record_v10(m, main, alt)
+        hc, hu = self.h_core(m), self.h_util(m)
+        main, _ = self.v3_only_script(m)
+        # contracts.alt: the alternate provider fails (rejected); logic.alt: the provider times out after its first
+        # hop (an unknown provider outcome: as in v3, no further lane starts, so safety.alt is not started either)
+        alt = [answered_by(e, ALT_MODEL) if "response" in e else e
+               for e in [*sfail("contracts.alt", 0), ask("logic.alt", 0), *sfail("logic.alt", 1, code="provider-timeout"),
+                         ask("safety.alt", 0), sfinal("safety.alt", 1, dict(hu, claim="clamp swaps lo and hi values"))]]
+        res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        inv = self.payload(res)["payload"]
+        self.assertEqual([(a["agentId"], a["status"]) for a in inv["agents"]],
+                         [(a, "completed") for a in V3_LANES] + [("contracts.alt", "failed"), ("logic.alt", "timeout"),
+                                                                ("safety.alt", "timeout")])
+        self.assertEqual(lanes.v10_alt_coverage(inv, events_of(res)),
+                         ["alt-lane-failed: contracts.alt (`provider-error`; status failed)",
+                          "alt-lane-failed: logic.alt (`provider-timeout`; status timeout)",
+                          "alt-lane-failed: safety.alt (`provider-timeout`; status timeout)"])
+        self.assertIn("not started", inv["agents"][-1]["error"]["message"])
+        self.assertEqual(inv["merges"], [])
+        self.assertIn("alt-lane-failed: logic.alt", Path(res.review_path).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "logic"])
+
+    def test_a_v3_lane_budget_exhaustion_still_makes_the_run_partial_as_in_v3(self):
+        m = self.big()
+        main, alt = self.v3_only_script(m)
+        main = [e for e in main if e["agentId"] != "safety"]           # safety never reaches its provider
+        big = 10 ** 9
+        with mock.patch.object(lanes, "v10_primary_spend_cumulative", lambda budget: [big, big, 1]):
+            res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([(i["stage"], i["reason"]) for i in res.incomplete], [("INVESTIGATE", "budget")])
+        self.assertIn("specialist safety: budget-exhausted", res.incomplete[0]["detail"])
         errs = [e["error"] for e in events_of(res) if e["type"] == "error"
                 and (e["error"].get("detail") or {}).get("scope") == "specialist-share"]
-        self.assertTrue(errs)
         self.assertEqual({e["detail"]["rule"] for e in errs}, {specialists.BUDGET_RULE})
+        agents = {a["agentId"]: a["status"] for a in self.payload(res)["payload"]["agents"]}
+        self.assertEqual(agents, {"contracts": "completed", "logic": "completed", "safety": "budget",
+                                  "contracts.alt": "completed", "logic.alt": "completed", "safety.alt": "completed"})
 
     def test_unused_v3_room_never_rolls_into_the_alternate_lanes(self):
         m = self.big()
@@ -444,14 +504,57 @@ class V3Verify(V10Rig):
                  judge()]
         with mock.patch.object(specialists, "MAX_VERIFY_CANDIDATES", 2):
             res, _ = self.record_v10(m, script(*main), script(*alt))
-        # v3: output order inside a lane (conf2 before the P1 hc), round-robin across lanes, cap -> over-cap
+        # v3: output order inside a lane (conf2 before the P1 hc), round-robin across the v3 lanes, cap -> over-cap;
+        # the alternate lanes' candidates come only after all of v3's
         self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
                          [shid("contracts", 0, conf2), shid("logic", 0, hu)])
         vpay = json.loads((Path(res.run_dir) / res.stages["VERIFY"]["path"]).read_text())["payload"]
         over = [d for d in vpay["drops"] if d["reason"] == "over-cap"]
-        self.assertEqual([d["subjectIds"] for d in over], [[shid("safety.alt", 0, hio)], [shid("contracts", 1, hc)]])
+        self.assertEqual([d["subjectIds"] for d in over], [[shid("contracts", 1, hc)], [shid("safety.alt", 0, hio)]])
         self.assertIn("round-robin specialist order", over[0]["detail"])
         self.assertEqual({e["request"]["model"] for e in model_calls(res, "VERIFY")}, {MAIN_MODEL})   # verifier unchanged
+
+    def test_with_no_alternate_hypothesis_verify_is_exactly_v3s(self):
+        """Same case and v3 lane answers (with a v3 merge, a refuted kept hypothesis and its merge retry); the alternate
+        lanes answer with nothing: VERIFY's candidates, requests, merges and drops equal the v3 run's."""
+        def parts(m):
+            hc, hu = self.h_core(m), self.h_util(m)
+            dup = dict(hc, claim="the loop drops the first element of the list")    # v3 merge into hc (same spot)
+            conf2 = hyp(m, "src/app/conf.py", 2, claim="RETRIES is too high", severity="P2",
+                        evidence=[m.cite("src/app/conf.py", 2)])
+            finals = {"contracts": [hc, conf2], "logic": [dup], "safety": [hu]}
+            ver = [vfinal(0, m, verdict="refuted"), vfinal(1, m, path="src/app/util.py", line=2),
+                   vfinal(2, m, path="src/app/conf.py", line=2), vfinal(3, m, path="src/app/core.py", line=3),
+                   judge()]
+            return finals, ver
+        m3, m10 = self.big(), self.big()
+        finals, ver = parts(m3)
+        v3_main = [e for a in V3_LANES for e in (ask(a, 0), sfinal(a, 1, *finals[a]))]
+        res3, _ = self.record_v3(m3, script(*v3_main, *ver))
+        finals, ver = parts(m10)
+        main, alt = self.lanes6(**finals)
+        res10, _ = self.record_v10(m10, script(*main, *ver), script(*alt), eval_id="evr_" + "c" * 16)
+        p3, p10 = (json.loads((Path(r.run_dir) / r.stages["VERIFY"]["path"]).read_text())["payload"]
+                   for r in (res3, res10))
+        self.assertEqual(self.payload(res10)["payload"]["merges"], self.payload(res3)["payload"]["merges"])
+        self.assertEqual(len(self.payload(res3)["payload"]["merges"]), 1)
+        self.assertEqual([e["request"] for e in model_calls(res10, "VERIFY")],
+                         [e["request"] for e in model_calls(res3, "VERIFY")])
+        self.assertEqual(len(model_calls(res3, "VERIFY")), 4)                     # 3 kept + the merge retry
+        self.assertEqual(p10["drops"], p3["drops"])
+        self.assertEqual([v["hypothesisId"] for v in p10["verifications"]],
+                         [v["hypothesisId"] for v in p3["verifications"]])
+
+    def test_alternate_candidates_follow_all_of_v3s_verify_including_its_merge_retry(self):
+        m = self.big()
+        hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
+        dup = dict(hc, claim="the loop drops the first element of the list")
+        main, alt = self.lanes6(contracts=[hc], logic=[dup], **{"contracts.alt": [hio]})
+        main += [vfinal(0, m, verdict="refuted"), vfinal(1, m, path="src/app/core.py", line=3),
+                 vfinal(2, m, path="src/app/io.py", line=2), judge()]
+        res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
+                         [shid("contracts", 0, hc), shid("logic", 0, dup), shid("contracts.alt", 0, hio)])
 
     def test_verify_has_no_judge_reserve_stop_as_in_v3(self):
         m = self.big()
