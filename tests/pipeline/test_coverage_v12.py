@@ -423,7 +423,7 @@ class EndToEnd(V12Rig):
         self.assertNotEqual(cfg, identity.config_snapshot_id(spec3))
         doc = deepcov.identity_doc(V12_POLICY, V12_PLAN["budget"], 50, 5)
         self.assertEqual((doc["behavior"], doc["floor"]["rule"], doc["verify"]["maxCandidates"],
-                          doc["commentCap"]["max"]), (deepcov.BEHAVIOR, "depth-floor@1", 32, 8))
+                          doc["commentCap"]["max"]), (deepcov.BEHAVIOR, "depth-floor@1", 20, 8))
         t = prompts.impact_template_digests(INV12)
         self.assertIn("coverageForced", t)
         self.assertEqual({k: v for k, v in t.items() if k != "coverageForced"},
@@ -498,11 +498,12 @@ class Floor(V12Rig):
         self.assertTrue(all("requestedBy" not in t for t in rr))                 # host-prepared, not reads
         cont = next(r for r in spy.requests if r["role"] == "investigator" and "depthFloor" in doc_of(r))
         d = doc_of(cont)
-        self.assertIn("not yet read with read_file (side head): src/handlers/b.py", d["depthFloor"]["unmet"])
+        self.assertIn("changed lines not yet read with read_file (side head): src/handlers/b.py [[1, 2]]",
+                      d["depthFloor"]["unmet"])
         self.assertEqual(cont["contextResults"][-2:], [t["toolCallId"] for t in rr])
         cite = {c["toolCallId"] for c in d["citations"]["citableRefs"]}
         self.assertTrue({t["toolCallId"] for t in rr} <= cite)                   # re-shown reads stay citable
-        st = deepcov.floor_status(events_of(res), "cover-01", ELIGIBLE[:2])
+        st = deepcov.floor_status(events_of(res), "cover-01", {p: [[1, 6]] for p in ELIGIBLE[:2]})
         self.assertTrue(st["met"], st)
         self.assertEqual(st["filesRead"], ELIGIBLE[:2])
         self.assertEqual([h_["specialist"] for h_ in payload(res, "INVESTIGATE")["hypotheses"]], ["cover-01"])
@@ -558,8 +559,8 @@ class Floor(V12Rig):
         real = deepcov.agent_ceiling
         hb = self.h_b(m)
 
-        def tight(unit, j, spent, budget, k):           # cover-01: no room to explore -> its hop 0 is its final turn
-            return spent + 1 if unit and j == 0 else real(unit, j, spent, budget, k)
+        def tight(unit, j, spent, budget, k, top=None):  # cover-01: no room to explore -> its hop 0 is its final turn
+            return spent + 1 if unit and j == 0 else real(unit, j, spent, budget, k, top)
         e = self.lens_ok() + [final("cover-01", 0, hb)]
         e += unit_turns("cover-02", ELIGIBLE[2:], ["src/use.py", "src/handlers/a.py"]) + [final("cover-02", 2)]
         e += [vdone("verifier-01", m, path="src/handlers/b.py", line=2), judge()]
@@ -579,7 +580,7 @@ class Floor(V12Rig):
         e += [final("cover-02", 2), judge()]
         real = deepcov.agent_ceiling
         with mock.patch.object(deepcov, "agent_ceiling",
-                               lambda u, j, s, b, k: s if u and j == 0 else real(u, j, s, b, k)):
+                               lambda u, j, s, b, k, top=None: s if u and j == 0 else real(u, j, s, b, k, top)):
             res, _ = self.record_v12(m, script(*e))
         self.assertEqual(res.status, "completed", res.incomplete)
         agents = {a["agentId"]: a for a in payload(res, "INVESTIGATE")["agents"]}
@@ -596,7 +597,7 @@ class Floor(V12Rig):
         e += self.units_ok() + [judge()]
         real = deepcov.agent_ceiling
         with mock.patch.object(deepcov, "agent_ceiling",
-                               lambda u, j, s, b, k: 0 if not u and j == 0 else real(u, j, s, b, k)):
+                               lambda u, j, s, b, k, top=None: 0 if not u and j == 0 else real(u, j, s, b, k, top)):
             res, _ = self.record_v12(m, script(*e))
         self.assertEqual(res.status, "partial")
         self.assertEqual([(i["stage"], i["reason"]) for i in res.incomplete], [("INVESTIGATE", "budget")])
@@ -799,3 +800,190 @@ class V10Parity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- 9. gate fixes (8ac0b59 GO-WITH-FIXES)
+
+def vfail(agent, code="provider-error"):
+    err = {"code": code, "message": "scripted failure", "retryable": True, "stage": "VERIFY",
+           "detail": {"outcome": "rejected-before-processing"}}
+    return [entry("VERIFY", "verifier", agent, 0, a, error=err) for a in range(3)]
+
+
+class GateFixes(V12Rig):
+    def base_script(self, m, verify):
+        hl, hb, hs = self.h_lib(m), self.h_b(m), self.h_svc(m)
+        e = []
+        for a, hh in (("contracts", [hl]), ("logic", []), ("safety", [])):
+            e += [turn(a, 0, lens_reads()), final(a, 1, *hh)]
+        e += unit_turns("cover-01", ELIGIBLE[:2], ["src/handlers/c.py", "src/use.py"]) + [final("cover-01", 2, hb)]
+        e += unit_turns("cover-02", ELIGIBLE[2:], ["src/use.py", "src/handlers/a.py"]) + [final("cover-02", 2, hs)]
+        return e + verify + [judge()], (hl, hb, hs)
+
+    def clocked(self, m, scr, when, seconds):
+        """record_v12 with a host clock that jumps `seconds` when the provider is first asked for `when(request)`."""
+        from unittest import mock
+        from tests.pipeline import helpers
+        real = helpers.SpyProvider.call
+        rig = self
+
+        def call(spy, request, key):
+            if when(request) and not getattr(spy, "_jumped", False):
+                spy._jumped = True
+                rig.clock_value[0] += seconds
+            return real(spy, request, key)
+        with mock.patch.object(helpers.SpyProvider, "call", call):
+            return self.record_v12(m, scr)
+
+    # S1 ---------------------------------------------------------------------------------------------------------
+    def test_s1_a_unit_candidate_verifier_failure_is_a_coverage_note(self):
+        m = self.case12()
+        e, (hl, hb, hs) = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1), *vfail("verifier-02"),
+                                               vdone("verifier-03", m, path="src/svc.py", line=2)])
+        res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "completed", res.incomplete)
+        drops = {d["subjectIds"][0]: d["reason"] for d in payload(res, "VERIFY")["drops"]}
+        self.assertEqual(drops[hid("cover-01", 0, hb)], "verifier-failed")
+        self.assertIn("unit-candidates-unverified: 1 coverage-unit candidate(s) without a verdict (verifier-failed 1",
+                      md_of(res))
+
+    def test_s1_a_lens_candidate_verifier_failure_stays_incomplete(self):
+        m = self.case12()
+        e, _ = self.base_script(m, [*vfail("verifier-01"), vdone("verifier-02", m, path="src/handlers/b.py", line=2),
+                                    vdone("verifier-03", m, path="src/svc.py", line=2)])
+        res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([(i["stage"], i["reason"]) for i in res.incomplete], [("VERIFY", "verifier-failure")])
+
+    def test_s1_no_unit_candidate_starts_after_the_verify_start_window(self):
+        m = self.case12()
+        e, (hl, hb, hs) = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1)])
+        res, _ = self.clocked(m, script(*e), lambda r: r["role"] == "verifier", deepcov.verify_unit_slice(45) + 1)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual([c["agentId"] for c in model_calls(res, "VERIFY")], ["verifier-01"])
+        d = [x for x in payload(res, "VERIFY")["drops"] if x["reason"] == "deadline"]
+        self.assertEqual({x["subjectIds"][0] for x in d}, {hid("cover-01", 0, hb), hid("cover-02", 0, hs)})
+        self.assertIn("VERIFY start window for coverage-unit candidates reached (34s of the 45s", d[0]["detail"])
+        self.assertIn("unit-candidates-unverified: 2", md_of(res))
+        self.assertEqual((deepcov.verify_unit_slice(540), deepcov.verify_unit_slice(45)), (420, 34))
+
+    def test_s1_no_unit_candidate_starts_without_run_tool_calls_left(self):
+        from unittest import mock
+        m = self.case12()
+        e, (hl, hb, hs) = self.base_script(m, [vdone("verifier-01", m, path="src/lib.py", line=1)])
+        with mock.patch.object(deepcov, "VERIFY_UNIT_TOOL_MARGIN", 10_000):
+            res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "completed", res.incomplete)
+        d = [x for x in payload(res, "VERIFY")["drops"] if x["reason"] == "budget"]
+        self.assertEqual(len(d), 2)
+        self.assertIn("VERIFY stopped starting coverage-unit candidates", d[0]["detail"])
+
+    def test_s1_units_leave_verify_room_for_known_lens_candidates_and_rereads_are_pooled(self):
+        b = V12_PLAN["budget"]
+        self.assertEqual([deepcov.unit_top(b, n) for n in (0, 8, 12, 20)], [2_600_000, 2_600_000, 2_500_000, 1_700_000])
+        self.assertEqual(deepcov.unit_read_cap(40, 200, 5, 36), 40 + 200 - 70 - 36)
+        self.assertEqual(deepcov.unit_read_cap(40, 50, 5, 36), 40)
+        self.assertEqual(deepcov.MAX_VERIFY, 20)
+        from unittest import mock
+        m = self.case12()
+        first = [rf("src/handlers/a.py"), rf("src/use.py", 2), rf("src/svc.py", 2)]
+        e = Floor.lens_ok(self) + [turn("cover-01", 0, first), final("cover-01", 1)]
+        e += [turn("cover-01", 2, [rf(p, 3) for p in ELIGIBLE[:2]] + [rf("src/lib.py", 1, 2)]), final("cover-01", 3)]
+        e += unit_turns("cover-02", ELIGIBLE[2:], ["src/use.py", "src/handlers/a.py"]) + [final("cover-02", 2), judge()]
+        with mock.patch.object(deepcov, "REREAD_POOL", 1):
+            res, _ = self.record_v12(m, script(*e))
+        self.assertEqual(len([t for t in tool_calls(res, "INVESTIGATE") if t["agentId"].endswith(".reread")]), 1)
+
+    # S2 ---------------------------------------------------------------------------------------------------------
+    def test_s2_a_kept_draft_hypothesis_citing_a_tool_ref_survives_the_continuation(self):
+        from tests.pipeline.helpers import tcid
+        m = self.case12()
+        old = tcid("INVESTIGATE", "cover-01", 1, "read_file", side="head", path="src/use.py", start_line=2, end_line=5)
+        h = hyp(m, "src/handlers/b.py", 2, claim="handle_b no longer checks the user", category="security",
+                impact="security-exposure", evidence=[m.cite("src/handlers/b.py", 2),
+                                                      {"kind": "tool-ref", "toolCallId": old, "index": 0}])
+        e = Floor.lens_ok(self) + [turn("cover-01", 0, [rf("src/handlers/a.py"), rf("src/use.py", 2)]),
+                                   final("cover-01", 1, h)]
+        new = tcid("INVESTIGATE", "cover-01.reread", 1, "read_file", side="head", path="src/use.py", start_line=2,
+                   end_line=5)
+        kept = dict(h, evidence=[m.cite("src/handlers/b.py", 2), {"kind": "tool-ref", "toolCallId": new, "index": 0}])
+        e += [turn("cover-01", 2, [rf("src/handlers/b.py", 1, 2), rf("src/handlers/c.py", 2), rf("src/svc.py"),
+                                   treq("find_references", side="head", symbol="handle_b")]),
+              turn("cover-01", 3, [rf("src/use.py", 3), rf("src/lib.py", 1, 2)]), final("cover-01", 4, kept)]
+        e += unit_turns("cover-02", ELIGIBLE[2:], ["src/use.py", "src/handlers/a.py"]) + [final("cover-02", 2)]
+        e += [vdone("verifier-01", m, path="src/handlers/b.py", line=2), judge()]
+        res, spy = self.record_v12(m, script(*e))
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(validate_trace(events_of(res)), [])
+        cont = next(doc_of(r) for r in spy.requests if r["role"] == "investigator" and "depthFloor" in doc_of(r))
+        self.assertEqual(cont["depthFloor"]["draftHypotheses"][0]["evidence"][1]["toolCallId"], new)  # remapped
+        inv = payload(res, "INVESTIGATE")
+        self.assertEqual([x["claim"] for x in inv["hypotheses"] if x["specialist"] == "cover-01"], [h["claim"]])
+        self.assertNotIn("cover-01: 1 of 1 answered hypothesis(es) dropped", md_of(res))
+
+    def test_s2_cited_reads_are_re_shown_first_and_an_unresolved_answer_is_disclosed(self):
+        ev = [{"type": "tool.call", "stage": "INVESTIGATE", "agentId": "a", "requestedBy": "c", "toolCallId": f"t{i}",
+               "tool": "read_file", "args": {"side": "head", "path": f"p{i}", "start_line": 1, "end_line": 2},
+               "result": {"status": "ok", "evidence": [{"excerpt": "x" * 10, "lines": [1, 2]}]}} for i in range(5)]
+        self.assertEqual([e["toolCallId"] for e in deepcov.reread_events(ev, "a", ("t0",), None, 2)], ["t0", "t4"])
+        self.assertEqual([e["toolCallId"] for e in deepcov.reread_events(ev, "a", (), {"p1": [[1, 3]]}, 2)],
+                         ["t1", "t4"])
+        d = deepcov.remap_draft({"hypotheses": [{"evidence": [{"kind": "tool-ref", "toolCallId": "t0", "index": 0},
+                                                               {"kind": "code", "path": "x"}]}]}, {"t0": "r0"})
+        self.assertEqual(d["hypotheses"][0]["evidence"][0]["toolCallId"], "r0")
+        m = self.case12()
+        bad = hyp(m, "src/handlers/b.py", 2, evidence=[{"kind": "tool-ref", "toolCallId": "tool_" + "0" * 16,
+                                                         "index": 0}])
+        e = Floor.lens_ok(self) + unit_turns("cover-01", ELIGIBLE[:2], ["src/handlers/c.py", "src/use.py"])
+        e += [final("cover-01", 2, bad)]
+        e += unit_turns("cover-02", ELIGIBLE[2:], ["src/use.py", "src/handlers/a.py"]) + [final("cover-02", 2), judge()]
+        res, _ = self.record_v12(m, script(*e))
+        self.assertIn("cover-01: 1 of 1 answered hypothesis(es) dropped before VERIFY", md_of(res))
+
+    # S3 ---------------------------------------------------------------------------------------------------------
+    def test_s3_a_lens_continuation_stopped_by_its_time_slice_keeps_the_draft_without_an_incomplete(self):
+        m = self.case12()
+        hl = self.h_lib(m)
+        e = [final("contracts", 0, hl)] + Floor.lens_ok(self, skip=("contracts",)) + Floor.units_ok(self)
+        e += [vdone("verifier-01", m, path="src/lib.py", line=1), judge()]
+        res, _ = self.clocked(m, script(*e), lambda r: r["role"] == "investigator", 40)   # lens slice 0 is 37 s
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(len(inv_calls(res, "contracts")), 1)
+        self.assertEqual([x["specialist"] for x in payload(res, "INVESTIGATE")["hypotheses"]], ["contracts"])
+        self.assertIn("Lens lane contracts: 0 request turn(s), 0 distinct read(s); depth floor NOT met", md_of(res))
+
+    # S4, N1, N2, N6 ---------------------------------------------------------------------------------------------
+    def test_s4_n2_n6_partition_rules(self):
+        files = [{"path": p, "status": "modified"} for p in (
+            "src/license.go", "app/models/notice.rb", "pkg/changes.py", "web/authors.ts", "LICENSE", "CHANGELOG",
+            "src/Latest.java", "src/Contest.kt", "src/FooTest.java", "src/TestFoo.java", "img/a.png", "big/x.sql")]
+        diffs = {f["path"]: fake_diff(f["path"], change()) for f in files}
+        diffs["img/a.png"] = {"result": {"status": "unavailable", "evidence": [], "notice": "'img/a.png' is binary; "
+                                                                                           "text not shown."}}
+        diffs["big/x.sql"] = {"result": {"status": "unavailable", "evidence": [],
+                                         "notice": "'big/x.sql' has too many lines to diff."}}
+        plan_doc = deepcov.plan(files, diffs)
+        self.assertEqual({s["path"]: s["reason"] for s in plan_doc["skipped"]},
+                         {"LICENSE": "docs", "CHANGELOG": "docs", "src/FooTest.java": "tests", "src/TestFoo.java": "tests",
+                          "img/a.png": "binary", "big/x.sql": "oversized"})
+        self.assertEqual(plan_doc["eligible"], 6)
+
+    def test_n1_an_own_file_read_counts_only_with_content_on_its_changed_lines(self):
+        def read(path, lines, status="ok"):
+            return {"type": "tool.call", "stage": "INVESTIGATE", "agentId": "u", "requestedBy": "c", "tool": "read_file",
+                    "toolCallId": f"t{path}{lines}", "args": {"side": "head", "path": path, "start_line": (lines or [1])[0]},
+                    "result": {"status": status, "evidence": [{"excerpt": "x", "lines": lines}] if lines else []}}
+        files = {"a.py": [[40, 45]], "b.py": [[1, 2]], "c.py": [[5, 5]]}
+        ev = [read("a.py", [1, 20]), read("b.py", [1, 3]), read("c.py", [], status="empty")]
+        self.assertEqual(deepcov.floor_status(ev, "u", files)["filesRead"], ["b.py"])
+
+    # N5 ---------------------------------------------------------------------------------------------------------
+    def test_n5_units_not_started_after_an_unknown_provider_outcome_are_notes(self):
+        m = self.case12()
+        err = {"code": "provider-error", "message": "scripted", "retryable": True, "stage": "INVESTIGATE"}
+        e = Floor.lens_ok(self) + [entry("INVESTIGATE", "investigator", "cover-01", 0, a, error=err) for a in range(3)]
+        e += [judge()]
+        res, _ = self.record_v12(m, script(*e))
+        agents = {a["agentId"]: a for a in payload(res, "INVESTIGATE")["agents"]}
+        self.assertEqual((agents["cover-01"]["status"], agents["cover-02"]["status"]), ("failed", "failed"))
+        self.assertNotIn("INVESTIGATE", [i["stage"] for i in res.incomplete], res.incomplete)

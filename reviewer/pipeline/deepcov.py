@@ -96,7 +96,7 @@ import json
 import re
 
 from reviewer import impactmap
-from reviewer.contracts import usable_output
+from reviewer.contracts import terminal_payload, usable_output
 from reviewer.contracts.budget import investigation_limit, stage_ceiling
 from reviewer.contracts.entities import CROSS_MERGE_VERSION
 from reviewer.contracts.severity import RANK
@@ -129,9 +129,11 @@ L10N_EXTENSIONS = (".json", ".properties", ".po", ".pot", ".yml", ".yaml", ".xli
                    ".resx", ".ftl")
 _L10N_NAME = re.compile(r"^messages(_[a-z]{2,3}([_-][a-z0-9]{2,4})?)?\.properties$", re.I)
 TEST_DIRS = frozenset({"test", "tests", "__tests__", "testsuite", "spec", "specs", "__mocks__", "testing", "e2e"})
-_TEST_NAME = re.compile(r"^(test_.*\.py|.*_test\.(py|go|rb|js|ts|jsx|tsx)|conftest\.py|.*tests?\.(java|kt|cs|swift|scala)"
+_TEST_NAME = re.compile(r"^(test_.*\.py|.*_test\.(py|go|rb|js|ts|jsx|tsx)|conftest\.py"
                         r"|.*\.(test|spec|mock)\.[cm]?[jt]sx?|.*_spec\.rb)$", re.I)
-SKIP_REASONS = ("deleted", "generated", "no-text-diff", "no-code-change", "docs", "localisation", "tests")
+_TEST_CLASS = re.compile(r"^(Test[A-Z0-9_]\w*|\w*Tests?|\w*IT|\w*Spec)\.(java|kt|cs|swift|scala|groovy)$")
+SKIP_REASONS = ("deleted", "generated", "no-text-diff", "binary", "oversized", "no-code-change", "docs", "localisation",
+                "tests")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 # ---- budget (basis points of the Plan's run ceiling)
@@ -155,8 +157,15 @@ REREAD_CHARS = 48_000
 NOT_READS = ("denied", "unavailable")
 WAIVERS = ("continuations", "turns", "spend", "tool-calls", "context-chars", "nothing-new")
 
+# ---- reserves for VERIFY (S1) and the reread pool
+LENS_VERIFY_RESERVE_BP = 250          # per known lens candidate, kept out of the units' INVESTIGATE top ($0.10 of $4)
+VERIFY_TOOLS_PER_CANDIDATE = 14       # 2 host reads + hypothesis_tool_calls (12), kept out of the units' reads
+REREAD_POOL = 36                      # run-wide re-shown reads of all continuations (counted in the run tool cap)
+VERIFY_UNIT_MARGIN_SEC = 120          # unit candidates start only before VERIFY ceiling - margin (a verifier call: <= 150 s)
+VERIFY_UNIT_TOOL_MARGIN = 14          # ... and only while at least this many run tool calls are left
+
 # ---- VERIFY and JUDGE
-MAX_VERIFY = 32
+MAX_VERIFY = 20                       # ~20-25 s per candidate: 20 fit the 540 s live VERIFY ceiling
 MAX_COMMENTS = 8
 STRONG_EVIDENCE = ("reproduced", "analyzer", "verifier-traced")
 EXTRA_SEVERITIES = ("P0", "P1")
@@ -220,21 +229,31 @@ def verifier_agent(position: int) -> str:
 
 def is_test(path: str) -> bool:
     parts = path.lower().split("/")
-    return any(p in TEST_DIRS for p in parts[:-1]) or bool(_TEST_NAME.match(path.rsplit("/", 1)[-1]))
+    name = path.rsplit("/", 1)[-1]
+    return any(p in TEST_DIRS for p in parts[:-1]) or bool(_TEST_NAME.match(name)) or bool(_TEST_CLASS.match(name))
 
 
 def _file_reason(path: str) -> str | None:
     name = path.rsplit("/", 1)[-1]
     low = name.lower()
-    stem = low.rsplit(".", 1)[0]
     if impactmap.is_generated(path):
         return "generated"
-    if low.endswith(DOC_EXTENSIONS) or stem in DOC_NAMES:
+    if low.endswith(DOC_EXTENSIONS) or ("." not in low and low in DOC_NAMES):
         return "docs"
     parts = path.lower().split("/")
     if (low.endswith(L10N_EXTENSIONS) and any(p in L10N_DIRS for p in parts[:-1])) or _L10N_NAME.match(name):
         return "localisation"
     return None
+
+
+def _no_diff_reason(ev: dict | None) -> str:
+    """Why a changed file has no usable text diff, from the logged PREPARE diff result's own notice."""
+    notice = "" if ev is None else (ev["result"].get("notice") or "")
+    if " is binary" in notice:
+        return "binary"
+    if "too many lines to diff" in notice or "bytes; limit is" in notice:
+        return "oversized"
+    return "no-text-diff"
 
 
 def diff_rows(ev: dict) -> list[str]:
@@ -286,7 +305,7 @@ def plan(files: list[dict], diffs: dict) -> dict:
         reason = _file_reason(p)
         if reason is None and (ev is None or ev["result"]["status"] not in sweeps.TEXT_DIFF_STATUSES
                                or not ev["result"]["evidence"]):
-            reason = "no-text-diff"
+            reason = _no_diff_reason(ev)
         rows = [] if reason is not None else diff_rows(ev)
         if reason is None and not code_changed(rows):
             reason = "no-code-change"
@@ -349,10 +368,31 @@ def lens_top(budget: dict) -> int:
     return min(spend_top(budget), _bp(budget, LENS_SPEND_BP))
 
 
-def agent_ceiling(unit: bool, j: int, spent: int, budget: dict, k: int) -> int:
+def unit_top(budget: dict, lens_candidates: int) -> int:
+    """The units' INVESTIGATE top: spend_top, lowered so the run keeps the JUDGE reserve plus LENS_VERIFY_RESERVE_BP for
+    each lens candidate already known when the units start (lens candidates are never cut by the units' spend)."""
+    keep = _bp(budget, sweeps.JUDGE_RESERVE_BP) + lens_candidates * _bp(budget, LENS_VERIFY_RESERVE_BP)
+    return max(0, min(spend_top(budget), budget["maxUsdMicros"] - keep))
+
+
+def verify_unit_slice(ceiling: int) -> int:
+    """Seconds into VERIFY after which no coverage-unit candidate starts: the ceiling minus VERIFY_UNIT_MARGIN_SEC,
+    at most a quarter of a short ceiling (540 s live -> 420 s; the legacy 45 s -> 34 s)."""
+    return ceiling - min(VERIFY_UNIT_MARGIN_SEC, ceiling // 4)
+
+
+def unit_read_cap(requested: int, run_left: int, lens_candidates: int, reread_left: int) -> int:
+    """The highest requested-read count the units may reach: the run's remaining tool calls minus VERIFY's share for
+    the known lens candidates and what is left of the reread pool."""
+    return requested + max(0, run_left - lens_candidates * VERIFY_TOOLS_PER_CANDIDATE - reread_left)
+
+
+def agent_ceiling(unit: bool, j: int, spent: int, budget: dict, k: int, top: int | None = None) -> int:
     """BUDGET_RULE: the INVESTIGATE spend ceiling of the j-th agent (0-based) of its phase (the k = 3 lens lanes, or
-    the k units) that starts when INVESTIGATE has spent `spent`: a fair share of what is left of its phase's top."""
-    top = spend_top(budget) if unit else lens_top(budget)
+    the k units) that starts when INVESTIGATE has spent `spent`: a fair share of what is left of its phase's top
+    (`top` overrides the phase top: the units pass unit_top)."""
+    if top is None:
+        top = spend_top(budget) if unit else lens_top(budget)
     fair = spent + max(0, top - spent) // (k - j)
     return fair if unit else max(fair, spent + 1)
 
@@ -414,8 +454,20 @@ def _key(e: dict) -> str:
     return e["tool"] + json.dumps(e["args"], sort_keys=True)
 
 
-def floor_status(events: list, agent: str, files: list[str] | None) -> dict:
-    """The agent's depth-floor state. `files` is a unit's file list (None: a lens lane)."""
+def _own_read(e: dict, files: dict) -> bool:
+    """A read of a unit file that shows its changed code: read_file of the head file, ok/partial with content, whose
+    lines overlap a changed head range (any content when the file has no range)."""
+    if e["tool"] != "read_file" or e["args"].get("side") != "head" or e["args"].get("path") not in files:
+        return False
+    if e["result"]["status"] not in ("ok", "partial") or not e["result"]["evidence"]:
+        return False
+    ranges = files[e["args"]["path"]]
+    spans = [x["lines"] for x in e["result"]["evidence"] if isinstance(x.get("lines"), list)]
+    return not ranges or any(a <= rb and b >= ra for a, b in spans for ra, rb in ranges)
+
+
+def floor_status(events: list, agent: str, files: dict | None) -> dict:
+    """The agent's depth-floor state. `files` maps a unit's paths to their changed head ranges (None: a lens lane)."""
     reads = agent_reads(events, agent)
     distinct = list({_key(e): e for e in reads}.values())
     turns = len({e["requestedBy"] for e in reads})
@@ -424,8 +476,7 @@ def floor_status(events: list, agent: str, files: list[str] | None) -> dict:
         need = {"requestTurns": LENS_FLOOR_TURNS, "reads": LENS_FLOOR_READS}
     else:
         mine = set(files)
-        read = sorted({e["args"].get("path") for e in distinct if e["tool"] == "read_file"
-                       and e["args"].get("side") == "head" and e["args"].get("path") in mine})
+        read = sorted({e["args"]["path"] for e in distinct if _own_read(e, files)})
         ctx = sum(1 for e in distinct if not ((e["tool"] in ("read_file", "diff")) and e["args"].get("path") in mine))
         out.update(filesRead=read, contextReads=ctx)
         need = {"requestTurns": UNIT_FLOOR_TURNS, "reads": max(UNIT_FLOOR_READS, 2 * len(files)),
@@ -435,7 +486,7 @@ def floor_status(events: list, agent: str, files: list[str] | None) -> dict:
     return out
 
 
-def unmet(status: dict, files: list[str] | None) -> list[str]:
+def unmet(status: dict, files: dict | None) -> list[str]:
     """Model-visible list of what the floor still misses."""
     n, out = status["need"], []
     if status["requestTurns"] < n["requestTurns"]:
@@ -443,7 +494,8 @@ def unmet(status: dict, files: list[str] | None) -> list[str]:
     if status["reads"] < n["reads"]:
         out.append(f"distinct reads that ran: {status['reads']} of {n['reads']}")
     if files is not None:
-        out += [f"not yet read with read_file (side head): {p}" for p in files if p not in status["filesRead"]]
+        out += [f"changed lines not yet read with read_file (side head): {p} {files[p]}" for p in files
+                if p not in status["filesRead"]]
         if status["contextReads"] < n["contextReads"]:
             out.append(f"reads beyond your own files (callees, callers, siblings): {status['contextReads']} of "
                        f"{n['contextReads']}")
@@ -479,24 +531,54 @@ def waiver(events: list, agent: str, final_call: str, turns: int) -> str | None:
     return None
 
 
-def reread_events(events: list, agent: str) -> list[dict]:
-    """The agent's earlier executed reads to re-show in a continuation (distinct, trusted, with evidence; in log
-    order), bounded by REREAD_MAX calls and REREAD_CHARS excerpt characters (later reads win when over)."""
-    seen, out = set(), []
+def cited_ids(payload: dict) -> list[str]:
+    """toolCallIds the answer's hypotheses cite as tool-refs (in citation order, distinct)."""
+    out = []
+    for h in payload.get("hypotheses", ()):
+        for e in h.get("evidence", ()):
+            t = e.get("toolCallId") if isinstance(e, dict) else None
+            if isinstance(t, str) and t not in out:
+                out.append(t)
+    return out
+
+
+def reread_events(events: list, agent: str, cited=(), files: dict | None = None, limit: int = REREAD_MAX) -> list:
+    """The agent's earlier executed reads to re-show in a continuation (distinct, trusted, with evidence; returned in
+    log order). Priority when over `limit` calls or REREAD_CHARS characters: reads the draft cites first, then reads
+    of the unit's own changed lines, then the most recent others."""
+    seen, out = {}, []
     for e in agent_reads(events, agent):
-        if _key(e) in seen or e["result"]["status"] not in retrieval.TRUSTED_TOOL_STATUSES \
-                or not e["result"]["evidence"]:
+        if e["result"]["status"] not in retrieval.TRUSTED_TOOL_STATUSES or not e["result"]["evidence"]:
             continue
-        seen.add(_key(e))
+        k = _key(e)
+        if k in seen:
+            if e["toolCallId"] in cited:          # a cited duplicate stands for its key
+                out[seen[k]] = e
+            continue
+        seen[k] = len(out)
         out.append(e)
+    pos = {e["toolCallId"]: n for n, e in enumerate(out)}
+    rank = sorted(out, key=lambda e: (0 if e["toolCallId"] in cited else 1 if files and _own_read(e, files) else 2,
+                                      -pos[e["toolCallId"]]))
     kept, chars = [], 0
-    for e in reversed(out):
+    for e in rank:
         c = retrieval.excerpt_chars(e)
-        if len(kept) >= REREAD_MAX or chars + c > REREAD_CHARS:
+        if len(kept) >= limit or chars + c > REREAD_CHARS:
             continue
         kept.append(e)
         chars += c
-    return list(reversed(kept))
+    return sorted(kept, key=lambda e: pos[e["toolCallId"]])
+
+
+def remap_draft(payload: dict, ids: dict) -> dict:
+    """The draft with its tool-ref citations pointed at the re-shown calls (old toolCallId -> reread toolCallId)."""
+    def ev(e):
+        if isinstance(e, dict) and e.get("toolCallId") in ids:
+            return dict(e, toolCallId=ids[e["toolCallId"]], **({"cite": dict(e["cite"], toolCallId=ids[e["toolCallId"]])}
+                                                               if isinstance(e.get("cite"), dict) else {}))
+        return e
+    return {**payload, "hypotheses": [dict(h, evidence=[ev(e) for e in h.get("evidence", ())])
+                                      for h in payload.get("hypotheses", ())]}
 
 
 # ---------------------------------------------------------------- merge, VERIFY, JUDGE
@@ -552,8 +634,9 @@ def coverage_lines(plan_doc: dict, payload: dict, events: list, verify_drops=(),
     rows = []
     for u in plan_doc["units"]:
         a = agents.get(u["agentId"])
-        files = [f["path"] for f in u["files"]]
-        st = floor_status(events, u["agentId"], files)
+        fmap = unit_files(u)
+        files = list(fmap)
+        st = floor_status(events, u["agentId"], fmap)
         status = "not run" if a is None else a["status"] + (f" (`{a['error']['code']}`)" if a.get("error") else "")
         out.append(f"- Coverage investigator {u['agentId']} ({len(files)} file(s)): {status}; "
                    f"{_floor_text(events, u['agentId'], st)}")
@@ -575,15 +658,35 @@ def coverage_lines(plan_doc: dict, payload: dict, events: list, verify_drops=(),
     for lane in LENS_AGENTS:
         if lane in agents:
             out.append(f"- Lens lane {lane}: {_floor_text(events, lane, floor_status(events, lane, None))}")
+    for a in agents.values():                         # answered hypotheses whose citation or location did not resolve
+        if a["status"] != "completed":
+            continue
+        last = next((e for e in reversed(agent_calls(events, a["agentId"])) if terminal_payload(e) is not None), None)
+        n = len(terminal_payload(last)["hypotheses"]) if last is not None else 0
+        kept = sum(1 for h in hyps if h["specialist"] == a["agentId"])
+        if n > kept:
+            out.append(f"- {a['agentId']}: {n - kept} of {n} answered hypothesis(es) dropped before VERIFY (citation or "
+                       "location did not resolve)")
     unit_ids = {h["id"] for h in hyps if is_unit(h["specialist"])}
-    cut = [d for d in verify_drops if d["reason"] == "budget"
-           and d.get("detail", "").startswith(lanes.JUDGE_RESERVE_DROP) and set(d["subjectIds"]) <= unit_ids]
-    if cut:
-        out.append(f"- unit-candidates-unverified: {len(cut)} coverage-unit candidate(s) not verified "
-                   "(`budget-exhausted`: VERIFY kept the JUDGE reserve)")
+    why: dict = {}
+    for d in verify_drops:
+        if d["reason"] in UNIT_NOTE_DROPS and set(d["subjectIds"]) <= unit_ids:
+            why[d["reason"]] = why.get(d["reason"], 0) + 1
+    if why:
+        out.append(f"- unit-candidates-unverified: {sum(why.values())} coverage-unit candidate(s) without a verdict ("
+                   + ", ".join(f"{k} {v}" for k, v in sorted(why.items()))
+                   + "; a coverage note: VERIFY of unit candidates is best effort after every lens candidate)")
     out.append("- 'Read and investigated' means the trace shows the investigator read the file; it is not a "
                "certificate that the file is free of defects.")
     return out
+
+
+UNIT_NOTE_DROPS = ("budget", "deadline", "verifier-failed", "over-cap")
+
+
+def unit_files(unit: dict) -> dict:
+    """A unit's files as {path: changed head ranges} (the floor_status form)."""
+    return {f["path"]: [list(r) for r in f["changedHeadLines"]] for f in unit["files"]}
 
 
 def _floor_text(events: list, agent: str, st: dict) -> str:
