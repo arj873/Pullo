@@ -127,7 +127,7 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                           alternate_models=sorted({e["request"]["model"] for e in events if e["type"] == "model.call"
                                                    and e["stage"] == "INVESTIGATE"
                                                    and prompts.is_alt_lane(e["agentId"])}) or None,
-                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events)
+                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events, incomplete)
                                         if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
@@ -729,11 +729,12 @@ class Engine:
             items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
         return self.bounded_context(items)
 
-    def alt_optional(self, agent: str) -> bool:
-        """impact@v10: an alternate-model lane is additive and optional. Its cap or failure ends only that lane (what it
-        already answered is kept) and is disclosed as an alternate-model coverage note
-        (lanes.v10_alt_coverage), never as an incomplete entry: it does not make the run partial."""
-        return self.v10 and prompts.is_alt_lane(agent)
+    def alt_optional(self, agent: str, err: dict | None = None) -> bool:
+        """impact@v10: an alternate-model lane ended by its OWN cap (spend share, tool calls, time slice) or by a
+        provider-level failure of its model (lanes.v10_optional_error) ends alone: what it already answered is kept and
+        the end is an alternate-model coverage note (lanes.v10_alt_coverage), not an incomplete entry. Any other end of
+        an alternate lane (systemic codes, a run hard or soft deadline) is an incomplete entry exactly as in v3."""
+        return self.v10 and prompts.is_alt_lane(agent) and lanes.v10_optional_error(err)
 
     def lane_profile(self, agent: str) -> dict:
         """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
@@ -846,9 +847,14 @@ class Engine:
             if limit is not None:                # a real run limit, not just a missing second answer
                 n = len(draft_end.payload["hypotheses"])
                 who = "" if agent == SPECIALIST else f"specialist {agent}: "
-                note = self._inc_doc if self.alt_optional(agent) else self._inc      # v10 alt lane: no incomplete
-                inc = [note(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
-                                          f"first-hop draft answer ({n} hypothesis(es)) was used")]
+                if not self.alt_optional(agent, end.error):      # v10 alt lane at its own cap: coverage note only
+                    inc = [self._inc(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
+                                                   f"first-hop draft answer ({n} hypothesis(es)) was used")]
+            elif self.v10 and prompts.is_alt_lane(agent) and not lanes.v10_optional_error(end.error):
+                # impact@v10: a systemic end of an alternate lane's continuation is not optional (agent-failure)
+                inc = [self._inc(stage, "agent-failure", f"specialist {agent}: the exploration-floor continuation "
+                                 f"failed ({code}); the first-hop draft answer "
+                                 f"({len(draft_end.payload['hypotheses'])} hypothesis(es)) was used")]
         else:
             self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
         draft_end.hops, draft_end.call_ids = end.hops, end.call_ids
@@ -912,7 +918,7 @@ class Engine:
 
         def failed(agent, err, why):
             agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-            if not self.alt_optional(agent):     # impact@v10: an alternate lane's end is a coverage note only
+            if not self.alt_optional(agent, err):     # impact@v10: an alternate lane's own cap: coverage note only
                 inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: "
                                                      f"{err['message']}"))
 
@@ -929,7 +935,7 @@ class Engine:
                                        "error": err})
                         return self._v3_failed(agents, err, reason)
                     failed(agent, err, reason)
-                    if self.alt_optional(agent):
+                    if self.v10 and prompts.is_alt_lane(agent):
                         alt_err = alt_err or (err, reason)
                     else:
                         first_err = first_err or (err, reason)
@@ -953,8 +959,7 @@ class Engine:
                     self._tool_share = self._spend_ceiling = None
             finally:
                 self._time_slice = None
-            if not self.alt_optional(agent):
-                inc.extend(floor_inc)
+            inc.extend(floor_inc)
             if end.error is not None:
                 err, reason = end.error, (end.stop[0] if end.stop else None)
                 if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
@@ -962,7 +967,7 @@ class Engine:
                     return self._v3_failed(agents, err, reason)
                 limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
                 failed(agent, err, limit or "agent-failure")
-                if self.alt_optional(agent):
+                if self.v10 and prompts.is_alt_lane(agent):
                     alt_err = alt_err or (err, reason)
                 else:
                     first_err = first_err or (err, reason)
@@ -996,6 +1001,10 @@ class Engine:
             first_err = first_err or err_reason
         if not usable:
             return self._v3_failed(agents, *(first_err or alt_err))
+        if self.v10 and not any(prompts.is_alt_lane(a["agentId"]) and a["status"] == "completed" for a in agents):
+            inc.append(self._inc_doc(stage, "agent-failure", f"{lanes.NO_ALT_ANSWER}: no alternate-model lane "
+                                     f"({', '.join(lanes.V10_ALT_AGENTS)}) produced an answer; this run has only the "
+                                     "v3 lanes' review"))
         if self.five:                            # impact@v5: merge in lane order, then the near-duplicate cap
             merges = (lanes.cross_merge(hyps) if self.cross      # impact@v7: merge only true near-duplicates
                       else specialists.merge(hyps, list(self.specialists)))

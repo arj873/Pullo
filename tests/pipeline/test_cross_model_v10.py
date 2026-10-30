@@ -19,12 +19,14 @@ from unittest import mock
 
 from reviewer.config import ReviewModels, resolve_config
 from reviewer.contracts import validate
-from reviewer.contracts.budget import investigation_limit, stage_ceiling
+from reviewer.contracts.budget import HOST_STOP_RECORDING, investigation_limit, stage_ceiling
 from reviewer.contracts.canonical import digest
 from reviewer.contracts.entities import validate_trace
-from reviewer.pipeline import PipelineError, RetrievalPolicy, identity, lanes, prompts, specialists, sweeps
+from reviewer.gateway import DisabledProvider
+from reviewer.pipeline import PipelineError, RecordBackend, RetrievalPolicy, identity, lanes, prompts, run_review
+from reviewer.pipeline import specialists, sweeps
 
-from tests.pipeline.helpers import events_of, hyp, judge, model_calls, script, vfinal
+from tests.pipeline.helpers import NOW, events_of, hyp, judge, model_calls, script, vfinal
 from tests.pipeline.test_cross_model_v7 import (ALT_MODEL, ALT_PRICE, MAIN_MODEL, V1_V5_REPO, V7_PLAN, V7_POLICY,
                                                 V7_PROFILE, CrossRig, PerModel, answered_by, repo_identity)
 from tests.pipeline.test_impact_pipeline import doc_of, w
@@ -73,6 +75,23 @@ class V10Rig(CrossRig):
         kw.setdefault("retrieval", V10_POLICY)
         kw.setdefault("plan", V10_PLAN)
         return self.replay(m, res, **kw)
+
+    def record_timed(self, m, main, alt, seconds_per_alt_call, **kw):
+        """record_v10 with a host clock that only moves when the ALTERNATE model is called (each such call takes
+        `seconds_per_alt_call`), so lane time slices and run deadlines fall exactly inside the alternate lanes."""
+        now = [0.0]
+        self.clock = lambda: now[0]
+
+        class Timed(PerModel):
+            def call(self, request, key):
+                if request["model"] == ALT_MODEL:
+                    now[0] += seconds_per_alt_call
+                return super().call(request, key)
+        spy = Timed({MAIN_MODEL: main, ALT_MODEL: alt})
+        providers = {"anthropic": DisabledProvider("anthropic"), "openai": DisabledProvider("openai"), "synthetic": spy}
+        backend = RecordBackend(self.handle, self.book, providers, lambda: NOW)
+        kw.setdefault("retrieval", V10_POLICY)
+        return run_review(self.spec(m, backend, profile=kw.pop("profile", V10_PROFILE), plan=kw.pop("plan"), **kw)), spy
 
     def lanes6(self, **finals):
         main, alt = [], []
@@ -384,27 +403,29 @@ class EndToEnd(V10Rig):
 
     def test_alternate_lane_budget_exhaustion_keeps_the_run_completed_with_a_coverage_note(self):
         m = self.big()
-        main, alt = self.v3_only_script(m, **{"contracts.alt": [self.h_io(m)]})
-        with mock.patch.object(lanes, "V10_ALT_SPEND_BP", 1):            # $0.0004 for all alternate lanes
+        main, alt = self.v3_only_script(m)               # contracts.alt answers (nothing); the later two are capped
+        orig = lanes.v10_alt_spend_ceiling
+        share = lambda start, j, budget: orig(start, j, budget) if j == 0 else start      # noqa: E731
+        with mock.patch.object(lanes, "v10_alt_spend_ceiling", share):
             res, spy = self.record_v10(m, script(*main), script(*alt))
-            rep = self.replay_v10(m, res)                               # the same rules (bound into the identity)
+            rep = self.replay_v10(m, res)
         self.assertEqual((res.status, res.incomplete), ("completed", []))
         inv = self.payload(res)
         self.assertEqual(inv["status"], "completed")
-        notes = lanes.v10_alt_coverage(inv["payload"], events_of(res))
-        self.assertEqual(notes, [f"alt-lane-capped: {a} (`budget-exhausted`; status budget)" for a in ALT])
+        notes = lanes.v10_alt_coverage(inv["payload"], events_of(res), res.incomplete)
+        self.assertEqual(notes, [f"alt-lane-capped: {a} (`budget-exhausted`; status budget)" for a in ALT[1:]])
         md = Path(res.review_path).read_text(encoding="utf-8")
-        self.assertIn("did not make the run partial", md)
-        self.assertIn("  - alt-lane-capped: contracts.alt (`budget-exhausted`; status budget)", md)
+        self.assertIn("does not make the run partial", md)
+        self.assertIn("  - alt-lane-capped: logic.alt (`budget-exhausted`; status budget)", md)
         self.assertNotIn("## Incomplete", md)
         self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "logic"])
         agents = {a["agentId"]: a for a in inv["payload"]["agents"]}
-        self.assertTrue(all(agents[a]["status"] == "completed" for a in V3_LANES))
-        self.assertEqual([agents[a]["status"] for a in ALT], ["budget"] * 3)
+        self.assertTrue(all(agents[a]["status"] == "completed" for a in V3_LANES + ALT[:1]))
+        self.assertEqual([agents[a]["status"] for a in ALT[1:]], ["budget"] * 2)
         errs = [e["error"] for e in events_of(res) if e["type"] == "error"
                 and (e["error"].get("detail") or {}).get("scope") == "alternate-model-share"]
         self.assertEqual({e["detail"]["rule"] for e in errs}, {lanes.V10_BUDGET_RULE})
-        self.assertEqual(spy.inner[ALT_MODEL].calls, 1)                 # the first call was admitted below the cap
+        self.assertEqual(spy.inner[ALT_MODEL].calls, 2)                 # contracts.alt's two hops only
         self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")],
                          [shid("contracts", 0, self.h_core(m)), shid("logic", 0, self.h_util(m))])
         # replay and load re-derive the completed status and the review.md coverage note
@@ -412,27 +433,71 @@ class EndToEnd(V10Rig):
         from reviewer.pipeline import runner
         self.assertEqual(runner.load_result(self.out, res.run_id).status, "completed")
 
+    def test_no_alternate_answer_at_all_makes_the_run_partial(self):
+        m = self.big()
+        main, alt = self.v3_only_script(m)
+        with mock.patch.object(lanes, "V10_ALT_SPEND_BP", 1):            # $0.0004 for all alternate lanes
+            res, spy = self.record_v10(m, script(*main), script(*alt))
+            rep = self.replay_v10(m, res)
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([(i["stage"], i["reason"]) for i in res.incomplete], [("INVESTIGATE", "agent-failure")])
+        self.assertTrue(res.incomplete[0]["detail"].startswith("no-alternate-answer: "))
+        notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete)
+        self.assertEqual(notes, [f"alt-lane-capped: {a} (`budget-exhausted`; status budget)" for a in ALT]
+                         + ["no-alternate-answer: no alternate lane answered (counted as incomplete)"])
+        self.assertEqual(spy.inner[ALT_MODEL].calls, 1)
+        self.assertEqual((rep.status, rep.incomplete), (res.status, res.incomplete))
+
+    def test_live_calls_disabled_on_the_alternate_lanes_makes_the_run_partial(self):
+        m = self.big()
+        main, _ = self.v3_only_script(m)
+        alt = [*sfail("contracts.alt", 0, code="live-calls-disabled")]     # systemic: no further alternate lane
+        res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual(res.status, "partial")
+        inv = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
+        self.assertEqual([i["reason"] for i in inv], ["agent-failure"] * 4)
+        self.assertEqual([i["detail"].split(":")[0] for i in inv[:3]], [f"specialist {a}" for a in ALT])
+        self.assertTrue(all("live-calls-disabled" in i["detail"] for i in inv[:3]))
+        self.assertTrue(inv[3]["detail"].startswith("no-alternate-answer"))
+        notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete)
+        self.assertTrue(all("counted as incomplete" in n for n in notes))
+
+    def test_an_answer_from_a_different_model_on_one_alternate_lane_makes_the_run_partial(self):
+        m = self.big()
+        main, alt = self.v3_only_script(m)
+        # logic.alt's answer names the investigator's model instead of the alternate it was sent to
+        alt = [e if e["agentId"] != "logic.alt" else dict(e, response=dict(e["response"], resolvedModel=MAIN_MODEL))
+               for e in alt]
+        res, _ = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual(res.status, "partial")
+        inv = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
+        self.assertEqual(inv[0]["reason"], "agent-failure")
+        self.assertTrue(inv[0]["detail"].startswith("specialist logic.alt: contract-violation"))
+        agents = {a["agentId"]: a for a in self.payload(res)["payload"]["agents"]}
+        self.assertEqual(agents["contracts.alt"]["status"], "completed")       # an alternate answer exists
+        self.assertEqual(agents["logic.alt"]["error"]["code"], "contract-violation")
+        self.assertNotIn("no-alternate-answer", " ".join(i["detail"] for i in inv))
+
     def test_alternate_model_failure_keeps_the_run_completed_with_a_coverage_note(self):
         m = self.big()
         hc, hu = self.h_core(m), self.h_util(m)
         main, _ = self.v3_only_script(m)
-        # contracts.alt: the alternate provider fails (rejected); logic.alt: the provider times out after its first
-        # hop (an unknown provider outcome: as in v3, no further lane starts, so safety.alt is not started either)
+        # contracts.alt: the alternate provider fails (rejected); logic.alt: it fails again after its first hop;
+        # safety.alt answers with a restatement of hu (merged, not verified again)
         alt = [answered_by(e, ALT_MODEL) if "response" in e else e
-               for e in [*sfail("contracts.alt", 0), ask("logic.alt", 0), *sfail("logic.alt", 1, code="provider-timeout"),
+               for e in [*sfail("contracts.alt", 0), ask("logic.alt", 0), *sfail("logic.alt", 1),
                          ask("safety.alt", 0), sfinal("safety.alt", 1, dict(hu, claim="clamp swaps lo and hi values"))]]
         res, _ = self.record_v10(m, script(*main), script(*alt))
         self.assertEqual((res.status, res.incomplete), ("completed", []))
         inv = self.payload(res)["payload"]
         self.assertEqual([(a["agentId"], a["status"]) for a in inv["agents"]],
-                         [(a, "completed") for a in V3_LANES] + [("contracts.alt", "failed"), ("logic.alt", "timeout"),
-                                                                ("safety.alt", "timeout")])
-        self.assertEqual(lanes.v10_alt_coverage(inv, events_of(res)),
+                         [(a, "completed") for a in V3_LANES] + [("contracts.alt", "failed"), ("logic.alt", "failed"),
+                                                                ("safety.alt", "completed")])
+        self.assertEqual(lanes.v10_alt_coverage(inv, events_of(res), res.incomplete),
                          ["alt-lane-failed: contracts.alt (`provider-error`; status failed)",
-                          "alt-lane-failed: logic.alt (`provider-timeout`; status timeout)",
-                          "alt-lane-failed: safety.alt (`provider-timeout`; status timeout)"])
-        self.assertIn("not started", inv["agents"][-1]["error"]["message"])
-        self.assertEqual(inv["merges"], [])
+                          "alt-lane-failed: logic.alt (`provider-error`; status failed)"])
+        self.assertEqual(inv["merges"], [{"keptId": shid("logic", 0, hu), "mergedIds": [
+            shid("safety.alt", 0, dict(hu, claim="clamp swaps lo and hi values"))], "rule": lanes.CROSS_MERGE_RULE}])
         self.assertIn("alt-lane-failed: logic.alt", Path(res.review_path).read_text(encoding="utf-8"))
         self.assertEqual(sorted(f["specialist"] for f in res.findings), ["contracts", "logic"])
 
@@ -571,6 +636,59 @@ class V3Verify(V10Rig):
             res, _ = self.record_v10(m, main, alt)
         self.assertEqual(len(model_calls(res, "VERIFY")), 4)
         self.assertEqual(res.status, "completed", res.incomplete)
+
+
+class AltDeadlines(V10Rig):
+    v3_only_script = EndToEnd.v3_only_script
+
+    def plan(self, investigate, soft=4_000):
+        plan = copy.deepcopy(V10_PLAN)
+        plan["budget"].update(wallClockSec=5_000, softDeadlineSec=soft, hostStopRecording=HOST_STOP_RECORDING,
+                              stageCeilingsSec={"INVESTIGATE": investigate, "VERIFY": 300, "JUDGE": 200})
+        return plan
+
+    def test_an_alternate_lanes_own_time_slice_is_a_coverage_note(self):
+        m = self.big()
+        main, _ = self.v3_only_script(m)
+        # slices 100..600 s; the v3 lanes take no time, every alternate call 450 s: contracts.alt is stopped by its
+        # 400 s slice after its first hop, logic.alt (500 s) answers at once and its floor continuation is stopped,
+        # safety.alt starts past the 600 s stage ceiling (its slice)
+        alt = [answered_by(e, ALT_MODEL) for e in (ask("contracts.alt", 0), sfinal("logic.alt", 0))]
+        res, _ = self.record_timed(m, script(*main), script(*alt), 450.0, plan=self.plan(600))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        inv = self.payload(res)["payload"]
+        self.assertEqual([a["status"] for a in inv["agents"]][3:], ["failed", "completed", "failed"])
+        notes = lanes.v10_alt_coverage(inv, events_of(res), res.incomplete)
+        self.assertEqual(notes, ["alt-lane-capped: contracts.alt (`deadline-exceeded`: lane time slice; status failed)",
+                                 "alt-lane-capped: logic.alt (`deadline-exceeded`; its first-hop draft answer was used)",
+                                 "alt-lane-capped: safety.alt (`deadline-exceeded`: lane time slice; status failed)"])
+
+    def test_a_run_deadline_during_the_alternate_lanes_is_incomplete(self):
+        m = self.big()
+        main, _ = self.v3_only_script(m)
+        # the soft run deadline (250 s) passes during contracts.alt (each alternate call 300 s): no further alternate
+        # lane starts, which is the run's deadline, not a lane cap
+        alt = [answered_by(e, ALT_MODEL) for e in (ask("contracts.alt", 0), sfinal("contracts.alt", 1))]
+        res, _ = self.record_timed(m, script(*main), script(*alt), 300.0, plan=self.plan(3_000, soft=250))
+        self.assertEqual(res.status, "partial")
+        inv = [i for i in res.incomplete if i["stage"] == "INVESTIGATE"]
+        self.assertEqual([(i["reason"], i["detail"].split(":")[0]) for i in inv],
+                         [("soft-deadline", "specialist logic.alt"), ("soft-deadline", "specialist safety.alt")])
+        notes = lanes.v10_alt_coverage(self.payload(res)["payload"], events_of(res), res.incomplete)
+        self.assertEqual(notes, [f"alt-lane-stopped: {a} (`deadline-exceeded`: soft run deadline; status failed; "
+                                 "counted as incomplete)" for a in ALT[1:]])
+
+    def test_the_optional_end_classifier(self):
+        e = lambda code, msg="m": {"code": code, "message": msg}       # noqa: E731
+        optional = [None, e("budget-exhausted"), e("provider-error"), e("provider-timeout"), e("repair-exhausted"),
+                    e("schema-invalid"), e("deadline-exceeded", "INVESTIGATE time slice of specialist logic.alt reached"),
+                    e("deadline-exceeded", "INVESTIGATE stage ceiling reached")]
+        counted = [e("live-calls-disabled"), e("model-unresolved"), e("contract-violation"), e("internal"),
+                   e("deadline-exceeded", "hard run deadline reached"),
+                   e("deadline-exceeded", "soft deadline: no new agent starts")]
+        self.assertTrue(all(lanes.v10_optional_error(x) for x in optional))
+        self.assertFalse(any(lanes.v10_optional_error(x) for x in counted))
+        self.assertEqual([lanes.v10_deadline_cause(x) for x in counted[-2:]], ["hard run deadline", "soft run deadline"])
 
 
 # ---------------------------------------------------------------- identity

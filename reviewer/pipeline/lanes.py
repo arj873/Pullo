@@ -372,24 +372,31 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
 #               three v3 lanes (20, 40, 60 on the pilot), then 80, 100, 120 for the alternate lanes;
 #   time        lane i stops at C*(i+1)//K s, C = the v10 Plan's INVESTIGATE ceiling, twice v3's (600 s live, 240 s
 #               legacy), so the v3 lanes keep exactly their v3 slices (100/200/300 s live, 40/80/120 s legacy);
-#   spend       a v3 lane i (i < 3) may start an investigator call while INVESTIGATE spend < share*(i+1)//3 with the
+#   spend       (each share is checked BEFORE a call: an admitted call may end above it, so a lane can overshoot its
+#               share by at most one call's cost; the gateway's investigation-share admission, which reserves the
+#               call's worst case, keeps all of INVESTIGATE <= $2.80 as a hard bound)
+#               a v3 lane i (i < 3) may start an investigator call while INVESTIGATE spend < share*(i+1)//3 with the
 #               v3 share = investigation_limit(budget) ($2.80 of $4: exactly v3's numbers); an alternate lane j may
 #               start one while INVESTIGATE spend < min(S + alt*(j+1)//A, share), where S is the INVESTIGATE spend when
 #               the first alternate lane started (from the logged cost records, so replay re-derives it) and alt =
 #               V10_ALT_SPEND_BP of the ceiling ($1.20: the alternate model spends at most that, $0.40 per lane with
 #               unused room rolling forward). Unused v3 room never rolls into the alternate lanes.
-# All of INVESTIGATE therefore stays within v3's own investigation share, so VERIFY and JUDGE keep at least what v3
-# reserves for them (verifyReserveBp, 30% = $1.20; the gateway's investigation-share admission still binds every call).
+# All of INVESTIGATE therefore stays within v3's own investigation share (hard-bounded at $2.80 by the gateway's
+# admission, whatever the per-lane overshoot), so VERIFY and JUDGE keep at least what v3 reserves for them
+# (verifyReserveBp, 30% = $1.20).
 # On v3 Terra traces (about $0.23-0.33 per lane) a v10 run's INVESTIGATE reaches roughly $1.0 + $1.2 at most, leaving
 # about $1.8 for VERIFY and JUDGE.
 #
-# Optional alternate lanes (V10_ALT_OPTIONAL_TEXT). The alternate lanes are additive: an alternate lane that reaches its
-# spend, tool-call or time share, or whose model call fails (provider error, timeout, ...), ends only that lane. What
-# it already answered is kept (an exploration-floor draft included), its agent status says why it ended, and
-# v10_alt_coverage discloses it as a coverage note ("alt-lane-capped: <lane> (<code>)" or "alt-lane-failed: ...") in
-# review.md - never as an INVESTIGATE incomplete entry, so it never makes the run partial. Host-level ends (replay
-# failure, cancellation, an internal or spend-book error) still fail the stage exactly as in v3. Only a v3 lane, VERIFY
-# or JUDGE shortfall makes a v10 run partial.
+# Optional alternate lanes (V10_ALT_OPTIONAL_TEXT, v10_optional_error). An alternate lane that reaches its OWN cap
+# (its spend share, its tool calls, its time slice - the last lane's slice is the stage ceiling) or whose model call
+# ends with provider-error, provider-timeout, repair-exhausted or schema-invalid ends alone: what it already answered
+# is kept (an exploration-floor draft included), its agent status says why, and v10_alt_coverage discloses it in
+# review.md ("alt-lane-capped: <lane> (...)" / "alt-lane-failed: ...") - not as an incomplete entry. Every other end
+# of an alternate lane is an INVESTIGATE incomplete entry exactly as in v3 (the systemic codes live-calls-disabled,
+# model-unresolved, contract-violation -> agent-failure; the run's hard or soft deadline -> deadline/soft-deadline),
+# and a run in which NO alternate lane answered gets an agent-failure entry `no-alternate-answer`, so a v10 run never
+# silently equals v3. Host-level ends (replay failure, cancellation, an internal or spend-book error) fail the stage as
+# in v3.
 #
 # Merge (V10_MERGE_TEXT). First the three v3 lanes' hypotheses are merged exactly as v3 merges them
 # (specialists.merge, specialist-merge@2, v3 order). Then each alternate-lane hypothesis (V10_AGENTS order, output
@@ -418,10 +425,36 @@ V10_MERGE_TEXT = ("the v3 lanes merged exactly as v3 (specialist-merge@2); then 
                   "the first kept hypothesis of an earlier lane only when it restates it (cross-model-merge@1: same "
                   "head path and category, |line - line| <= MERGE_LINE_WINDOW, overlapping location ranges, claim "
                   "word-set Jaccard >= NEAR_DUP_SIMILARITY, identical distinctive tokens); otherwise it is kept")
-V10_ALT_OPTIONAL_TEXT = ("an alternate lane that reaches its share or whose model call fails ends alone: its answer so far "
-                         "is kept and it is disclosed as a coverage note (alt-lane-capped / alt-lane-failed), not as an "
-                         "incomplete entry; host-level ends (replay, cancellation, internal, spend book) fail as in v3")
+V10_ALT_OPTIONAL_TEXT = ("an alternate lane that reaches its own cap (spend share, tool calls, its time slice) or whose "
+                         "model call ends with provider-error, provider-timeout, repair-exhausted or schema-invalid ends "
+                         "alone: its answer so far is kept and it is a coverage note, not an incomplete entry; every "
+                         "other end (systemic codes, a run hard or soft deadline) is an INVESTIGATE incomplete entry as "
+                         "in v3; no alternate answer at all is an agent-failure incomplete entry (no-alternate-answer); "
+                         "host-level ends (replay, cancellation, internal, spend book) fail as in v3")
 V10_CAPPED_CODES = ("budget-exhausted", "deadline-exceeded", "tool-calls-exhausted")
+V10_OPTIONAL_PROVIDER_CODES = ("provider-error", "provider-timeout", "repair-exhausted", "schema-invalid")
+V10_LANE_TIME_PREFIXES = ("INVESTIGATE time slice of ", "INVESTIGATE stage ceiling reached")   # Engine.gate messages
+NO_ALT_ANSWER = "no-alternate-answer"
+
+
+def v10_deadline_cause(err: dict) -> str:
+    """Which clock stopped an INVESTIGATE agent (from the Engine.gate message): the lane's own time slice (the last
+    lane's slice is the stage ceiling), or the run's hard or soft deadline."""
+    m = err.get("message", "")
+    if m.startswith(V10_LANE_TIME_PREFIXES[0]) or m.startswith(V10_LANE_TIME_PREFIXES[1]):
+        return "lane time slice"
+    return "soft run deadline" if m.startswith("soft deadline") else "hard run deadline"
+
+
+def v10_optional_error(err: dict | None) -> bool:
+    """An alternate lane's end that is OPTIONAL (coverage note only): no error (its tool calls were exhausted without
+    an answer), its spend share (budget-exhausted), its own time slice, or one of V10_OPTIONAL_PROVIDER_CODES."""
+    if err is None:
+        return True
+    code = err["code"]
+    if code == "deadline-exceeded":
+        return v10_deadline_cause(err) == "lane time slice"
+    return code == "budget-exhausted" or code in V10_OPTIONAL_PROVIDER_CODES
 
 
 def is_v10_plan(plan: dict) -> bool:
@@ -450,25 +483,46 @@ def v10_merge(hypotheses: list[dict]) -> list[dict]:
                   for k in kept if k["id"] in merged]
 
 
-def v10_alt_coverage(payload: dict, events: list) -> list[str]:
-    """impact@v10 coverage notes for the optional alternate lanes (a pure function of the INVESTIGATE payload and the
-    trace): every alternate lane that ended before its own answer, or whose exploration-floor continuation ended
-    without one so its first-hop draft was used. An empty list when every alternate lane completed normally."""
+def _cause(code: str, err: dict | None) -> str:
+    if code == "deadline-exceeded" and err is not None:
+        return f"`{code}`: {v10_deadline_cause(err)}"
+    return f"`{code}`"
+
+
+def v10_alt_coverage(payload: dict, events: list, incomplete: list = ()) -> list[str]:
+    """impact@v10 coverage notes for the alternate lanes (a pure function of the INVESTIGATE payload, the trace and the
+    run's incomplete entries): every alternate lane that ended before its own answer, or whose exploration-floor
+    continuation ended without one so its first-hop draft was used. An optional end (v10_optional_error) is
+    alt-lane-capped (its cap) or alt-lane-failed (its provider); any other end says it is counted as incomplete."""
     out = []
     for a in payload.get("agents", ()):
         lane = a["agentId"]
         if not prompts.is_alt_lane(lane):
             continue
         if a["status"] != "completed":
-            code = a["error"]["code"] if "error" in a else "tool-calls-exhausted"
-            kind = "alt-lane-capped" if code in V10_CAPPED_CODES else "alt-lane-failed"
-            out.append(f"{kind}: {lane} (`{code}`; status {a['status']})")
+            err = a.get("error")
+            code = err["code"] if err is not None else "tool-calls-exhausted"
+            if v10_optional_error(err):
+                kind = "alt-lane-capped" if code in V10_CAPPED_CODES else "alt-lane-failed"
+                out.append(f"{kind}: {lane} ({_cause(code, err)}; status {a['status']})")
+            else:
+                out.append(f"alt-lane-stopped: {lane} ({_cause(code, err)}; status {a['status']}; counted as "
+                           "incomplete)")
             continue
+        counted = any(i["stage"] == "INVESTIGATE" and f"specialist {lane}: the exploration-floor" in i.get("detail", "")
+                      for i in incomplete)
         for e in events:
             if e["type"] == "retrieval.floor" and e["agentId"] == lane and e["decision"] == "draft" \
                     and "errorCode" in e:
-                kind = "alt-lane-capped" if e["errorCode"] in V10_CAPPED_CODES else "alt-lane-failed"
-                out.append(f"{kind}: {lane} (`{e['errorCode']}`; its first-hop draft answer was used)")
+                if counted:
+                    out.append(f"alt-lane-stopped: {lane} (`{e['errorCode']}`; its first-hop draft answer was used; "
+                               "counted as incomplete)")
+                else:
+                    kind = "alt-lane-capped" if e["errorCode"] in V10_CAPPED_CODES else "alt-lane-failed"
+                    out.append(f"{kind}: {lane} (`{e['errorCode']}`; its first-hop draft answer was used)")
+    if any(prompts.is_alt_lane(a["agentId"]) for a in payload.get("agents", ())) \
+            and not any(prompts.is_alt_lane(a["agentId"]) and a["status"] == "completed" for a in payload["agents"]):
+        out.append(f"{NO_ALT_ANSWER}: no alternate lane answered (counted as incomplete)")
     return out
 
 
@@ -534,5 +588,7 @@ def v10_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_c
             "budget": v10_budget_doc(policy, budget, tool_max_calls),
             "merge": {"v3Rule": specialists.MERGE_RULE, "rule": CROSS_MERGE_RULE, "text": V10_MERGE_TEXT,
                       "lineWindow": specialists.MERGE_LINE_WINDOW, "similarity": NEAR_DUP_SIMILARITY},
-            "altLanesOptional": {"text": V10_ALT_OPTIONAL_TEXT, "cappedCodes": list(V10_CAPPED_CODES)},
+            "altLanesOptional": {"text": V10_ALT_OPTIONAL_TEXT, "cappedCodes": list(V10_CAPPED_CODES),
+                                 "providerCodes": list(V10_OPTIONAL_PROVIDER_CODES),
+                                 "laneTime": list(V10_LANE_TIME_PREFIXES), "noAnswer": NO_ALT_ANSWER},
             "verify": {"text": V10_VERIFY_TEXT, "maxCandidates": specialists.MAX_VERIFY_CANDIDATES}}

@@ -187,8 +187,9 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
                         f"{', '.join(alternate_models)}; their duplicates of earlier lanes were merged before "
                         "verification.", ""]
         if alt_coverage:                     # investigator.impact@v10 only: the optional alternate lanes' ends
-            out[-1:] = ["- Alternate-model coverage (the `.alt` lanes are additive: these did not make the run "
-                        "partial):", *[f"  - {n}" for n in alt_coverage], ""]
+            out[-1:] = ["- Alternate-model coverage (an alternate lane's own cap or a provider failure of its model "
+                        "does not make the run partial; entries counted as incomplete say so):",
+                        *[f"  - {n}" for n in alt_coverage], ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
         out += sweep_section(sweep, specialists)
     out += [f"## Comments ({len(comments)})", ""]
