@@ -750,7 +750,7 @@ class Engine:
             return False
         r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
         return lanes.v10_final_answer_due(self.stage_spend(stage), self._spend_ceiling, r,
-                                          last=agent == lanes.V10_ALT_AGENTS[-1])
+                                          lanes.V10_ALT_AGENTS.index(agent))
 
     def lane_profile(self, agent: str) -> dict:
         """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate

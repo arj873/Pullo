@@ -319,27 +319,33 @@ class Rules(unittest.TestCase):
             self.assertEqual(s["share"], 2_800_000)
             self.assertEqual(s["finalAnswer"]["rule"], lanes.V10_FINAL_RULE)
         b = {"maxUsdMicros": 4_000_000, "verifyReserveBp": 3000}
-        # the alternate lanes split at most $1.50 (never past v3's $2.80 share), evenly, rolling forward:
-        # v3 lanes at $0.70 / $0.85 / $0.90 -> $0.50 per alternate lane, INVESTIGATE <= $2.20 / $2.35 / $2.40,
-        # VERIFY + JUDGE >= $1.80 / $1.65 / $1.60
-        for start, ceilings in ((700_000, [1_200_000, 1_700_000, 2_200_000]),
-                                (850_000, [1_350_000, 1_850_000, 2_350_000]),
-                                (900_000, [1_400_000, 1_900_000, 2_400_000])):
-            self.assertEqual([lanes.v10_alt_spend_ceiling(start, j, b) for j in range(3)], ceilings)
-            self.assertEqual(b["maxUsdMicros"] - ceilings[-1], 4_000_000 - start - 1_500_000)
-        self.assertEqual([lanes.v10_alt_spend_ceiling(2_600_000, j, b) for j in range(3)],
-                         [2_666_666, 2_733_333, 2_800_000])
+        # the alternate lanes POOL at most $1.50 (never past v3's $2.80 share): every alternate lane's ceiling is the
+        # alternate cap; v3 lanes at $0.70 / $0.85 / $0.90 -> INVESTIGATE <= $2.20 / $2.35 / $2.40, VERIFY + JUDGE
+        # >= $1.80 / $1.65 / $1.60
+        for start, top in ((700_000, 2_200_000), (850_000, 2_350_000), (900_000, 2_400_000), (2_600_000, 2_800_000)):
+            self.assertEqual([lanes.v10_alt_spend_ceiling(start, j, b) for j in range(3)], [top] * 3)
+            self.assertEqual(lanes.v10_alt_top(start, b), top)
+        self.assertEqual(4_000_000 - lanes.v10_alt_top(900_000, b), 1_600_000)
         for start in (0, 1, 999_999, 2_799_999, 2_800_000, 3_100_000):     # never above v3's INVESTIGATE share
             self.assertTrue(all(lanes.v10_alt_spend_ceiling(start, j, b) <= 2_800_000 for j in range(3)), start)
         self.assertEqual(b["maxUsdMicros"] - lanes.v10_spend_top(b), 1_200_000)     # VERIFY + JUDGE keep v3's >= 30%
 
     def test_final_answer_reserve_rule(self):
-        # explore only while spend + r + 1.25 r <= ceiling (the last alternate lane: also a 0.25 r margin)
-        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_675_000, 300_000))
-        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_674_999, 300_000))
-        self.assertFalse(lanes.v10_final_answer_due(1_000_000, 1_750_000, 300_000, last=True))
-        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_749_999, 300_000, last=True))
-        self.assertTrue(lanes.v10_final_answer_due(1_000_000, 1_000_001, 1))
+        # lane j explores only while spend + r + 1.25 r <= alt_top - (A-1-j) r (the last lane: also - 0.25 r)
+        due = lanes.v10_final_answer_due
+        self.assertEqual([due(1_000_000, 2_275_000, 300_000, 0), due(1_000_000, 2_274_999, 300_000, 0)], [False, True])
+        self.assertEqual([due(1_000_000, 1_975_000, 300_000, 1), due(1_000_000, 1_974_999, 300_000, 1)], [False, True])
+        self.assertEqual([due(1_000_000, 1_750_000, 300_000, 2), due(1_000_000, 1_749_999, 300_000, 2)], [False, True])
+        self.assertTrue(due(1_000_000, 1_000_001, 1, 2))
+        # realistic: v3 lanes at $0.90 (alt_top $2.40); contracts.alt explores on a 40-60k-token gpt-5.6-terra
+        # request (r $0.29-0.34) and goes to its final answer at 90k (r $0.42)
+        from reviewer.contracts.budget import reservation
+        from reviewer.pilot import repository_profile as RP
+        alt = RP.repository_profile(True, terra(), impact_version=10)["alternates"]["investigator"]
+        r = {t: reservation(alt["price"], t, alt["caps"]["maxOutputTokens"]) for t in (40_000, 50_000, 60_000, 90_000)}
+        top = lanes.v10_alt_top(900_000, {"maxUsdMicros": 4_000_000, "verifyReserveBp": 3000})
+        self.assertEqual([due(900_000, top, r[t], 0) for t in (40_000, 50_000, 60_000, 90_000)],
+                         [False, False, False, True])
         from reviewer.contracts.budget import reservation
         from reviewer.pilot import repository_profile as RP
         alt = RP.repository_profile(True, terra(), impact_version=10)["alternates"]["investigator"]
@@ -515,9 +521,39 @@ class EndToEnd(V10Rig):
         with mock.patch.object(lanes, "v10_alt_spend_ceiling", spy):
             self.record_v10(self.big(), *self.e2e(self.big())[:2], eval_id="evr_" + "d" * 16)
         self.assertEqual(len(errs_seen), 3)
-        # S + $0.50, S + $1.00, S + $1.50 (the alternate room), all under v3's $2.80 share
-        self.assertEqual([errs_seen[1] - errs_seen[0], errs_seen[2] - errs_seen[1]], [500_000, 500_000])
+        # one pooled alternate cap S + $1.50 for every alternate lane, under v3's $2.80 share
+        self.assertEqual(len(set(errs_seen)), 1)
         self.assertLessEqual(errs_seen[-1], investigation_limit(budget))
+
+    def test_contracts_alt_explores_on_a_realistic_request_and_every_lane_answers(self):
+        """The engine with a realistic gpt-5.6-terra worst-case reservation per call ($0.317, a ~50k-token request):
+        contracts.alt explores (its first hop is not its last turn and runs a tool); as the pooled room is used, the
+        later lanes keep room for their final answers and are sent final-answer turns; every alternate lane answers
+        and the alternate lanes' spend stays within the alternate cap."""
+        import reviewer.pipeline.engine as E
+        m = self.big()
+        hc, hu, hio = self.h_core(m), self.h_util(m), self.h_io(m)
+        main, _ = self.v3_only_script(m)
+        alt = [answered_by(e, ALT_MODEL) for e in (ask("contracts.alt", 0), sfinal("contracts.alt", 1, hio),
+                                                    ask("logic.alt", 0), sfinal("logic.alt", 1),
+                                                    sfinal("safety.alt", 0))]
+        main = main[:-1] + [vfinal(2, m, path="src/app/io.py", line=2),
+                            judge(w([shid("contracts", 0, hc)]), w([shid("logic", 0, hu)]),
+                                  w([shid("contracts.alt", 0, hio)]))]
+        with mock.patch.object(E, "reservation", lambda price, tokens, out: 317_000):
+            res, spy = self.record_v10(m, script(*main), script(*alt))
+        self.assertEqual((res.status, res.incomplete), ("completed", []))
+        modes = [(c["agentId"], c["request"]["hop"], doc_of(c["request"])["retrieval"]["lastTurn"])
+                 for c in inv_calls(res) if c["agentId"] in ALT]
+        self.assertEqual(modes, [("contracts.alt", 0, False), ("contracts.alt", 1, True), ("logic.alt", 0, False),
+                                 ("logic.alt", 1, True), ("safety.alt", 0, True)])
+        self.assertTrue(any(e["agentId"] == "contracts.alt" for e in events_of(res) if e["type"] == "tool.call"))
+        self.assertEqual([a["status"] for a in self.payload(res)["payload"]["agents"]], ["completed"] * 6)
+        self.assertIn("contracts.alt", {f["specialist"] for f in res.findings})
+        costs = [e["record"] for e in events_of(res) if e["type"] == "cost" and e["record"]["stage"] == "INVESTIGATE"]
+        s = sum(c["usdMicros"] for c in costs if c["model"] == MAIN_MODEL)
+        self.assertLessEqual(sum(c["usdMicros"] for c in costs if c["model"] == ALT_MODEL),
+                             lanes.v10_alt_top(s, V10_PLAN["budget"]) - s)
 
     def test_live_calls_disabled_on_the_alternate_lanes_makes_the_run_partial(self):
         m = self.big()
