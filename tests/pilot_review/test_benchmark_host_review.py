@@ -57,7 +57,9 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # BENCH-IMPACT-VERSION: benchmark.py candidate pin moved again for the opt-in BenchmarkOptions.impact_version /
 # --impact-version selector (default unset = profile default impact@v2, byte-identical) merged onto TERRA-ARM-01
 # (9e98e14eeb624dc30e871ddd540850ac7c7d8992aa7ab495b29c21d373c15ab3; standalone selector pin was adaf45bf9e4f...).
-GATED = {"reviewer/pilot/benchmark.py": "b996f8b3189b3ed55c586ab1360f0e82481e1a26d210399f5032864e71a097f5",   # TOURNAMENT-V7 re-pin (impact@v7), pending root gate
+# TOURNAMENT-V10: benchmark.py re-pinned for impact@v10 (the early no-alternate refusal now covers ALT_IMPACT_VERSIONS
+# {7, 10} instead of 7 only; two comments). Previous (TOURNAMENT-V7) pin: b996f8b3189b3ed55c586ab1360f0e82481e1a26d210399f5032864e71a097f5.
+GATED = {"reviewer/pilot/benchmark.py": "0b0f1845229f31cfb004273902058f18a937572faf90e18852a97c1398412ae2",   # TOURNAMENT-V10 re-pin (impact@v10), pending root gate
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",

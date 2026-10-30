@@ -180,6 +180,8 @@ class Engine:
         # investigator.impact@v7: the v5 lanes, then alternate-model lanes (lanes.ALT_AGENTS) whose requests are built
         # from a profile view whose investigator is ModelProfile.alternates.investigator (runner refuses v7 without one)
         self.cross = bool(self.impact and self.policy.cross_model)
+        # investigator.impact@v10: the v3 specialists unchanged, then their lenses on the alternate model (lanes.V10_*)
+        self.v10 = bool(self.impact and self.policy.cross_v3)
         self.alt_profile = None
         if self.cross and lanes.alternate(spec.profile) is not None:
             self.alt_profile = copy.deepcopy(spec.profile)
@@ -427,7 +429,9 @@ class Engine:
                 err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
                                   stage=stage, detail={"scope": "sweep-share" if sweep else "alternate-model-share" if alt
                                                        else "specialist-share",
-                                                       "rule": sweeps.BUDGET_RULE if sweep else lanes.CROSS_BUDGET_RULE
+                                                       "rule": sweeps.BUDGET_RULE if sweep
+                                                       else (lanes.V10_BUDGET_RULE if alt else specialists.BUDGET_RULE)
+                                                       if self.v10 else lanes.CROSS_BUDGET_RULE
                                                        if self.cross else specialists.BUDGET_RULE,
                                                        "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
                 self.recorder.append("error", error=err)
@@ -883,7 +887,11 @@ class Engine:
             tool_cum = specialists.cumulative(lanes.tool_pool(self.policy, self.budget, k), k)
             spend_cum = specialists.cumulative(lanes.spend_top(self.budget), k)
             slices = specialists.time_slices(ceiling, k)
-        if self.cross:                           # impact@v7: v5 spend shares, then the alternate lanes' own cap
+        if self.v10:                             # impact@v10: v3's numbers for the v3 lanes, then the alternate lanes
+            tool_cum = lanes.v10_tool_cumulative(self.policy, self.budget, identity.tool_limits(self.spec).max_calls)
+            spend_cum = lanes.v10_primary_spend_cumulative(self.budget)
+            slices = lanes.v10_time_slices(ceiling)
+        elif self.cross:                         # impact@v7: v5 spend shares, then the alternate lanes' own cap
             spend_cum = lanes.primary_spend_cumulative(self.budget)
         alt_start = None                         # impact@v7: INVESTIGATE spend when the first alternate lane started
         agents, hyps, inc = [], [], []
@@ -914,10 +922,12 @@ class Engine:
                 if ctx is None:
                     ctx, notes = self._cap_host_results(*self._investigate_context())
                 used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-                if self.cross and prompts.is_alt_lane(agent):      # impact@v7 (lanes.CROSS_BUDGET_RULE)
+                if self.cross and prompts.is_alt_lane(agent):      # impact@v7/@v10 (lanes.*_BUDGET_RULE)
                     if alt_start is None:
                         alt_start = self.stage_spend(stage)
-                    ceiling_i = lanes.alt_spend_ceiling(alt_start, lanes.ALT_AGENTS.index(agent), self.budget)
+                    ceiling_i = (lanes.v10_alt_spend_ceiling(alt_start, lanes.V10_ALT_AGENTS.index(agent), self.budget)
+                                 if self.v10 else
+                                 lanes.alt_spend_ceiling(alt_start, lanes.ALT_AGENTS.index(agent), self.budget))
                 else:
                     ceiling_i = spend_cum[i]
                 self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), ceiling_i
@@ -972,8 +982,9 @@ class Engine:
             payload = {"hypotheses": hyps, "agents": agents, "merges": merges,
                        "collapses": lanes.collapse(hyps, merges)}
             return ("partial" if inc else "completed"), payload, None, inc
-        if not self.sweep:
-            payload = {"hypotheses": hyps, "agents": agents, "merges": specialists.merge(hyps)}
+        if not self.sweep:                       # impact@v10: restatement-only merge over its six lanes
+            payload = {"hypotheses": hyps, "agents": agents,
+                       "merges": lanes.v10_merge(hyps) if self.v10 else specialists.merge(hyps)}
             return ("partial" if inc else "completed"), payload, None, inc
         payload = {"hypotheses": hyps, "agents": agents,
                    "merges": specialists.merge(hyps, sweeps.merge_order(agents)), "sweep": cov}

@@ -45,8 +45,8 @@ from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTr
 from .profile import ProfileError
 from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
                         open_terra_state, plan_providers, scrub_of, worst_case)
-from .repository_profile import (DEFAULT_IMPACT_VERSION, IMPACT_VERSIONS, check_experiment, repository_plan,
-                                 repository_policy, repository_profile)
+from .repository_profile import (ALT_IMPACT_VERSIONS, DEFAULT_IMPACT_VERSION, IMPACT_VERSIONS, check_experiment,
+                                 repository_plan, repository_policy, repository_profile)
 
 MODES = ("plan", "live", "replay")
 CONFIG_SCHEMA = "pilot-benchmark-config@1"
@@ -528,7 +528,7 @@ def investigator_report(profile: dict, plan: dict) -> dict:
     out = {"impactVersion": next((v for v, p in IMPACT_VERSIONS.items() if p == inv), None), "promptVersion": inv,
            "specialists": list(plan.get("specialists", ()))}
     alt = profile.get("alternates", {}).get("investigator")
-    if alt is not None:                                   # impact@v7 only: the alternate-model lanes and their model
+    if alt is not None:                                   # impact@v7/@v10 only: the alternate-model lanes and model
         out["alternateInvestigator"] = {"provider": alt["provider"], "model": alt["model"],
                                         "lanes": [a for a in out["specialists"] if prompts.is_alt_lane(a)]}
     return out
@@ -557,7 +557,7 @@ def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retri
             "changedPaths": list(ing.changed), "profile": digest(profile), "plan": digest(plan),
             "retrievalPolicy": None if policy is None else policy.digest, "retrieval": retrieval,
             "prTextSupplied": False, "reviewModelsDigest": cfg.models.digest}
-    if "alternates" in profile:                      # impact@v7 only => every other identity is unchanged
+    if "alternates" in profile:                      # impact@v7/@v10 only => every other identity is unchanged
         ident["reviewModelsAlternates"] = cfg.models.alternates_doc()
     if experiment != prompts.EXPERIMENT_BASELINE:    # absent for the baseline => the default identity is unchanged
         ident["experiment"] = {"id": experiment, "tasks": prompts.experiment_task_digests(),
@@ -845,9 +845,10 @@ def replay_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *
 def run_benchmark(o: BenchmarkOptions, *, transport=None, key_loader=load_openrouter_key, runner=run_review) -> dict:
     check_options(o)
     cfg = effective_config(o)                            # before ingestion, output, state, key or model
-    if o.retrieval and selected_impact_version(o) == 7:  # impact@v7 without an alternate model: refused right here
+    v = selected_impact_version(o)
+    if o.retrieval and v in ALT_IMPACT_VERSIONS:         # impact@v7/@v10 without an alternate model: refused right here
         try:
-            repository_profile(o.retrieval, cfg.models, o.experiment, impact_version=7)
+            repository_profile(o.retrieval, cfg.models, o.experiment, impact_version=v)
         except ProfileError as e:
             raise BenchmarkLaunchError(str(e)[:300]) from None
     ing = ingest(o, cfg)

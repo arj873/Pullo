@@ -11,11 +11,12 @@ Identity: the effective selection is bound through the ModelProfile it produces 
 profile digest). The config's absolute path and file bytes are never part of identity or of any model request.
 
 Optional `[review.investigator_alt]` (ALT_ROLE) names an ALTERNATE investigator model, used only by
-investigator.impact@v7 (cross-model lanes, reviewer.pipeline.lanes). It is not a fourth contract role: the v7 profile
-binds it as ModelProfile.alternates.investigator (same prompt, schema, caps and params as the investigator; only
-provider, model, family and price differ), so it reaches the profile digest, the Plan and the run identity of v7 runs
-only. `ReviewModels.digest` (the launch-baseline reviewConfigDigest) keeps covering the three roles exactly, so adding
-the entry to a config file changes no v1-v5 identity; `alternates_doc()`/`report()["alternates"]` disclose it."""
+investigator.impact@v7 and @v10 (cross-model lanes, reviewer.pipeline.lanes). It is not a fourth contract role: the
+v7/v10 profile binds it as ModelProfile.alternates.investigator (same prompt, schema, caps and params as the
+investigator; only provider, model, family and price differ), so it reaches the profile digest, the Plan and the run
+identity of v7 and v10 runs only. `ReviewModels.digest` (the launch-baseline reviewConfigDigest) keeps covering the three
+roles exactly, so adding the entry to a config file changes no other identity; `alternates_doc()`/`report()["alternates"]`
+disclose it."""
 
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ SCHEMA = "pullo-config@1"
 DOC_SCHEMA = "pullo-review-models@1"
 DEFAULT_MODEL = "anthropic/claude-sonnet-5.5"
 ROLES = ("investigator", "verifier", "judge")
-ALT_ROLE = "investigator_alt"               # optional: the impact@v7 alternate investigator model (not a contract role)
+ALT_ROLE = "investigator_alt"               # optional: the impact@v7/@v10 alternate investigator (not a contract role)
 PROVIDER = "anthropic"                      # default: Anthropic models through OpenRouter (paid, the $50 trial key)
 OPENAI = "openai"                           # GPT Terra through the installed Codex CLI (ChatGPT subscription)
 PROVIDER_MODELS = {PROVIDER: frozenset(ALLOWED_ROUTER_MODELS), OPENAI: TERRA_MODELS}
@@ -56,7 +57,7 @@ class ReviewModels:
     investigator: str = DEFAULT_MODEL
     verifier: str = DEFAULT_MODEL
     judge: str = DEFAULT_MODEL
-    investigator_alt: str | None = None     # impact@v7 only; None = not configured (v7 then refuses at plan time)
+    investigator_alt: str | None = None     # impact@v7/@v10 only; None = not configured (they refuse at plan time)
 
     def __post_init__(self):
         for r in ROLES + (() if self.investigator_alt is None else (ALT_ROLE,)):
@@ -79,7 +80,7 @@ class ReviewModels:
         return OPENAI if self.model(role) in TERRA_MODELS else PROVIDER
 
     def alternates_doc(self) -> dict:
-        """{} without an alternate, else {"investigator": {provider, model}} (the impact@v7 alternate investigator)."""
+        """{} without an alternate, else {"investigator": {provider, model}} (the impact@v7/@v10 alternate)."""
         if self.investigator_alt is None:
             return {}
         return {"investigator": {"provider": self.provider(ALT_ROLE), "model": self.investigator_alt}}
@@ -115,7 +116,7 @@ class EffectiveConfig:
         out = {"source": self.source, "digest": self.models.digest, "schema": DOC_SCHEMA, "roles": roles}
         if alts:                             # absent without [review.investigator_alt]: the report is unchanged
             out["alternates"] = dict(alts, investigator=dict(alts["investigator"],
-                                     usedBy="investigator.impact@v7 cross-model lanes only"))
+                                     usedBy="investigator.impact@v7 and @v10 cross-model lanes only"))
         return out
 
 

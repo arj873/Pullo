@@ -69,17 +69,18 @@ def validate_spec(spec: ReviewSpec) -> None:
             raise PipelineError("invalid-input", "first slice supports exactly one specialist, 'generalist'")
         v = ("v4" if identity.plan_specialists(spec) == sweeps.plan_specialists()
              else "v5" if identity.plan_specialists(spec) == list(lanes.AGENTS)
-             else "v7" if identity.plan_specialists(spec) == list(lanes.V7_AGENTS) else "v3")
+             else "v7" if identity.plan_specialists(spec) == list(lanes.V7_AGENTS)
+             else "v10" if identity.plan_specialists(spec) == list(lanes.V10_AGENTS) else "v3")
         raise PipelineError("invalid-input", f"investigator.impact@{v} needs Plan.specialists "
                             f"{identity.plan_specialists(spec)} (the specialist investigators, in run order"
                             + (", then the diff-shard sweep marker)" if v == "v4" else ")"))
     pol = identity.retrieval_policy(spec)
     cross = identity.impact_mode(spec) and pol.cross_model
-    if cross and lanes.alternate_problem(prof) is not None:      # impact@v7: refused before any model call
+    if cross and lanes.alternate_problem(prof) is not None:      # impact@v7/@v10: refused before any model call
         raise PipelineError("invalid-input", lanes.alternate_problem(prof))
     if "alternates" in prof and not cross:
         raise PipelineError("invalid-input", "ModelProfile.alternates (an alternate investigator model) is used only "
-                            "by investigator.impact@v7")
+                            "by investigator.impact@v7 and investigator.impact@v10")
     host = spec.host
     if not (isinstance(host.attempt, int) and not isinstance(host.attempt, bool) and 1 <= host.attempt <= 1000):
         raise PipelineError("invalid-input", "attempt must be an integer >= 1")
@@ -521,6 +522,7 @@ def load_run_result(rd: RunDir, pv: int, *, idempotent: bool = False) -> RunResu
         try:
             again = (specialists.merge(inv["hypotheses"], sweeps.merge_order(inv["agents"])) if sweeps.is_v4_plan(tplan)
                      else lanes.lane_merge(tplan, inv["hypotheses"]) if lanes.lane_order(tplan)
+                     or lanes.is_v10_plan(tplan)
                      else specialists.merge(inv["hypotheses"]))
         except KeyError:
             again = None

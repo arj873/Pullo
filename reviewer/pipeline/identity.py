@@ -157,7 +157,10 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
-        if pol.cross_model:                      # investigator.impact@v7 only => v1-v5 run ids are unchanged
+        if pol.cross_v3:                         # investigator.impact@v10 only => v1-v7 run ids are unchanged
+            extra["impact"]["specialists"] = lanes.v10_identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                                    spec.profile)
+        elif pol.cross_model:                    # investigator.impact@v7 only => v1-v5 run ids are unchanged
             extra["impact"]["specialists"] = lanes.cross_identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                       spec.profile)
         elif pol.five_lanes:                     # investigator.impact@v5 only => v1-v4 run ids are unchanged

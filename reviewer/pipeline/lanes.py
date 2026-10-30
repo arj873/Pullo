@@ -270,7 +270,9 @@ def cross_merge(hypotheses: list[dict]) -> list[dict]:
 
 
 def lane_merge(plan: dict, hypotheses: list[dict]) -> list[dict]:
-    """The merge record a v5 or v7 Plan's INVESTIGATE artifact must carry."""
+    """The merge record a v5, v7 or v10 Plan's INVESTIGATE artifact must carry."""
+    if is_v10_plan(plan):
+        return v10_merge(hypotheses)
     return cross_merge(hypotheses) if is_v7_plan(plan) else specialists.merge(hypotheses, list(AGENTS))
 
 
@@ -307,13 +309,17 @@ def alternate(profile: dict) -> dict | None:
 
 
 def alternate_problem(profile: dict) -> str | None:
-    """Why `profile` cannot run impact@v7 (None when it can)."""
+    """Why `profile` cannot run its cross-model impact version, impact@v7 or impact@v10 (None when it can). The message
+    names the profile's own investigator prompt (an impact@v7 profile keeps the v7 text byte for byte)."""
+    v10 = profile["roles"]["investigator"].get("promptVersion") == prompts.INVESTIGATOR_IMPACT_V10_PROMPT
+    name, lanes_alone = ("investigator.impact@v10", "the v3 specialists") if v10 else ("investigator.impact@v7",
+                                                                                       "the v5 lanes")
     alt = alternate(profile)
     if alt is None:
-        return ("investigator.impact@v7 needs an alternate investigator model (ModelProfile.alternates.investigator, "
-                "from [review.investigator_alt]); refused instead of running the v5 lanes alone")
+        return (f"{name} needs an alternate investigator model (ModelProfile.alternates.investigator, "
+                f"from [review.investigator_alt]); refused instead of running {lanes_alone} alone")
     if alt["model"] == profile["roles"]["investigator"]["model"]:
-        return "investigator.impact@v7 needs an alternate investigator model different from the investigator's"
+        return f"{name} needs an alternate investigator model different from the investigator's"
     return None
 
 
@@ -349,3 +355,126 @@ def cross_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max
             "verify": {"rule": VERIFY_RULE, "text": VERIFY_TEXT, "maxCandidates": verify_cap(len(V7_AGENTS)),
                        "perLane": VERIFY_CANDIDATES_PER_LANE, "sessionCandidates": sweeps.VERIFY_SESSION_CANDIDATES,
                        "judgeReserveBp": sweeps.JUDGE_RESERVE_BP}}
+
+
+# ---------------------------------------------------------------- investigator.impact@v10: v3 lanes + cross-model lanes
+#
+# impact@v10 is the impact@v3 configuration UNCHANGED - the three specialists (contracts, logic, safety) with the v3
+# lens texts, chains, exploration floor and the v3 per-lane tool-call, spend and time ceilings (specialists.BUDGET_RULE,
+# TIME_RULE) - followed by the same three lenses again as lanes `contracts.alt`, `logic.alt`, `safety.alt` on the
+# ALTERNATE investigator model, ModelProfile.alternates.investigator (same prompt id, schema, caps and params; only
+# provider, model, family and price differ). Without an alternate, or with the investigator's own model, the run is
+# refused before any model call (runner.validate_spec, repository_profile): v10 never silently equals v3.
+#
+# Budget (V10_BUDGET_RULE), K = 6 lanes in prompts.V10_AGENTS order, A = 3 alternate lanes, p = the v3 tool pool
+# (specialists.tool_pool: min(agent_tool_calls, maxToolCallsPerAgent, host max_calls), 60 on the pilot):
+#   tool calls  lane i may start a tool call while INVESTIGATE tool calls < (2p)*(i+1)//K: exactly p*(i+1)//3 for the
+#               three v3 lanes (20, 40, 60 on the pilot), then 80, 100, 120 for the alternate lanes;
+#   time        lane i stops at C*(i+1)//K s, C = the v10 Plan's INVESTIGATE ceiling, twice v3's (600 s live, 240 s
+#               legacy), so the v3 lanes keep exactly their v3 slices (100/200/300 s live, 40/80/120 s legacy);
+#   spend       a v3 lane i (i < 3) may start an investigator call while INVESTIGATE spend < share*(i+1)//3 with the
+#               v3 share = investigation_limit(budget) ($2.80 of $4: exactly v3's numbers); an alternate lane j may
+#               start one while INVESTIGATE spend < min(S + alt*(j+1)//A, share), where S is the INVESTIGATE spend when
+#               the first alternate lane started (from the logged cost records, so replay re-derives it) and alt =
+#               V10_ALT_SPEND_BP of the ceiling ($1.20: the alternate model spends at most that, $0.40 per lane with
+#               unused room rolling forward). Unused v3 room never rolls into the alternate lanes.
+# All of INVESTIGATE therefore stays within v3's own investigation share, so VERIFY and JUDGE keep at least what v3
+# reserves for them (verifyReserveBp, 30% = $1.20; the gateway's investigation-share admission still binds every call).
+# On v3 Terra traces (about $0.23-0.33 per lane) a v10 run's INVESTIGATE reaches roughly $1.0 + $1.2 at most, leaving
+# about $1.8 for VERIFY and JUDGE.
+#
+# Merge (CROSS_MERGE_RULE over V10_AGENTS order, every cross-lane merge of a v10 run): a later lane's hypothesis is
+# merged into an earlier lane's kept one only when it is a restatement - the v3 merge predicate (same head path and
+# category, start lines within 3) AND the near-duplicate test (overlapping location ranges, claim Jaccard >=
+# NEAR_DUP_SIMILARITY, identical distinctive tokens). There is no near-duplicate cap (no `collapses`).
+# VERIFY and the verifier are v3's, unchanged: candidates round-robin across the completed lanes in V10_AGENTS order
+# (output order inside a lane), at most specialists.MAX_VERIFY_CANDIDATES (20; the rest `over-cap`), then the merge
+# retry (a kept hypothesis without a finding hands VERIFY its first merged duplicate within the cap).
+
+V10_AGENTS = prompts.V10_AGENTS
+V10_ALT_AGENTS = prompts.V10_ALT_AGENTS
+V10_BEHAVIOR = "v3-cross-model-lanes@1"
+V10_BUDGET_RULE = "v3-cross-model-budget-split@1"
+V10_ALT_SPEND_BP = 3000               # the alternate model's own INVESTIGATE spend cap (30% of the ceiling)
+V10_BUDGET_TEXT = ("K = 6 lanes in V10_AGENTS order (the three v3 specialists, then their alternate-model lanes); tool "
+                   "calls < (2*pool)*(i+1)//K with the v3 pool; time C*(i+1)//K s with C twice the v3 INVESTIGATE "
+                   "ceiling; spend: v3 lane i < share*(i+1)//3 with share = investigation_limit (exactly v3); "
+                   "alternate lane j < min(S + alt*(j+1)//A, share) with S = INVESTIGATE spend when the first "
+                   "alternate lane started and alt = V10_ALT_SPEND_BP of the ceiling; per-agent caps unchanged")
+V10_VERIFY_TEXT = ("v3 VERIFY unchanged: round-robin across the completed lanes in V10_AGENTS order, output order inside "
+                   "a lane; kept beyond specialists.MAX_VERIFY_CANDIDATES -> 'over-cap'; a kept hypothesis without a "
+                   "finding sends its first merged duplicate to VERIFY within the cap; other duplicates -> 'merged'")
+
+
+def is_v10_plan(plan: dict) -> bool:
+    return plan.get("specialists") == list(V10_AGENTS)
+
+
+def v10_merge(hypotheses: list[dict]) -> list[dict]:
+    """impact@v10 merges ([{keptId, mergedIds, rule: CROSS_MERGE_RULE}]): restatements only, over V10_AGENTS order."""
+    return specialists.merge(hypotheses, list(V10_AGENTS), predicate=cross_duplicate, rule=CROSS_MERGE_RULE)
+
+
+def v10_tool_pool(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int) -> int:
+    """Twice the v3 pool, so cumulative(v10 pool, 6)[i] == cumulative(v3 pool, 3)[i] for the three v3 lanes."""
+    return 2 * specialists.tool_pool(policy, budget, tool_max_calls)
+
+
+def v10_tool_cumulative(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int) -> list[int]:
+    return specialists.cumulative(v10_tool_pool(policy, budget, tool_max_calls), len(V10_AGENTS))
+
+
+def v10_spend_top(budget: dict) -> int:
+    """All of a v10 INVESTIGATE: v3's own investigation share."""
+    return investigation_limit(budget)
+
+
+def v10_primary_spend_cumulative(budget: dict) -> list[int]:
+    """The v3 lanes' spend ceilings, exactly as impact@v3 computes them."""
+    return specialists.cumulative(investigation_limit(budget))
+
+
+def v10_alt_spend_top(budget: dict) -> int:
+    return min(v10_spend_top(budget), budget["maxUsdMicros"] * V10_ALT_SPEND_BP // 10_000)
+
+
+def v10_alt_spend_ceiling(start: int, j: int, budget: dict) -> int:
+    """v10 alternate lane j (0-based): INVESTIGATE spend ceiling given S = `start`, the spend when the first started."""
+    return min(start + specialists.cumulative(v10_alt_spend_top(budget), len(V10_ALT_AGENTS))[j], v10_spend_top(budget))
+
+
+def v10_time_slices(ceiling_sec: int | None) -> list[int] | None:
+    return specialists.time_slices(ceiling_sec, len(V10_AGENTS))
+
+
+def v10_budget_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int) -> dict:
+    k, a = len(V10_AGENTS), len(V10_ALT_AGENTS)
+    c = stage_ceiling("INVESTIGATE", budget)
+    return {"rule": V10_BUDGET_RULE, "text": V10_BUDGET_TEXT, "v3Rule": specialists.BUDGET_RULE,
+            "timeRule": specialists.TIME_RULE, "agents": list(V10_AGENTS), "altAgents": list(V10_ALT_AGENTS),
+            "toolCalls": {"v3Pool": specialists.tool_pool(policy, budget, tool_max_calls),
+                          "pool": v10_tool_pool(policy, budget, tool_max_calls),
+                          "cumulative": v10_tool_cumulative(policy, budget, tool_max_calls)},
+            "spendUsdMicros": {"share": v10_spend_top(budget), "cumulative": v10_primary_spend_cumulative(budget),
+                               "altTop": v10_alt_spend_top(budget),
+                               "altCumulative": specialists.cumulative(v10_alt_spend_top(budget), a),
+                               "altSpendBp": V10_ALT_SPEND_BP},
+            "timeSec": {"ceiling": c, "cumulative": v10_time_slices(c)},
+            "perAgent": {"investigatorTurns": policy.investigator_turns, "agentToolCalls": policy.agent_tool_calls,
+                         "hostMaxCalls": tool_max_calls, "contextChars": policy.context_chars,
+                         "toolOutputCharsPerAgent": budget["maxToolOutputTokensPerAgent"] * 3},
+            "lanes": k}
+
+
+def v10_identity_doc(policy: retrieval.RetrievalPolicy, budget: dict, tool_max_calls: int, profile: dict) -> dict:
+    """The impact@v10 lane identity: the v3 lens texts, the alternate lanes, the alternate model, the budget split, the
+    restatement-only merge and the (unchanged) v3 VERIFY rule."""
+    alt = alternate(profile)
+    return {"behavior": V10_BEHAVIOR, "crossModel": CROSS_BEHAVIOR, "v3Behavior": specialists.SPECIALIST_BEHAVIOR,
+            "lensVersion": prompts.SPECIALIST_LENS_VERSION, "agents": list(V10_AGENTS),
+            "altLanes": {a: prompts.lens_of(a) for a in V10_ALT_AGENTS},
+            "alternateInvestigator": None if alt is None else {k: alt[k] for k in ("provider", "model", "family")},
+            "budget": v10_budget_doc(policy, budget, tool_max_calls),
+            "merge": {"rule": CROSS_MERGE_RULE, "text": CROSS_MERGE_TEXT, "lineWindow": specialists.MERGE_LINE_WINDOW,
+                      "similarity": NEAR_DUP_SIMILARITY},
+            "verify": {"text": V10_VERIFY_TEXT, "maxCandidates": specialists.MAX_VERIFY_CANDIDATES}}

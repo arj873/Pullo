@@ -28,9 +28,10 @@ model = "gpt-6.1-terra"
 provider = "openai"
 model = "gpt-6.1-terra"
 
-# Optional alternate investigator (investigator.impact@v7 cross-model lanes ONLY; every other impact version ignores it
-# and the reviewConfigDigest covers only the three roles above, so v1-v5 identities are unchanged). v7 re-runs the logic,
-# consistency and hygiene lenses on this model; without this table impact_version 7 is refused at plan time.
+# Optional alternate investigator (investigator.impact@v7 and @v10 cross-model lanes ONLY; every other impact version
+# ignores it and the reviewConfigDigest covers only the three roles above, so other identities are unchanged). v7 re-runs
+# the logic, consistency and hygiene lenses on this model, v10 the contracts, logic and safety lenses; without this table
+# impact_version 7 and 10 are refused at plan time.
 [review.investigator_alt]
 provider = "openai"
 model = "gpt-5.6-terra"

@@ -24,8 +24,8 @@ from reviewer.tools.ops import Outcome
 
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                      INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, SPECIALIST_AGENTS, V5_AGENTS,
-                      V7_AGENTS)
+                      INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT,
+                      SPECIALIST_AGENTS, V5_AGENTS, V7_AGENTS, V10_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -80,7 +80,8 @@ class RetrievalPolicy:
         prompt id alone (impact@v1, @v2, @v3 or @v4); every other id keeps the frozen retrieval@2 behaviour byte for byte."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                             INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                                            INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT)
+                                            INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
+                                            INVESTIGATOR_IMPACT_V10_PROMPT)
 
     @property
     def exploration_floor(self) -> bool:
@@ -88,7 +89,7 @@ class RetrievalPolicy:
         Engine._investigator_chain). A v4 diff-shard sweep has its disposition continuation instead."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT,
                                             INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT,
-                                            INVESTIGATOR_IMPACT_V7_PROMPT)
+                                            INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT)
 
     @property
     def specialists(self) -> tuple | None:
@@ -98,6 +99,8 @@ class RetrievalPolicy:
             return V5_AGENTS                      # impact@v5: the v3 specialists, then consistency and hygiene
         if self.investigator_prompt == INVESTIGATOR_IMPACT_V7_PROMPT:
             return V7_AGENTS                      # impact@v7: the five v5 lanes, then the alternate-model lanes
+        if self.investigator_prompt == INVESTIGATOR_IMPACT_V10_PROMPT:
+            return V10_AGENTS                     # impact@v10: the three v3 specialists, then their alternate-model lanes
         return (SPECIALIST_AGENTS if self.investigator_prompt in (INVESTIGATOR_IMPACT_V3_PROMPT,
                                                                   INVESTIGATOR_IMPACT_V4_PROMPT) else None)
 
@@ -109,9 +112,16 @@ class RetrievalPolicy:
 
     @property
     def cross_model(self) -> bool:
-        """investigator.impact@v7: the v5 lanes, then prompts.V7_ALT_LENSES again on the alternate investigator model
-        (ModelProfile.alternates.investigator) with the lanes.py cross-model budget."""
-        return self.investigator_prompt == INVESTIGATOR_IMPACT_V7_PROMPT
+        """Alternate-model lanes on ModelProfile.alternates.investigator: investigator.impact@v7 (the v5 lanes, then
+        prompts.V7_ALT_LENSES again) and investigator.impact@v10 (the v3 specialists, then the same three lenses again;
+        see cross_v3)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT)
+
+    @property
+    def cross_v3(self) -> bool:
+        """investigator.impact@v10: the v3 specialists with the v3 budget split, VERIFY and verifier unchanged, plus
+        their lenses on the alternate investigator model (lanes.py v10 rules, restatement-only cross-lane merge)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V10_PROMPT
 
     @property
     def diff_sweep(self) -> bool:
