@@ -152,7 +152,7 @@ class Validation(LedgerBase):
         bad = [dict(category="scoring"), dict(category="scoring", category_cap=8_000_000),
                dict(category="scoring", aggregate_ceiling=20_000_000),
                dict(category="scoring", category_cap=SCORING_CATEGORY_CAP_MAX + 1, aggregate_ceiling=20_000_000),
-               dict(category="scoring", category_cap=8_000_000, aggregate_ceiling=20_000_001),
+               dict(category="scoring", category_cap=8_000_000, aggregate_ceiling=SCORING_AGGREGATE_CEILING_MAX + 1),
                dict(category="scoring", category_cap=True, aggregate_ceiling=20_000_000),
                dict(category="scoring", category_cap=8_000_000, aggregate_ceiling=True),
                dict(category="scoring", category_cap=0, aggregate_ceiling=20_000_000),
@@ -177,7 +177,7 @@ class Validation(LedgerBase):
                 self.lg.totals(c)
 
     def test_constants_and_validator(self):
-        self.assertEqual((SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (16_000_000, 20_000_000))
+        self.assertEqual((SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (30_000_000, 34_000_000))
         validate_admission("scoring", 8_000_000, 20_000_000)
         validate_admission("review", None, None)
 

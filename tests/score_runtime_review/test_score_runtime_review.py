@@ -23,7 +23,7 @@ from reviewer.contracts import SCORE_MODELS, SCORE_ROLE_SCHEMA                  
 from reviewer.contracts.entities import ROLE_SCHEMAS                                 # noqa: E402
 from reviewer.gateway.errors import AuthorizationError                               # noqa: E402
 from reviewer.runtime import RuntimeLedger, schemas                                  # noqa: E402
-from reviewer.runtime.scoring_budget import SCORING_CATEGORY_CAP_MAX                  # noqa: E402
+from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX  # noqa: E402
 from reviewer.runtime.openrouter import HttpResponse                                 # noqa: E402
 from tests.runtime.common import FakeTransport, HAIKU, OPUS, RT, SONNET, completion, req   # noqa: E402
 
@@ -106,7 +106,7 @@ class LegacyUnchanged(Base):
 
 class Caps(Base):
     BAD = [dict(), dict(category_cap=CAP), dict(aggregate_ceiling=CEIL), dict(category_cap=SCORING_CATEGORY_CAP_MAX + 1, aggregate_ceiling=CEIL),
-           dict(category_cap=CAP, aggregate_ceiling=CEIL + 1), dict(category_cap=True, aggregate_ceiling=CEIL),
+           dict(category_cap=CAP, aggregate_ceiling=SCORING_AGGREGATE_CEILING_MAX + 1), dict(category_cap=True, aggregate_ceiling=CEIL),
            dict(category_cap=CAP, aggregate_ceiling=True), dict(category_cap=0, aggregate_ceiling=CEIL),
            dict(category_cap=-5, aggregate_ceiling=CEIL), dict(category_cap=float(CAP), aggregate_ceiling=CEIL),
            dict(category_cap="8000000", aggregate_ceiling=CEIL), dict(category_cap=CEIL, aggregate_ceiling=CAP),
