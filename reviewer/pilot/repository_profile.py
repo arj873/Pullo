@@ -89,12 +89,13 @@ V7_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 800, "VERIFY": 420, "JUDGE": 200}
 V7_LIVE_WALL_CLOCK_SEC, V7_LIVE_SOFT_DEADLINE_SEC = 1_800, 1_500
 V7_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 320}      # 8 x the legacy 40 s per lane
 # investigator.impact@v10 Plan scaling (only for v10): six lanes keep the v3 per-lane seconds (the INVESTIGATE ceiling
-# doubles: 600 s live, 240 s legacy, so the three v3 lanes get exactly their v3 slices); VERIFY and JUDGE keep v3's live
-# ceilings (VERIFY keeps v3's candidate cap of 20); the run tool-call cap adds the three alternate lanes' 60-call pool to
-# v3's 160; the live run deadlines move by the extra 300 s. The $4 ceiling and the 30% verify reserve are unchanged.
+# doubles: 600 s live, 240 s legacy, so the three v3 lanes get exactly their v3 slices); VERIFY gets 450 s live (v3's 300 s
+# plus 150 s for the alternate lanes' candidates verified after v3's; the legacy Plan has no VERIFY override and keeps
+# the table value, as v3's does); JUDGE keeps v3's 200 s; the run tool-call cap adds the three alternate lanes' 60-call
+# pool to v3's 160; the live run deadlines move by the extra 300 + 150 s. The $4 ceiling and 30% verify reserve are unchanged.
 V10_MAX_TOOL_CALLS = 220
-V10_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 600, "VERIFY": 300, "JUDGE": 200}
-V10_LIVE_WALL_CLOCK_SEC, V10_LIVE_SOFT_DEADLINE_SEC = 1_500, 1_200
+V10_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 600, "VERIFY": 450, "JUDGE": 200}
+V10_LIVE_WALL_CLOCK_SEC, V10_LIVE_SOFT_DEADLINE_SEC = 1_650, 1_350
 V10_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 240}     # 6 x the legacy 40 s per lane
 
 

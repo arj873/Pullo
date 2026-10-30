@@ -107,7 +107,7 @@ class Resolution(unittest.TestCase):
                          ("gpt-6.1-terra", "gpt-5.6-terra", "openai", "gpt", INV10))
         self.assertEqual({k: v for k, v in alt.items() if k not in ("model", "price")},
                          {k: v for k, v in inv.items() if k not in ("model", "price")})
-        for live, stages, clock in ((True, {"INVESTIGATE": 600, "VERIFY": 300, "JUDGE": 200}, (1_500, 1_200)),
+        for live, stages, clock in ((True, {"INVESTIGATE": 600, "VERIFY": 450, "JUDGE": 200}, (1_650, 1_350)),
                                     (False, {"INVESTIGATE": 240}, (1_200, 900))):
             plan = RP.repository_plan(p, live_stage_timing=live)
             self.assertEqual(validate("Plan", plan), [])
@@ -186,8 +186,16 @@ class V3LaneSpecs(unittest.TestCase):
                 for k in ("maxUsdMicros", "verifyReserveBp", "maxToolCallsPerAgent", "maxToolOutputTokensPerAgent",
                           "maxRetriesPerCall"):
                     self.assertEqual(b3[k], b10[k], k)
-                for st in ("VERIFY", "JUDGE"):          # VERIFY and JUDGE keep v3's ceilings
-                    self.assertEqual(stage_ceiling(st, b3), stage_ceiling(st, b10), st)
+                self.assertEqual(stage_ceiling("JUDGE", b3), stage_ceiling("JUDGE", b10))     # JUDGE keeps v3's
+                # VERIFY: v3's 300 s plus 150 s live for the alternate candidates (legacy: no override, the table's);
+                # the live deadlines move by the same 150 s on top of INVESTIGATE's 300 s; v3's numbers are unchanged
+                self.assertEqual((stage_ceiling("VERIFY", b3), stage_ceiling("VERIFY", b10)),
+                                 (300, 450) if live else (45, 45))
+                self.assertEqual((b3["wallClockSec"], b3["softDeadlineSec"]), (1_200, 900))
+                self.assertEqual((b10["wallClockSec"] - b3["wallClockSec"], b10["softDeadlineSec"] - b3["softDeadlineSec"]),
+                                 (450, 450) if live else (0, 0))
+                if live:
+                    self.assertEqual(b3["stageCeilingsSec"], {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200})
                 host = 60
                 self.assertEqual(lanes.v10_tool_cumulative(pol10, b10, host)[:3],
                                  specialists.cumulative(specialists.tool_pool(pol3, b3, host)))
