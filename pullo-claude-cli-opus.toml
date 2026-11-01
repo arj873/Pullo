@@ -1,5 +1,6 @@
 # Pullo review-model configuration variant (schema pullo-config@1): the Claude Code CLI review arm on the user's Claude
 # subscription, Claude Opus 5.5 (CLAUDE-CLI-PROVIDER). The sibling variant pullo-claude-cli.toml (Sonnet 5.5) differs only in the model.
+# SECONDARY variant: the PRIMARY claude-cli arm is pullo-claude-cli-sj.toml (Sonnet investigator + verifier, Opus judge).
 #
 # Select it explicitly with --config pullo-claude-cli-opus.toml. The default pullo.toml (Sonnet 5.5 through OpenRouter), the Terra and
 # opencode variants and the common scoring judge are unchanged by this file.

@@ -28,6 +28,8 @@ from tests.runtime.claude_fake import DUMMY_TOKEN, OPUS, ScriptedRunner, dummy_t
 
 VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli.toml"
 OPUS_VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli-opus.toml"
+SJ_VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli-sj.toml"      # the PRIMARY arm: Sonnet roles + Opus judge
+SJ_ROLES = {"investigator": CLAUDE_CLI_DEFAULT_MODEL, "verifier": CLAUDE_CLI_DEFAULT_MODEL, "judge": OPUS}
 MODEL = CLAUDE_CLI_DEFAULT_MODEL
 SUB_ONLY = dict(H.AUTH, id="claude-cli-test", providers=["claude-cli"], models=[MODEL])
 
@@ -73,6 +75,25 @@ class ConfigAndProfile(unittest.TestCase):
             self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
             self.assertNotIn("investigator_alt", tomllib.loads(path.read_text())["review"])
         self.assertNotEqual(resolve_config(VARIANT).models.digest, resolve_config(OPUS_VARIANT).models.digest)
+
+    def test_primary_variant_binds_sonnet_roles_and_an_opus_judge_and_no_haiku(self):
+        cfg = resolve_config(SJ_VARIANT)
+        rep = cfg.report()
+        self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
+                         {r: ("claude-cli", m) for r, m in SJ_ROLES.items()})
+        self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
+        self.assertEqual(len({resolve_config(v).models.digest for v in (VARIANT, OPUS_VARIANT, SJ_VARIANT)}), 3)
+        p = live_profile(models=cfg.models)
+        self.assertEqual(validate("ModelProfile", p), [])
+        self.assertEqual({r: v["model"] for r, v in p["roles"].items()}, SJ_ROLES)
+        root = Path(__file__).resolve().parents[2]
+        for f in ("pullo-claude-cli.toml", "pullo-claude-cli-opus.toml", "pullo-claude-cli-sj.toml"):
+            self.assertNotIn("haiku", (root / f).read_text().split("schema =", 1)[1].lower())
+        self.assertFalse(any("haiku" in m for m in O.CLAUDE_CLI_MODELS))
+        self.assertEqual(P.live_arm(p), "terra")
+        built = []
+        got = P.live_terra(p, "LEDGER", "scope", claude_factory=lambda **kw: built.append(kw) or "ADAPTER")
+        self.assertEqual((got.claude, built[0]["models"]), ("ADAPTER", sorted({CLAUDE_CLI_DEFAULT_MODEL, OPUS})))
 
     def test_unknown_or_crossed_models_are_refused_without_fallback(self):
         base = 'schema = "pullo-config@1"\n[review.investigator]\nprovider = "%s"\nmodel = "%s"\n'
@@ -286,6 +307,28 @@ class BenchmarkClaudeCli(BT.Base):
         self.assertEqual(len(costs), 5)
         self.assertTrue(all(c["provider"] == "claude-cli" and c["basis"] == "estimated"
                             and c["priceVersion"] == CLAUDE_CLI_PRICE_VERSION for c in costs))
+
+    def test_primary_sonnet_opus_judge_arm_plans_and_runs_each_role_on_its_model(self):
+        self.w.auth.write_text(json.dumps(dict(SUB_ONLY, models=sorted(set(SJ_ROLES.values())))))
+        base = dict(self.w.baseline_doc, reviewConfigDigest=resolve_config(SJ_VARIANT).models.digest,
+                    authorizationSha256="sha256:" + hashlib.sha256(self.w.auth.read_bytes()).hexdigest())
+        self.w.write_roots(baseline=base)
+        with mock.patch.object(O, "run_bounded_stream", side_effect=no_cli):
+            plan = B.run_benchmark(self.w.options(config=str(SJ_VARIANT)), key_loader=self.boom)
+        self.assertEqual((plan["status"], plan["ok"]), ("planned", True), plan.get("plan"))
+        self.assertEqual({r: v["model"] for r, v in plan["plan"]["models"].items()}, SJ_ROLES)
+        self.assertTrue(all(f["model"] == SJ_ROLES[f["role"]] for f in plan["plan"]["capturedRequests"]))
+        model, runners = self.model(), []
+        d, opts = cli_live(self.w, self.tmp, config=str(SJ_VARIANT))
+        with mock.patch.object(B, "live_terra", side_effect=scripted_claude(model.script, runners)):
+            rep = B.run_benchmark(opts, key_loader=self.boom, transport=lambda *a: self.fail("OpenRouter must not be used"))
+        self.assertEqual((rep["status"], rep["ok"]), ("completed", True), rep.get("error"))
+        self.assertEqual({r: v["model"] for r, v in rep["reviewModels"]["roles"].items()}, SJ_ROLES)
+        rows = [json.loads(x) for x in (d / TERRA_LEDGER_NAME).read_text().splitlines()]
+        roles = {(r["callKey"].rsplit("|", 5)[2], r["model"]) for r in rows if r["type"] == "intent"}
+        self.assertTrue(roles and all(m == SJ_ROLES[role] for role, m in roles), roles)
+        cli = {"claude-sonnet-5-5": CLAUDE_CLI_DEFAULT_MODEL, "claude-opus-5-5": OPUS}
+        self.assertTrue(all(cli[s["argv"][s["argv"].index("--model") + 1]] in SJ_ROLES.values() for s in runners[0].seen))
 
     def test_a_usage_limit_surfaces_the_cli_words_and_latches_the_rest_of_the_run(self):
         runners = []
