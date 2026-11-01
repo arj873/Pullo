@@ -19,8 +19,8 @@ from reviewer.runtime import claude_canary as CAN
 from reviewer.runtime import claude_capture as CAP
 from reviewer.runtime import claude_cli as C
 from reviewer.runtime import schemas
-from reviewer.runtime.catalog import (ALLOWED_ROUTER_MODELS, CLAUDE_CLI_MODELS, CLAUDE_CLI_PRICE_VERSION,
-                                      claude_cli_gateway_price, claude_cli_pacing_micros)
+from reviewer.runtime.catalog import (CLAUDE_CLI_MODELS, CLAUDE_CLI_PRICE_VERSION, OPENCODE_PACING_PRICE, TERRA_6_PRICE,
+                                      claude_cli_gateway_price, claude_cli_pacing_micros, opencode_gateway_price)
 from reviewer.runtime.envfile import Secret
 from tests.runtime import claude_fake as F
 
@@ -124,14 +124,19 @@ class Settings(unittest.TestCase):
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
                          ("claude-cli-isolated@1", "2.1.309", "claude-bwrap-masked@1"))
 
-    def test_prices_are_the_anthropic_list_rates_of_the_same_model(self):
-        for m, spec in CLAUDE_CLI_MODELS.items():
-            p, r = claude_cli_gateway_price(m), ALLOWED_ROUTER_MODELS[spec["router"]]
-            self.assertEqual((p["inputPerMTokUsdMicros"], p["cachedInputPerMTokUsdMicros"],
-                              p["cacheWriteInputPerMTokUsdMicros"], p["outputPerMTokUsdMicros"]),
-                             (r["input"], r["cached"], r["write1h"], r["output"]))
+    def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
+        oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
+        for m in CLAUDE_CLI_MODELS:
+            p = claude_cli_gateway_price(m)
+            self.assertEqual({k: v for k, v in p.items() if k != "priceVersion"}, {k: v for k, v in oc.items() if k != "priceVersion"})
+            self.assertEqual((p["inputPerMTokUsdMicros"], p["cachedInputPerMTokUsdMicros"], p["cacheWriteInputPerMTokUsdMicros"],
+                              p["outputPerMTokUsdMicros"]), (TERRA_6_PRICE["input"], TERRA_6_PRICE["cached"], TERRA_6_PRICE["write"],
+                                                             TERRA_6_PRICE["output"]))
             self.assertEqual(p["priceVersion"], CLAUDE_CLI_PRICE_VERSION)
-        self.assertEqual(claude_cli_pacing_micros(F.OPUS, 1_000_000, 0, 0, 0, 0), 4_000_000)
+        self.assertEqual(CLAUDE_CLI_PRICE_VERSION, "claude-cli-pacing@terra6-list-2026-10-29")
+        self.assertEqual(claude_cli_pacing_micros(F.OPUS, 1_000_000, 0, 0, 0), OPENCODE_PACING_PRICE["input"])
+        self.assertEqual(claude_cli_pacing_micros(F.OPUS, 1, 2, 3, 4), claude_cli_pacing_micros(F.MODEL, 1, 2, 3, 4))
+        self.assertEqual(C.ESTIMATE_BASIS, "pacing-terra6-list-rates")
         with self.assertRaises(ValueError):
             claude_cli_gateway_price("claude-opus-5-5")                         # the bare id is development-only
 
@@ -266,7 +271,8 @@ class Calls(Base):
                          ("claude-cli", "claude-subscription", "claude-subscription-zero", "processed"))
         u = F.USAGE
         self.assertEqual(res_row["apiEquivalentEstimateUsdMicros"], claude_cli_pacing_micros(
-            F.MODEL, u["input_tokens"], u["cache_read_input_tokens"], 0, 300, u["output_tokens"]))
+            F.MODEL, u["input_tokens"], u["cache_read_input_tokens"], u["cache_creation_input_tokens"], u["output_tokens"]))
+        self.assertEqual((res_row["estimateBasis"], res_row["priceVersion"]), ("pacing-terra6-list-rates", CLAUDE_CLI_PRICE_VERSION))
         self.assertEqual(res_row["usage"], {"uncachedInputTokens": 1000, "cachedInputTokens": 200,
                                             "cacheWriteInputTokens": 300, "outputTokens": 40, "reasoningTokens": 0})
         self.assertEqual((res_row["generationId"], res_row["isolation"]["requestsSeen"], res_row["isolation"]["toolItems"]),

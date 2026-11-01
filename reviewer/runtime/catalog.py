@@ -193,43 +193,44 @@ def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) 
 CLAUDE_CLI_VERSION = "2.1.309"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI
 CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@1"
 CLAUDE_CLI_MODELS: dict[str, dict] = {
-    "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "router": "anthropic/claude-opus-5.5",
-                                   "contextTokens": 1_000_000, "outputTokens": 128_000},
-    "claude-cli/claude-sonnet-5-5": {"cliModel": "claude-sonnet-5-5", "family": "claude",
-                                     "router": "anthropic/claude-sonnet-5.5", "contextTokens": 1_000_000,
+    "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "contextTokens": 1_000_000,
+                                   "outputTokens": 128_000},
+    "claude-cli/claude-sonnet-5-5": {"cliModel": "claude-sonnet-5-5", "family": "claude", "contextTokens": 1_000_000,
                                      "outputTokens": 128_000},
 }
 CLAUDE_CLI_DEFAULT_MODEL = "claude-cli/claude-sonnet-5-5"
-# The subscription costs $0 per call (`billingKind` claude-subscription: no bill, no key, no SpendBook). The engine paces a
-# run with the ANTHROPIC LIST RATES of the same model (the OpenRouter catalog rows above, which equal Anthropic's list
-# prices), so receipts carry an API-equivalent estimate. The CLI writes its prompt cache with the 1-hour TTL under OAuth,
-# so measured cache writes are paced at the 1h write rate. Never money.
-CLAUDE_CLI_PRICE_VERSION = "claude-cli-pacing@anthropic-list-2026-10-25"
+# The subscription costs $0 per call (`billingKind` claude-subscription: no bill, no key, no SpendBook). The engine still needs a
+# nonzero price to PACE a run (Plan ceiling, INVESTIGATE share, unit reserves, VERIFY/JUDGE floors), so the ModelProfile carries a
+# PACING price: the SAME GPT-6.1-Terra list rates the opencode arm uses (TERRA_6_PRICE; root decision 2026-11-01, phase A2), so
+# impact@v3/v12/v13 spend-based budgets and the $4 Plan ceiling behave exactly as on the Terra arm and a cc arm differs from it in
+# the model only. These numbers are NOT an estimate of what Claude would cost anywhere, and never money.
+CLAUDE_CLI_PRICE_VERSION = "claude-cli-pacing@terra6-list-2026-10-29"
+CLAUDE_CLI_PACING_PRICE = {k: TERRA_6_PRICE[k] for k in ("input", "cached", "write", "output")}
 
 
 def _claude_cli_rates(model: str) -> dict:
     if model not in CLAUDE_CLI_MODELS:
         raise ValueError("unknown claude-cli model")
-    return ALLOWED_ROUTER_MODELS[CLAUDE_CLI_MODELS[model]["router"]]
+    return CLAUDE_CLI_PACING_PRICE
 
 
 def claude_cli_gateway_price(model: str) -> dict:
     p = _claude_cli_rates(model)
     return {"priceVersion": CLAUDE_CLI_PRICE_VERSION, "inputPerMTokUsdMicros": p["input"],
-            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write1h"],
+            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write"],
             "outputPerMTokUsdMicros": p["output"]}
 
 
 def claude_cli_worst_case_micros(model: str, request_bytes: int, max_output_tokens: int) -> int:
-    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearest input rate (the 1h cache
-    write) plus the full output cap at the output rate."""
+    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearer input rate plus the full output cap
+    at the output rate (as opencode_worst_case_micros)."""
     p = _claude_cli_rates(model)
-    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write1h"]))
+    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write"]))
             + _ceil_cost(max_output_tokens, p["output"]))
 
 
-def claude_cli_pacing_micros(model: str, uncached: int, cached: int, write5m: int, write1h: int, output: int) -> int:
-    """List-rate arithmetic for measured usage (receipts only; the actual charge is $0)."""
+def claude_cli_pacing_micros(model: str, uncached: int, cached: int, write: int, output: int) -> int:
+    """Pacing-rate arithmetic for measured claude-cli usage (receipts only; the actual charge is $0)."""
     p = _claude_cli_rates(model)
-    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write5m, p["write"])
-            + _ceil_cost(write1h, p["write1h"]) + _ceil_cost(output, p["output"]))
+    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write, p["write"])
+            + _ceil_cost(output, p["output"]))

@@ -10,8 +10,8 @@ proofs; the CLI runs with no tools in the masked bwrap sandbox, the OAuth access
 tool-temptation prompt, max_calls=1, no retries (a scheduled CLI retry is killed before it is sent), no fallback, no
 OpenRouter key or transport, and its own fresh runtime ledger inside the receipt directory (never the OpenRouter trial
 state). It passes only with a schema-valid answer, zero tool attempts, exactly one provider request seen, only the pinned
-model in the CLI's usage and an intact per-call home/cwd. The receipt records a subscription call ($0) with an
-API-equivalent estimate only; a failure keeps the CLI's own words (e.g. "You've hit your limit · resets ..."). A failed
+model in the CLI's usage and an intact per-call home/cwd. The receipt records a subscription call ($0) with a PACING
+estimate only (Terra-6 list rates); a failure keeps the CLI's own words (e.g. "You've hit your limit · resets ..."). A failed
 canary keeps its receipt. The token itself is never written anywhere."""
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = CLAUDE
         report.update(ok=all(checks.values()), checks=checks, providerCalls=provider.calls,
                       outcome=result.outcome, error=result.error, status=resp.get("status"),
                       output=output if resp.get("status") == "ok" else None, usage=resp.get("usage"),
-                      apiEquivalentEstimateUsdMicros=res_row.get("apiEquivalentEstimateUsdMicros"),
+                      pacingEstimateUsdMicros=res_row.get("apiEquivalentEstimateUsdMicros"),
                       priceVersion=res_row.get("priceVersion"), isolation=iso, note=res_row.get("note"),
                       providerRequestId=res_row.get("generationId"), latencyMs=res_row.get("latencyMs"),
                       latched=provider.latched)

@@ -11,12 +11,12 @@
 # (claude-cli-isolated@1) inside a bwrap sandbox that hides the whole user home (no ~/.claude path is exposed: the OAuth
 # access token arrives on an inherited pipe fd); audited stream-json; no retries (a scheduled CLI retry is killed before it
 # is sent), one agent turn, no thinking, no repairs or fallbacks; the role schema is quoted in the prompt and the answer is
-# parsed strictly. A usage limit, rate limit, overload or auth failure latches the run. The engine paces the run with the
-# Anthropic LIST rates of the same model (an API-equivalent estimate, not money).
+# parsed strictly. A usage limit, rate limit, overload or auth failure latches the run. The engine paces the run with a
+# PACING price - the same Terra-6 list rates as the opencode arm - not money and not Claude's price.
 #
 # Before the first live use, root runs the one-call canary (python3 -m reviewer.runtime.claude_canary --confirm-live; see
 # the claude-cli runbook). The spend authorization named by --auth must list provider "claude-cli" and these models; its
-# dollar fields bound the API-equivalent estimates. This file selects models only and authorizes nothing.
+# dollar fields bound PACING estimates (the arm costs $0). This file selects models only and authorizes nothing.
 
 schema = "pullo-config@1"
 

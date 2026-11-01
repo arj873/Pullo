@@ -55,7 +55,7 @@ HELD_PROVIDERS: dict[str, str] = {}
 ISOLATION = {OPENAI: TERRA_ISOLATION_VERSION, OPENCODE: OPENCODE_ISOLATION_VERSION, CLAUDE_CLI: CLAUDE_CLI_ISOLATION_VERSION}
 BILLING = {OPENAI: "subscription-consumption (API-equivalent estimate)",
            OPENCODE: "free-model ($0; pacing estimate at Terra-6 list rates, not money)",
-           CLAUDE_CLI: "claude-subscription ($0; API-equivalent estimate at Anthropic list rates, not money)"}
+           CLAUDE_CLI: "claude-subscription ($0; pacing estimate at Terra-6 list rates, not money)"}
 MAX_BYTES = 8192
 _TOP, _REVIEW, _ROLE = {"schema", "review"}, set(ROLES) | {ALT_ROLE}, {"provider", "model"}
 

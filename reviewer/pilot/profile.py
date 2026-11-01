@@ -37,7 +37,7 @@ def model_fields(provider: str, m: str) -> dict:
     if m in OPENCODE_MODELS:
         return {"provider": provider, "model": m, "family": OPENCODE_MODELS[m]["family"],
                 "price": opencode_gateway_price(m)}
-    if m in CLAUDE_CLI_MODELS:                    # CLAUDE-CLI-PROVIDER: Anthropic list rates (API-equivalent; $0 actual)
+    if m in CLAUDE_CLI_MODELS:                    # CLAUDE-CLI-PROVIDER: the Terra-6 PACING price ($0 actual)
         return {"provider": provider, "model": m, "family": CLAUDE_CLI_MODELS[m]["family"],
                 "price": claude_cli_gateway_price(m)}
     return {"provider": provider, "model": m, "family": "gpt" if m in TERRA_MODELS else "claude",

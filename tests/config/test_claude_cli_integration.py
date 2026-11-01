@@ -67,7 +67,8 @@ class ConfigAndProfile(unittest.TestCase):
             rep = cfg.report()
             self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
                              {r: ("claude-cli", model) for r in ("investigator", "verifier", "judge")})
-            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@1" and v["billing"].startswith("claude-subscription")
+            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@1"
+                                and v["billing"] == "claude-subscription ($0; pacing estimate at Terra-6 list rates, not money)"
                                 for v in rep["roles"].values()))
             self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
             self.assertNotIn("investigator_alt", tomllib.loads(path.read_text())["review"])
@@ -97,7 +98,12 @@ class ConfigAndProfile(unittest.TestCase):
             for r in p["roles"].values():
                 self.assertEqual((r["provider"], r["family"], r["price"]["priceVersion"]),
                                  ("claude-cli", "claude", CLAUDE_CLI_PRICE_VERSION))
-                self.assertGreater(r["price"]["outputPerMTokUsdMicros"], 0)    # API-equivalent pacing, never $0 reservations
+                self.assertGreater(r["price"]["outputPerMTokUsdMicros"], 0)    # pacing, never $0 reservations
+            terra = live_profile(models=resolve_config(Path(__file__).resolve().parents[2] / "pullo-terra.toml").models)
+            oc = live_profile(models=resolve_config(Path(__file__).resolve().parents[2] / "pullo-opencode.toml").models)
+            strip = lambda pr: {k: v for k, v in pr.items() if k != "priceVersion"}            # noqa: E731
+            self.assertEqual({strip(r["price"]) == strip(oc["roles"][n]["price"]) == strip(terra["roles"][n]["price"])
+                              for n, r in p["roles"].items()}, {True})               # the same pacing as Terra-6 and opencode
 
 
 class Routing(unittest.TestCase):

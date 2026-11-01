@@ -74,8 +74,10 @@ offline against a loopback fake Anthropic endpoint, no inference):
     BASE_INSTRUCTIONS, the Pullo prompt as the first user text, thinking off and the pinned model; a scripted answer comes
     back ok; a scripted tool call is reported, never executed; a 401 reaches the endpoint exactly once; a subscription usage
     limit keeps the CLI's words and latches.
-Billing: claude-subscription. $0 actual (no key, no SpendBook, committed 0); receipts and the engine carry an
-API-EQUIVALENT estimate at the Anthropic list rates of the same model (catalog.py), never money. Review family only."""
+Billing: claude-subscription. $0 actual (no key, no SpendBook, committed 0); the engine paces the run, and receipts carry a
+PACING estimate, at the Terra-6 list rates the opencode arm uses (catalog.CLAUDE_CLI_PACING_PRICE; estimateBasis
+pacing-terra6-list-rates), never money and never Claude's own price. Usage tokens are recorded as measured. A report that sums
+apiEquivalentEstimateUsdMicros across arms must filter on billingKind. Review family only."""
 
 from __future__ import annotations
 
@@ -109,7 +111,7 @@ from .receipts import RuntimeLedger, make_scope
 
 PROVIDER = "claude-cli"
 BILLING_KIND = "claude-subscription"
-ESTIMATE_BASIS = "anthropic-list-rates"
+ESTIMATE_BASIS = "pacing-terra6-list-rates"
 COST_BASIS = "claude-subscription-zero"
 LEDGER_KIND = "claude-cli"
 SCHEMA_FLAVOR = "anthropic"
@@ -1191,21 +1193,15 @@ class ClaudeCliProvider:
 
     @staticmethod
     def _usage(model, u) -> tuple[dict, int | None]:
-        """Anthropic usage buckets: input_tokens is non-cached input, cache reads/writes separate (writes split 5m/1h).
-        Pullo's outputTokens is everything the model generated; reasoningTokens its thinking part (0: thinking is off)."""
+        """Anthropic usage buckets: input_tokens is non-cached input, cache reads and writes separate. Pullo's outputTokens is
+        everything the model generated; reasoningTokens its thinking part (0: thinking is off). Paced at the Terra-6 rates."""
         keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
         if not isinstance(u, dict) or not all(type(u.get(k)) is int and u[k] >= 0 for k in keys):
             return {"uncachedInputTokens": None, "cachedInputTokens": None, "cacheWriteInputTokens": None,
                     "outputTokens": None, "reasoningTokens": None}, None
-        cc = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else {}
-        w1h = cc.get("ephemeral_1h_input_tokens") if type(cc.get("ephemeral_1h_input_tokens")) is int else None
-        w5m = cc.get("ephemeral_5m_input_tokens") if type(cc.get("ephemeral_5m_input_tokens")) is int else None
         writes = u["cache_creation_input_tokens"]
-        if w1h is None or w5m is None or w1h + w5m != writes:
-            w1h, w5m = writes, 0                       # unsplit: the dearer 1h write rate (the CLI's OAuth TTL)
         det = u.get("output_tokens_details") if isinstance(u.get("output_tokens_details"), dict) else {}
         think = det.get("thinking_tokens") if type(det.get("thinking_tokens")) is int else 0
         usage = {"uncachedInputTokens": u["input_tokens"], "cachedInputTokens": u["cache_read_input_tokens"],
                  "cacheWriteInputTokens": writes, "outputTokens": u["output_tokens"], "reasoningTokens": think}
-        return usage, claude_cli_pacing_micros(model, u["input_tokens"], u["cache_read_input_tokens"], w5m, w1h,
-                                               u["output_tokens"])
+        return usage, claude_cli_pacing_micros(model, u["input_tokens"], u["cache_read_input_tokens"], writes, u["output_tokens"])

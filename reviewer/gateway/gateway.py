@@ -520,8 +520,8 @@ class Gateway:
         # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
         # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only;
         # only for a pinned free model (defense in depth: authorization and the adapter already refuse any other model).
-        # A claude-cli call (CLAUDE-CLI-PROVIDER) too: the Claude subscription, $0 actual, an API-equivalent reservation at
-        # Anthropic list rates; only for a pinned claude-cli model.
+        # A claude-cli call (CLAUDE-CLI-PROVIDER) too: the Claude subscription, $0 actual, a pacing reservation at the Terra-6
+        # list rates (as opencode); only for a pinned claude-cli model.
         subscription = (self.family == "review" and (
             (req["provider"] == "openai" and getattr(provider, "billing_kind", None) == "subscription-consumption")
             or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model"
