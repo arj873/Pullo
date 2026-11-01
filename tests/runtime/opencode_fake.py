@@ -92,7 +92,11 @@ def sandbox_probe(stdin: bytes) -> dict:
         inside = "written"
     except OSError as e:
         inside = type(e).__name__
-    return {"hidden": seen, "outside": outside, "inside": inside, "home": os.environ.get("HOME")}
+    run_user = f"/run/user/{os.getuid()}"
+    return {"hidden": seen, "outside": outside, "inside": inside, "home": os.environ.get("HOME"),
+            "runUser": sorted(os.listdir(run_user)) if os.path.isdir(run_user) else None,
+            "procPids": sum(1 for n in os.listdir("/proc") if n.isdigit()),
+            "tmp": sorted(os.listdir("/tmp")), "varTmp": sorted(os.listdir("/var/tmp"))}
 
 
 def write_db(data_home, model=MODEL, *, sessions=1, agent=O.AGENT, messages=None, parent=None):

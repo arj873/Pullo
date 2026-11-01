@@ -141,16 +141,18 @@ class Settings(unittest.TestCase):
 
     def test_sandbox_prefix_masks_credentials_and_state_and_keeps_only_the_work_dir_writable(self):
         masks = [("dir", "/h/.aws"), ("dir", "/h/.config/opencode"), ("file", "/r/.env")]
-        pre = O.sandbox_prefix("/usr/bin/bwrap", "/w/rvw-opencode-x", masks, "/h")
+        pre = O.sandbox_prefix("/usr/bin/bwrap", "/w/rvw-opencode-x", masks, "/h", "/run/user/7")
         self.assertEqual(pre, ["/usr/bin/bwrap", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/h",
-                               "--tmpfs", "/h/.aws", "--tmpfs", "/h/.config/opencode", "--ro-bind", "/dev/null", "/r/.env",
+                               "--unshare-pid", "--proc", "/proc", "--unshare-ipc", "--tmpfs", "/run/user/7", "--tmpfs", "/tmp",
+                               "--tmpfs", "/var/tmp", "--tmpfs", "/h/.aws", "--tmpfs", "/h/.config/opencode", "--ro-bind", "/dev/null", "/r/.env",
                                "--bind", "/w/rvw-opencode-x", "/w/rvw-opencode-x", "--chdir", "/w/rvw-opencode-x/cwd", "--"])
         self.assertNotIn("--unshare-net", pre)                                     # the free endpoint needs the network
         argv = pre + O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)
         self.assertEqual(O.split_sandbox(argv), (pre, O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)))
         self.assertEqual(O.split_sandbox(["opencode", "--version"]), (None, ["opencode", "--version"]))
         self.assertTrue(O.is_review_call(argv) and O.is_review_call(argv[len(pre):]))
-        self.assertEqual(O.sandbox_identity()["sandbox"], "opencode-bwrap-masked@2")
+        self.assertEqual(O.sandbox_identity()["sandbox"], "opencode-bwrap-masked@3")
+        self.assertNotIn("/run/user/7", O.sandbox_prefix("/usr/bin/bwrap", "/w/x", masks, "/h", None))   # no runtime dir, no mask
         self.assertTrue(O.under("/h/x/y", "/h") and O.under("/h", "/h") and not O.under("/hx/y", "/h"))
 
     def test_the_whole_passwd_home_is_masked_and_a_binary_under_it_is_refused(self):
@@ -209,7 +211,7 @@ class Calls(Base):
         s = self.runner.seen[0]
         work = os.path.dirname(s["cwd"])
         self.assertEqual(O.split_sandbox(s["argv"]),                                # every live call is sandboxed
-                         (O.sandbox_prefix(p._bwrap, work, O.sandbox_masks(), O.real_home()),
+                         (O.sandbox_prefix(p._bwrap, work, O.sandbox_masks(), O.real_home(), O.runtime_dir()),
                           O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)))
         self.assertTrue(s["polled"])                                               # with the session-DB retry watch
         self.assertEqual(set(s["env"]) - ALLOWED_ENV, set())                       # no key, no proxy, no operator dirs
@@ -224,7 +226,7 @@ class Calls(Base):
                          ("opencode-cli", "free-model", "free-model-zero", "processed"))
         self.assertEqual(result["apiEquivalentEstimateUsdMicros"], opencode_pacing_micros(1000, 200, 0, 50))
         self.assertEqual(result["isolation"]["toolItems"], 0)
-        self.assertEqual((result["isolation"]["requestsSent"], result["isolation"]["sandbox"]), (1, O.SANDBOX_VERSION))
+        self.assertEqual((result["isolation"]["requestsSeen"], result["isolation"]["sandbox"]), (1, O.SANDBOX_VERSION))
         self.assertEqual(self.led.totals()["committedUsdMicros"], 0)
 
     def test_fenced_answer_is_accepted_and_noted_prose_is_invalid_output(self):
@@ -243,7 +245,7 @@ class Calls(Base):
         p = self.prov("toolcall", "executed", "ok")
         res = p.call(F.opencode_request(), KEY)
         self.assertEqual((res.outcome, res.error["detail"]["reason"], res.error["detail"]["itemType"],
-                          res.error["detail"]["requestsSent"]), ("unknown", "isolation-violation", "tool-attempt", 1))
+                          res.error["detail"]["requestsSeen"]), ("unknown", "isolation-violation", "tool-attempt", 1))
         self.assertIsNone(p.disabled_reason)                                       # attempted, not executed
         res = p.call(F.opencode_request(), ("INVESTIGATE", "investigator", "g", 1, 0))
         self.assertEqual(res.error["detail"]["itemType"], "tool-executed")
@@ -282,29 +284,29 @@ class Calls(Base):
         d = res.error["detail"]
         self.assertEqual((res.outcome, d["reason"], d["errorType"], d["httpStatus"]),
                          ("rejected-before-processing", "cli-retry", "provider.rate-limit", 429))
-        self.assertEqual((d["requestsSent"], d["retryRequestSent"], d["cliScheduledAttempt"]), (1, False, 2))
+        self.assertEqual((d["requestsSeen"], d["retryRequestSeen"], d["cliScheduledAttempt"]), (1, False, 2))
         self.assertNotIn("attempts", d)
         self.assertIn("Rate limit exceeded: free tier", res.error["message"])
         self.assertIn("hidden retry", res.error["message"])
-        self.assertIn("killed when it was scheduled; provider requests sent: 1", res.error["message"])
-        self.assertEqual(self.rows()[-1]["isolation"]["requestsSent"], 1)
+        self.assertIn("killed when it was scheduled; provider requests seen: 1 (at least; at most 2)", res.error["message"])
+        self.assertEqual(self.rows()[-1]["isolation"]["requestsSeen"], 1)
 
     def test_a_retry_request_that_left_is_killed_and_counted_never_claimed_prevented(self):
         p = self.prov("retry-fast")
         res = p.call(F.opencode_request(), KEY)
         d = res.error["detail"]
-        self.assertEqual((res.outcome, d["reason"], d["requestsSent"], d["retryRequestSent"], d["cliScheduledAttempt"]),
+        self.assertEqual((res.outcome, d["reason"], d["requestsSeen"], d["retryRequestSeen"], d["cliScheduledAttempt"]),
                          ("unknown", "cli-retry", 2, True, 2))
-        self.assertIn("killed at its request; provider requests sent: 2", res.error["message"])
-        self.assertEqual(self.rows()[-1]["isolation"]["requestsSent"], 2)
+        self.assertIn("killed at its request; provider requests seen: 2 (at least; at most 2)", res.error["message"])
+        self.assertEqual(self.rows()[-1]["isolation"]["requestsSeen"], 2)
 
     def test_a_retry_the_stream_missed_is_recorded_not_hidden(self):
         p = self.prov("retried-ok")
         res = p.call(F.opencode_request(), KEY)
         self.assertEqual(res.response["status"], "ok")
         row = self.rows()[-1]
-        self.assertEqual((row["note"], row["isolation"]["cliScheduledAttempt"], row["isolation"]["requestsSent"]),
-                         ("hidden-cli-retry:attempt-2:requests-sent-1", 2, 1))
+        self.assertEqual((row["note"], row["isolation"]["cliScheduledAttempt"], row["isolation"]["requestsSeen"]),
+                         ("hidden-cli-retry:attempt-2:requests-seen-1", 2, 1))
 
     def test_timeout_reports_the_last_scheduled_retry_error(self):
         p = self.prov("timeout", timeout_sec=10)
@@ -406,7 +408,11 @@ class Guard(Base):
                 self.assertIn(want, ok(**over))
         self.assertIn("argv differs from the pinned review argv for this model", ok(model="opencode/glm-5.3-flash-free"))
         self.assertEqual(pre[7:9], ["--tmpfs", O.real_home()])                    # the whole home, right after the root
-        for drifted in (pre[:9] + pre[-6:], pre[:7] + pre[9:]):                   # the per-path masks or the home tmpfs dropped
+        fixed = O.sandbox_prefix(pre[0], os.path.dirname(s["cwd"]), [], O.real_home(), O.runtime_dir())[:-6]
+        self.assertEqual(pre[:len(fixed)], fixed)
+        hardening = [i for i, x in enumerate(pre) if x in ("--unshare-pid", "--unshare-ipc")]
+        for drifted in (fixed + pre[-6:], pre[:7] + pre[9:],                      # the per-path masks or the home tmpfs dropped
+                        [x for i, x in enumerate(pre) if i not in hardening]):    # the PID/IPC namespaces dropped
             if drifted != pre:
                 self.assertIn("sandbox argv differs from the pinned bwrap sandbox for this call", ok(argv=drifted + inner))
 
@@ -481,7 +487,7 @@ def capture_out(**over):
             "messages": [{"role": "system", "contentSha256": "s", "startsWithBase": True, "extraChars": 600, "markers": []},
                          {"role": "user", "contentSha256": "u", "isPrompt": True}]}
     out = {"mode": "answer", "model": OPENCODE_DEFAULT_MODEL, "posts": 1, "gets": [], "paths": ["/v1/chat/completions"],
-           "sandbox": {"bwrap": True, "roRoot": True, "homeTmpfs": True, "masks": 6, "unshareNet": False},
+           "sandbox": {"bwrap": True, "roRoot": True, "homeTmpfs": True, "hardened": True, "masks": 6, "unshareNet": False},
            "bodies": [body], "verdict": {"outcome": "processed", "status": "ok", "outputOk": True}, "disabled": None,
            "expectedResponseFormat": O.response_format("InvestigatorOutput")}
     for k, v in over.items():
@@ -572,17 +578,17 @@ class Preflight(unittest.TestCase):
         self.assertTrue(CAP.analyse(tc, OPENCODE_DEFAULT_MODEL, "toolcall")["supported"])
         tc["disabled"] = "tool-executed"
         self.assertFalse(CAP.analyse(tc, OPENCODE_DEFAULT_MODEL, "toolcall")["supported"])
-        for box in ({}, {"bwrap": True, "roRoot": False, "homeTmpfs": True, "masks": 6},
-                    {"bwrap": True, "roRoot": True, "homeTmpfs": False, "masks": 6},
-                    {"bwrap": True, "roRoot": True, "homeTmpfs": True, "unshareNet": True}):
+        ok_box = {"bwrap": True, "roRoot": True, "homeTmpfs": True, "hardened": True, "masks": 6}
+        for box in ({}, dict(ok_box, roRoot=False), dict(ok_box, homeTmpfs=False), dict(ok_box, hardened=False),
+                    dict(ok_box, unshareNet=True)):
             self.assertIn("the CLI did not run through the live bwrap sandbox",
                           CAP.analyse(capture_out(sandbox=box), OPENCODE_DEFAULT_MODEL, "answer")["problems"])
-        v = {"reason": "cli-retry", "requestsSent": 1, "retryRequestSent": False, "httpStatus": 429, "wordsKept": True}
+        v = {"reason": "cli-retry", "requestsSeen": 1, "retryRequestSeen": False, "httpStatus": 429, "wordsKept": True}
         st = capture_out(mode="status:429", verdict=v)
         self.assertTrue(CAP.analyse(st, OPENCODE_DEFAULT_MODEL, "status:429")["supported"])
         bad = {"the CLI re-sent the request (hidden retry not prevented): 2 requests": dict(posts=2),
                "the scheduled retry was not killed before it was sent, or the request count is wrong":
-                   dict(verdict=dict(v, requestsSent=2, retryRequestSent=True)),
+                   dict(verdict=dict(v, requestsSeen=2, retryRequestSeen=True)),
                "the provider's HTTP status / error words were not kept": dict(verdict=dict(v, wordsKept=False))}
         for want, over in bad.items():
             with self.subTest(want):
@@ -590,13 +596,30 @@ class Preflight(unittest.TestCase):
                                                 OPENCODE_DEFAULT_MODEL, "status:429")["problems"])
 
 
-class _LogBound(O.OpenCodeFreeProvider):
-    """Test seam: the live sandbox plus ONE extra writable bind for the executable fake's call log."""
+class _Exposed(O.OpenCodeFreeProvider):
+    """Test seam: the live sandbox plus read-only re-binds of what an EXECUTABLE fake needs (its own dir and this repo, which
+    live under the masked /var/tmp) and, optionally, ONE writable bind for its call log."""
     log_dir = None
 
     def _sandbox(self, work):
         pre = super()._sandbox(work)
-        return pre[:-1] + ["--bind", self.log_dir, self.log_dir, "--"]
+        extra = [x for d in sorted({self.fake_dir, str(F.ROOT)}) for x in ("--ro-bind", d, d)]
+        if self.log_dir:
+            extra += ["--bind", self.log_dir, self.log_dir]
+        return pre[:-6] + extra + pre[-6:]                                          # before the work-dir --bind (kept last)
+
+
+def fake_bin(base, scenario, **kw):
+    """An executable fake in its OWN dir (<base>/bin): re-binding it never re-exposes a work dir, home or cwd."""
+    d = os.path.join(base, "bin")
+    os.makedirs(d, exist_ok=True)
+    return F.write_fake_binary(d, scenario, **kw)
+
+
+def exposed(binp, **kw):
+    p = _Exposed(enabled=True, opencode=binp, preflight=GOOD, **kw)
+    p.fake_dir = os.path.dirname(binp)
+    return p
 
 
 @unittest.skipUnless(BWRAP, "needs a working bwrap (the live sandbox)")
@@ -609,7 +632,7 @@ class Subprocess(Base):
         os.mkdir(logs)
         binp, log = F.write_fake_binary(logs, "ok")
         led = RuntimeLedger(os.path.join(self.dir, "led.jsonl"), 50_000_000)
-        p = _LogBound(enabled=True, ledger=led, opencode=binp, preflight=GOOD, workdir_parent=self.dir, environ=HOSTILE_ENV)
+        p = exposed(binp, ledger=led, workdir_parent=self.dir, environ=HOSTILE_ENV)
         p.log_dir = logs
         r = F.opencode_request("judge")
         res = p.call(r, ("JUDGE", "judge", "judge", 0, 0))
@@ -621,11 +644,11 @@ class Subprocess(Base):
         self.assertEqual(set(call["env"]) - ALLOWED_ENV - {"PWD", "SHLVL", "_", "LC_CTYPE"}, set())
         self.assertNotIn("sk-or-v1", json.dumps(call["env"]))
         self.assertEqual(self.leftovers(), [])
-        self.assertEqual(json.loads(Path(self.dir, "led.jsonl").read_text().splitlines()[-1])["isolation"]["requestsSent"], 1)
+        self.assertEqual(json.loads(Path(self.dir, "led.jsonl").read_text().splitlines()[-1])["isolation"]["requestsSeen"], 1)
 
     def test_the_live_call_runs_in_the_masked_read_only_sandbox(self):
         from unittest import mock
-        binp, _ = F.write_fake_binary(self.dir, "sandbox-probe")
+        binp, _ = fake_bin(self.dir, "sandbox-probe")
         home, cwd = os.path.join(self.dir, "realhome"), os.path.join(self.dir, "runner-cwd")
         hidden, absent = [], []
         for rel in O.SANDBOX_HOME_MASKS:
@@ -639,14 +662,14 @@ class Subprocess(Base):
         os.mkdir(cwd)
         Path(cwd, ".env").write_text("OPENROUTER_KEY=CANARY-SECRET\n")
         hidden.append(os.path.join(cwd, ".env"))
-        outside = os.path.join(self.dir, "outside-write")
+        outside = os.path.join(str(F.ROOT), "outside-write-probe")             # host bytes, read-only inside the sandbox
         spec = json.dumps({"hidden": hidden + absent, "outside": outside})
         old = os.getcwd()
         os.chdir(cwd)
         try:
             with mock.patch.object(O, "_user_homes", return_value=[home]), \
                     mock.patch.object(O, "real_home", return_value=os.path.realpath(home)):
-                p = O.OpenCodeFreeProvider(enabled=True, opencode=binp, preflight=GOOD, workdir_parent=self.dir)
+                p = exposed(binp, workdir_parent=self.dir)
                 res = p.call(F.opencode_request(text=F.PROBE_MARK + spec + "\n"), KEY)
         finally:
             os.chdir(old)
@@ -661,24 +684,32 @@ class Subprocess(Base):
         self.assertEqual((seen["outside"], seen["inside"]), ("OSError", "written"))   # read-only root, writable work dir
         self.assertFalse(os.path.exists(outside))
         self.assertNotIn("CANARY-SECRET", res.response["rawText"])
+        # R1: no session bus / keyring sockets, a private PID namespace, /tmp empty, /var/tmp only the re-bound paths' first parts
+        if O.runtime_dir():
+            self.assertEqual(seen["runUser"], [], seen["runUser"])
+        self.assertLessEqual(seen["procPids"], 8)
+        self.assertEqual(seen["tmp"], [])
+        want = {Path(x).relative_to("/var/tmp").parts[0] for x in (self.dir, os.path.dirname(binp), str(F.ROOT))
+                if str(x).startswith("/var/tmp/")}
+        self.assertEqual(set(seen["varTmp"]), want)
 
     def test_a_hidden_retry_is_killed_when_scheduled_before_the_retry_request(self):
-        binp, _ = F.write_fake_binary(self.dir, "retry")
-        p = O.OpenCodeFreeProvider(enabled=True, opencode=binp, preflight=GOOD, workdir_parent=self.dir)
+        binp, _ = fake_bin(self.dir, "retry")
+        p = exposed(binp, workdir_parent=self.dir)
         t = time.monotonic()
         res = p.call(F.opencode_request(), KEY)
         self.assertLess(time.monotonic() - t, 1.5)                                # the fake re-sends only after 1.6 s
         d = res.error["detail"]
-        self.assertEqual((d["reason"], d["requestsSent"], d["retryRequestSent"]), ("cli-retry", 1, False))
+        self.assertEqual((d["reason"], d["requestsSeen"], d["retryRequestSeen"]), ("cli-retry", 1, False))
 
     def test_a_retry_request_that_left_is_killed_at_once_and_counted(self):
-        binp, _ = F.write_fake_binary(self.dir, "retry-fast")
-        p = O.OpenCodeFreeProvider(enabled=True, opencode=binp, preflight=GOOD, workdir_parent=self.dir)
+        binp, _ = fake_bin(self.dir, "retry-fast")
+        p = exposed(binp, workdir_parent=self.dir)
         t = time.monotonic()
         res = p.call(F.opencode_request(), KEY)
         self.assertLess(time.monotonic() - t, 4)                                  # the fake would sleep 5 s more
         d = res.error["detail"]
-        self.assertEqual((d["reason"], d["requestsSent"], d["retryRequestSent"]), ("cli-retry", 2, True))
+        self.assertEqual((d["reason"], d["requestsSeen"], d["retryRequestSeen"]), ("cli-retry", 2, True))
 
     def test_preflight_against_the_fake_binary(self):
         binp, _ = F.write_fake_binary(self.dir, "ok")
@@ -723,7 +754,7 @@ class RealCliCaptureProof(unittest.TestCase):
                 cap = O.check_request_isolation("opencode", OPENCODE_DEFAULT_MODEL, mode=mode)
                 self.assertTrue(cap["supported"], cap)
                 v = cap["verdict"]
-                self.assertEqual((cap["posts"], v["reason"], v["requestsSent"], v["retryRequestSent"], v["httpStatus"]),
+                self.assertEqual((cap["posts"], v["reason"], v["requestsSeen"], v["retryRequestSeen"], v["httpStatus"]),
                                  (1, "cli-retry", 1, False, int(mode.split(":")[1])))
                 self.assertTrue(v["wordsKept"])
 
@@ -768,6 +799,25 @@ class Bounded(unittest.TestCase):
         self.assertLess(time.monotonic() - t, 8)
         r = self.run_it("import sys\nwhile True: sys.stdout.write('x'*65536); sys.stdout.flush()", max_stdout=100_000)
         self.assertTrue(r.truncated)
+
+    def test_drain_after_the_kill_reads_what_is_left_and_never_blocks(self):
+        r, w = os.pipe()
+        os.write(w, b"left-1\nleft-2\n")
+        os.close(w)
+        buf = bytearray(b"seen\n")
+        with os.fdopen(r, "rb", buffering=0) as f:
+            O._drain(f, buf, 1 << 20)
+        self.assertEqual(bytes(buf), b"seen\nleft-1\nleft-2\n")
+        r, w = os.pipe()                                                           # a writer that never closes: bounded wait
+        try:
+            buf, t = bytearray(), time.monotonic()
+            with os.fdopen(r, "rb", buffering=0) as f:
+                os.set_blocking(f.fileno(), False)
+                O._drain(f, buf, 1 << 20, limit=0.3)
+            self.assertLess(time.monotonic() - t, 2)
+            self.assertEqual(bytes(buf), b"")
+        finally:
+            os.close(w)
 
     def test_poll_aborts_the_run_and_a_failing_poll_is_ignored(self):
         calls = []

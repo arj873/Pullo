@@ -92,7 +92,7 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = OPENCO
             "zeroToolItems": iso.get("toolItems") == 0,
             "homeIntact": (iso.get("homeAfter") or {}).get("ok") is True,
             "oneProviderCall": provider.calls == 1,
-            "oneRequestSent": iso.get("requestsSent") == 1,       # no hidden retry / extra step left the CLI
+            "oneRequestSeen": iso.get("requestsSeen") == 1,       # no hidden retry / extra step left the CLI
             "freeModelRow": res_row.get("billingKind") == "free-model" and res_row.get("kind") == "opencode-cli",
         }
         if case == "investigator-turn" and isinstance(output, dict):

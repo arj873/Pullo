@@ -161,13 +161,15 @@ def main() -> int:
     if res.error is not None:
         d = res.error.get("detail") or {}
         verdict.update(code=res.error.get("code"), reason=d.get("reason"), itemType=d.get("itemType"),
-                       requestsSent=d.get("requestsSent"), retryRequestSent=d.get("retryRequestSent"),
+                       requestsSeen=d.get("requestsSeen"), retryRequestSeen=d.get("retryRequestSeen"),
                        httpStatus=d.get("httpStatus"), wordsKept=status_marker(d.get("httpStatus") or 0)
                        in (res.error.get("message") or ""))
     posts = [x for x in _Fake.log if x["method"] == "POST"]
     box = prov.sandbox_argv or []
     sandbox = {"bwrap": bool(box) and os.path.basename(box[0]) == "bwrap", "roRoot": box[2:5] == ["--ro-bind", "/", "/"],
                "homeTmpfs": box[7:9] == ["--tmpfs", O.real_home()],
+               "hardened": box[9:13] == ["--unshare-pid", "--proc", "/proc", "--unshare-ipc"]
+               and any(box[i:i + 2] == ["--tmpfs", "/var/tmp"] for i in range(len(box))),
                "masks": sum(1 for x in box if x in ("--tmpfs", "/dev/null")), "unshareNet": "--unshare-net" in box}
     print(json.dumps({"mode": mode, "model": model, "posts": len(posts), "sandbox": sandbox,
                       "gets": [x["path"] for x in _Fake.log if x["method"] == "GET"],
@@ -217,12 +219,12 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("the request lacks the pinned json_schema response_format")
     v = out.get("verdict") or {}
     box = out.get("sandbox") or {}
-    if not (box.get("bwrap") and box.get("roRoot") and box.get("homeTmpfs")) or box.get("unshareNet"):
+    if not (box.get("bwrap") and box.get("roRoot") and box.get("homeTmpfs") and box.get("hardened")) or box.get("unshareNet"):
         problems.append("the CLI did not run through the live bwrap sandbox")
     if mode.startswith("status:"):
         if out.get("posts") != 1:
             problems.append(f"the CLI re-sent the request (hidden retry not prevented): {out.get('posts')} requests")
-        if v.get("reason") != "cli-retry" or v.get("requestsSent") != 1 or v.get("retryRequestSent") is not False:
+        if v.get("reason") != "cli-retry" or v.get("requestsSeen") != 1 or v.get("retryRequestSeen") is not False:
             problems.append("the scheduled retry was not killed before it was sent, or the request count is wrong")
         if v.get("httpStatus") != int(mode.split(":", 1)[1]) or not v.get("wordsKept"):
             problems.append("the provider's HTTP status / error words were not kept")

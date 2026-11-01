@@ -11,13 +11,18 @@ offline against a loopback fake endpoint, no inference):
   * SANDBOX (`opencode-bwrap-masked@2`, defense in depth): every live call runs inside `bwrap` - the host filesystem
     read-only (--ro-bind / /), a fresh /dev, an EMPTY tmpfs over the WHOLE user home (the passwd entry, not $HOME: no
     ~/.codex, ~/.ssh, ~/.claude, ~/.config/gh, ... is visible; the opencode binary must live outside it, else
-    OpenCodeUnsupported), and - redundant under it but kept, and covering paths outside the home - EMPTY tmpfs over the
+    OpenCodeUnsupported), a private PID namespace with its own /proc (no host processes/cmdlines), a private IPC namespace,
+    EMPTY tmpfs over /run/user/<uid> (no session bus / Secret Service / keyring / gpg-agent sockets), /tmp and /var/tmp (no
+    other Pullo state or credential copies; the work dir is bound back), and - redundant under the home tmpfs but kept, and
+    covering paths outside the home - EMPTY tmpfs over the
     user's ~/.local/share/opencode, ~/.config/opencode,
     ~/.local/state/opencode, ~/.cache/opencode, ~/.aws and ~/.local/state/pullo, /dev/null over the .env of the reviewer
     repo root and of the process cwd and over every HOST_MASKS path (root's runner adds the code_review .env), only the
     per-call work dir writable, the network kept (the free endpoint),
-    --die-with-parent. So even a CLI bug cannot read those credentials/state or write outside the work dir. No bwrap, no
-    live call (OpenCodeUnsupported). The preflight probes (--version, run --help, models) run in their own isolated home
+    --die-with-parent. So a CLI bug cannot read those credentials/state or write outside the work dir. RESIDUAL: the network
+    namespace is kept (the CLI must reach the free endpoint), so localhost TCP services and abstract unix sockets of the
+    host stay reachable from the CLI process; only the no-tools layer (no tool is offered or executable) keeps model
+    output away from them. No bwrap, no live call (OpenCodeUnsupported). The preflight probes (--version, run --help, models) run in their own isolated home
     inside `bwrap --unshare-net`, never against the user's opencode dirs.
   * The pinned per-call config (OPENCODE_CONFIG_CONTENT; project config, Claude-Code compatibility, model fetches and
     auto-update disabled by env) defines one primary agent `pullo` whose system prompt is BASE_INSTRUCTIONS, and DENIES
@@ -30,18 +35,22 @@ offline against a loopback fake endpoint, no inference):
   * argv: `opencode run --standalone --format json --agent pullo --model <id>`; the prompt travels on stdin (never argv /
     ps output). `--standalone` runs a private server child (`serve --stdio --port 0`) instead of the user's background
     service. Never passed: --auto (auto-approve), --continue/--session/--fork, --server, --file, --thinking.
-  * HIDDEN RETRIES ARE PREVENTED, and every request is counted. opencode retries 429/5xx/transport failures internally
+  * HIDDEN RETRIES ARE PREVENTED, and the requests the stream shows are counted. opencode retries 429/5xx/transport failures internally
     (up to 10 times). It first records the scheduled retry on the assistant row of the session DB
     (session.retry.scheduled) and then waits out its backoff: 2 s exponential with jitter, measured >= 1.65 s on 2.1.4
     (a retry-after header can only lengthen it). While the CLI runs, the adapter polls that DB read-only every 200 ms
     (after the first step_start) and kills the run as soon as a retry is scheduled, so the retry request is not sent (real
     CLI loopback proof: exactly 1 POST for 429/500/503). If a retry request ever leaves first, the run is killed at its
-    step_start (the stream fallback) and it is COUNTED: `requestsSent` = stream step_start events (one per provider
-    request); the CLI's own scheduled-attempt number is kept separately as `cliScheduledAttempt`. Pullo allows no retry.
+    step_start (the stream fallback). `requestsSeen` = the step_start events the stream showed (stdout is drained after
+    the kill before counting) is a LOWER BOUND on the provider requests sent: the CLI can send a request before its
+    step_start reaches the stream (seen for the tool-call step 2) and a starved watch could kill after a retry left. A
+    call sends at most maxRequestsPerCall = STEPS = 2 requests. The CLI's own scheduled-attempt number is kept separately
+    as `cliScheduledAttempt`. Pullo allows no retry.
   * DETECTION of tool attempts is after the fact: in 2.1.4 the stream's `tool_use` event comes from
     session.tool.completed/failed, i.e. AFTER the tool step. No tool exists to run (the CLI answers "No tool named X is
     currently available"), but by the kill the CLI has usually sent its tool-less step-2 request, so a call may send up to
-    STEPS=2 requests (bounded by the agent steps; both free and tool-less). The run is killed on the first `tool_use` event
+    maxRequestsPerCall = STEPS = 2 requests (bounded by the agent steps; both free and tool-less) even when requestsSeen is
+    1 (real 2.1.4: 2 POSTs, 1 step_start seen). The run is killed on the first `tool_use` event
     or a second step_start. After the run the per-call session DB (<home>/data/opencode/opencode.db, read-only) is
     audited: exactly one session on agent `pullo` and the requested model, exactly one user message, assistant content
     only text/reasoning (any tool part is a violation; an EXECUTED tool part, a credential/config file appearing in the
@@ -138,9 +147,9 @@ MAX_CALLS_PER_RUN = 128
 STEPS = 2
 ERR_TEXT = 600                   # chars of CLI message / provider body kept in an error
 DB_POLL_SEC = 0.2                # session-DB retry watch period (2.1.4 waits >= ~1.65 s between scheduling and re-sending)
-RETRY_POLICY = "killed-when-scheduled:db-poll-200ms;fallback-killed-at-second-step-start;requestsSent-counted"
+RETRY_POLICY = "killed-when-scheduled:db-poll-200ms;fallback-killed-at-second-step-start;requestsSeen-lower-bound"
 # The live sandbox (S3). Home-relative dirs hidden behind an empty tmpfs; .env files hidden behind /dev/null.
-SANDBOX_VERSION = "opencode-bwrap-masked@2"
+SANDBOX_VERSION = "opencode-bwrap-masked@3"
 SANDBOX_HOME_MASKS = (".local/share/opencode", ".config/opencode", ".local/state/opencode", ".cache/opencode", ".aws",
                       ".local/state/pullo")
 # Absolute paths a HOST runner adds to the masks before any call (additive only), e.g. the code_review checkout's .env when
@@ -182,6 +191,23 @@ class StreamAudit:
             if len(self.steps) > 1:
                 self.reason = self.reason or ("cli-retry" if self.steps[-1] == self.steps[0] else "extra-step")
         return self.reason
+
+
+def _drain(stream, buf: bytearray, cap: int, limit: float = 1.0) -> None:
+    """After the kill: read what is still in the pipe (bounded by `cap` and `limit` seconds, never blocking)."""
+    end = time.monotonic() + limit
+    with selectors.DefaultSelector() as sel:
+        sel.register(stream, selectors.EVENT_READ)
+        while len(buf) < cap and time.monotonic() < end:
+            if not sel.select(max(0.0, end - time.monotonic())):
+                break
+            try:
+                chunk = os.read(stream.fileno(), 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            buf.extend(chunk[:cap - len(buf)])
 
 
 def run_bounded_stream(argv, stdin: bytes, env: dict, cwd: str, timeout: float, *, max_stdout=MAX_STDOUT,
@@ -268,6 +294,8 @@ def run_bounded_stream(argv, stdin: bytes, env: dict, cwd: str, timeout: float, 
         finally:
             kill()
             p.wait()
+            if not p.stdout.closed:                 # what the CLI wrote before it died still counts (requestsSeen)
+                _drain(p.stdout, bufs["o"], max_stdout)
             for stream in (p.stdin, p.stdout, p.stderr):
                 stream.close()
     if audit is not None and not aborted and scanned < len(bufs["o"]):
@@ -405,10 +433,22 @@ def sandbox_masks() -> list[tuple[str, str]]:
     return out
 
 
-def sandbox_prefix(bwrap: str, work: str, masks, home: str) -> list[str]:
+def runtime_dir() -> str | None:
+    """/run/user/<uid> when it exists (the user's session bus, keyring, gpg-agent sockets); a missing one needs no mask."""
+    d = f"/run/user/{os.getuid()}"
+    return d if os.path.isdir(d) else None
+
+
+def sandbox_prefix(bwrap: str, work: str, masks, home: str, run_dir: str | None = None) -> list[str]:
     """The bwrap argv that wraps a live `opencode run` (ends with "--"; the CLI argv follows): the whole user home becomes an empty
-    tmpfs right after the read-only root, then the per-path masks, then the per-call work dir (reachable even under the home)."""
-    argv = [bwrap, "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", home]
+    tmpfs right after the read-only root; then a private PID namespace with its own /proc and a private IPC namespace, empty tmpfs
+    over the user runtime dir (session bus, keyring, agent sockets), /tmp and /var/tmp; then the per-path masks; the per-call work
+    dir is bound LAST, so it is reachable even under the home or /var/tmp."""
+    argv = [bwrap, "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", home,
+            "--unshare-pid", "--proc", "/proc", "--unshare-ipc"]
+    if run_dir:
+        argv += ["--tmpfs", run_dir]
+    argv += ["--tmpfs", "/tmp", "--tmpfs", "/var/tmp"]
     for kind, path in masks:
         argv += ["--tmpfs", path] if kind == "dir" else ["--ro-bind", "/dev/null", path]
     return argv + ["--bind", work, work, "--chdir", os.path.join(work, "cwd"), "--"]
@@ -427,6 +467,9 @@ def sandbox_identity() -> dict:
     spec = {"version": SANDBOX_VERSION, "flags": ["--die-with-parent", "--ro-bind / /", "--dev /dev"],
             "homeTmpfs": "--tmpfs <passwd home> after --ro-bind / / and before the masks and the work-dir --bind; refused if the "
                          "opencode binary resolves under the home",
+            "afterHome": ["--unshare-pid", "--proc /proc", "--unshare-ipc", "--tmpfs /run/user/<uid> (if it exists)", "--tmpfs /tmp",
+                          "--tmpfs /var/tmp"],
+            "residual": "network namespace kept for the free endpoint: localhost TCP and abstract unix sockets stay reachable",
             "tmpfsHomeDirs": list(SANDBOX_HOME_MASKS), "devNullFiles": ["<reviewer repo root>/.env", "<process cwd>/.env"],
             "hostMasks": "HOST_MASKS (absolute, additive; recorded per call as sandboxArgvSha256)",
             "writable": "--bind <per-call work dir>", "network": "kept (the free endpoint)", "missingPaths": "skipped"}
@@ -499,7 +542,7 @@ def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None =
     bw = shutil.which("bwrap")
     if prefix is None:
         problems.append("review call is not inside the bwrap sandbox")
-    elif not bw or real_home() is None or prefix != sandbox_prefix(bw, work, sandbox_masks(), real_home()):
+    elif not bw or real_home() is None or prefix != sandbox_prefix(bw, work, sandbox_masks(), real_home(), runtime_dir()):
         problems.append("sandbox argv differs from the pinned bwrap sandbox for this call")
     if model not in OPENCODE_MODELS or inner != build_argv(inner[0] if inner else "", model):
         problems.append("argv differs from the pinned review argv for this model")
@@ -989,7 +1032,7 @@ class OpenCodeFreeProvider:
             except Exception as e:  # noqa: BLE001
                 return self._done(ck, t0, "unknown", self._err("provider-error", f"opencode runner failed: {type(e).__name__}",
                                                               "unknown", reason="runner-crash"))
-            iso["requestsSent"] = parse_events(res.stdout)["steps"]     # one step_start per provider request
+            iso["requestsSeen"] = parse_events(res.stdout)["steps"]     # one step_start per provider request
             home = audit_home_after(made["home"])
             db = audit_session_db(made["home"], model)
             iso["homeAfter"] = {k: home[k] for k in ("ok", "forbidden", "entries")}
@@ -1010,7 +1053,7 @@ class OpenCodeFreeProvider:
         return config_text(model, out_name)
 
     def _sandbox(self, work) -> list[str]:
-        return sandbox_prefix(self._bwrap, work, sandbox_masks(), self._home)
+        return sandbox_prefix(self._bwrap, work, sandbox_masks(), self._home, runtime_dir())
 
     def _done(self, ck, t0, outcome, result, **fields):
         if self._ledger is not None:
@@ -1020,8 +1063,9 @@ class OpenCodeFreeProvider:
 
     def _failure(self, ck, t0, res, ev, db, iso, *, timed_out=False):
         """A CLI/provider failure with the CLI's own words: the first stream error event, else the session DB's error,
-        else the last scheduled retry's error, else the stderr tail. `requestsSent` is what the stream shows (one
-        step_start per provider request); the CLI's own scheduled-attempt number is `cliScheduledAttempt`."""
+        else the last scheduled retry's error, else the stderr tail. `requestsSeen` is what the stream shows (one
+        step_start per provider request; a lower bound, at most maxRequestsPerCall are sent); the CLI's own scheduled-attempt
+        number is `cliScheduledAttempt`."""
         err = (ev["errors"][0] if ev["errors"] else None) or db.get("error") or (db.get("retry") or {}).get("error")
         etype = (err or {}).get("type")
         status = (err or {}).get("status")
@@ -1040,7 +1084,8 @@ class OpenCodeFreeProvider:
         elif retry_kill:
             when = "when it was scheduled" if res.aborted == "cli-retry-scheduled" else "at its request"
             code, reason = "provider-error", "cli-retry"
-            head = f"opencode began a hidden retry (Pullo allows none); run killed {when}; provider requests sent: {sent}"
+            head = (f"opencode began a hidden retry (Pullo allows none); run killed {when}; provider requests seen: {sent} "
+                    f"(at least; at most {STEPS})")
         else:
             code, head, reason = "provider-error", "opencode reported a failure", "cli-failure"
         words = ""
@@ -1054,8 +1099,8 @@ class OpenCodeFreeProvider:
         return self._done(ck, t0, outcome, self._err(
             code, msg, outcome, reason=reason, errorType=etype, httpStatus=status,
             cliMessage=(err or {}).get("message"), responseBody=(err or {}).get("responseBody"),
-            retryAfterMs=(err or {}).get("retryAfterMs"), requestsSent=sent,
-            retryRequestSent=(sent > 1) if retry_kill or retry else None,
+            retryAfterMs=(err or {}).get("retryAfterMs"), requestsSeen=sent,
+            retryRequestSeen=(sent > 1) if retry_kill or retry else None,
             cliScheduledAttempt=retry.get("attempt"), exitCode=res.returncode,
             stderrTail=tail), errorKind=reason, isolation=iso, note=note or reason)
 
@@ -1065,7 +1110,8 @@ class OpenCodeFreeProvider:
         if res.aborted == "tool-attempt" or ev["tools"] or db["toolParts"] or db["finish"] == "tool-calls":
             return self._done(ck, t0, "unknown", self._err(        # detected after the tool step: up to STEPS requests
                 "provider-error", "isolation violation: the model attempted a tool call (none is offered); output "
-                "discarded", "unknown", reason="isolation-violation", itemType="tool-attempt", requestsSent=ev["steps"]),
+                "discarded; up to maxRequestsPerCall=2 requests may have been sent", "unknown", reason="isolation-violation",
+                itemType="tool-attempt", requestsSeen=ev["steps"], maxRequestsPerCall=STEPS),
                 errorKind="isolation-violation", isolation=iso, note="tool-attempt")
         if res.truncated:
             return self._done(ck, t0, "unknown", self._err("provider-error", "opencode output exceeded the size bound",
@@ -1108,7 +1154,7 @@ class OpenCodeFreeProvider:
         hidden = None
         if db.get("retry"):
             iso["cliScheduledAttempt"] = db["retry"].get("attempt")
-            hidden = f"hidden-cli-retry:attempt-{db['retry'].get('attempt')}:requests-sent-{ev['steps']}"
+            hidden = f"hidden-cli-retry:attempt-{db['retry'].get('attempt')}:requests-seen-{ev['steps']}"
         notes = [n for n in ("invalid-output" if status != "ok" else None, "fenced-json" if fenced else None,
                              f"finish-{db['finish']}" if db["finish"] not in (None, "stop") else None, hidden) if n]
         return self._done(ck, t0, "processed", ProviderResult(response, None, "processed"), usage=usage,
