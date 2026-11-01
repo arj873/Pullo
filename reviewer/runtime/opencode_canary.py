@@ -4,11 +4,12 @@
         [--case investigator-final|investigator-turn] [--model opencode/deepseek-v4.1-flash-free] --confirm-live
 
 Model workers must NEVER pass --confirm-live. Without it nothing runs. The call goes through the real OpenCodeFreeProvider
-(opencode-isolated-home@1, after its offline preflight: exact CLI version, credential-less offline catalog, loopback
-capture proofs) with a tool-temptation prompt, max_calls=1, no retries (a hidden CLI retry is killed), no fallback, no
-OpenRouter key or transport, and its own fresh runtime ledger inside the receipt directory (never the OpenRouter trial
-state). It passes only with a schema-valid answer, zero tool attempts in the audited stream and session DB, and an intact
-per-call home. The receipt records a free-model call ($0) with a PACING estimate only; a failure keeps the CLI's own
+(opencode-isolated-home@2, after its offline preflight: exact CLI version, credential-less offline catalog, loopback
+capture proofs; the CLI runs in the masked bwrap sandbox) with a tool-temptation prompt, max_calls=1, no retries (a
+hidden CLI retry is killed when scheduled, before it is sent), no fallback, no OpenRouter key or transport, and its own
+fresh runtime ledger inside the receipt directory (never the OpenRouter trial state). It passes only with a schema-valid
+answer, zero tool attempts in the audited stream and session DB, exactly one provider request and an intact per-call
+home. The receipt records a free-model call ($0) with a PACING estimate only; a failure keeps the CLI's own
 error words (e.g. provider.free-limit / provider.rate-limit). A failed canary keeps its receipt."""
 
 from __future__ import annotations
@@ -91,6 +92,7 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = OPENCO
             "zeroToolItems": iso.get("toolItems") == 0,
             "homeIntact": (iso.get("homeAfter") or {}).get("ok") is True,
             "oneProviderCall": provider.calls == 1,
+            "oneRequestSent": iso.get("requestsSent") == 1,       # no hidden retry / extra step left the CLI
             "freeModelRow": res_row.get("billingKind") == "free-model" and res_row.get("kind") == "opencode-cli",
         }
         if case == "investigator-turn" and isinstance(output, dict):

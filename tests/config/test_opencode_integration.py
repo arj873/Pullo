@@ -62,7 +62,7 @@ class ConfigAndProfile(unittest.TestCase):
         rep = cfg.report()
         self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
                          {r: ("opencode", OPENCODE_DEFAULT_MODEL) for r in ("investigator", "verifier", "judge")})
-        self.assertTrue(all(v["isolation"] == "opencode-isolated-home@1" and v["billing"].startswith("free-model")
+        self.assertTrue(all(v["isolation"] == "opencode-isolated-home@2" and v["billing"].startswith("free-model")
                             for v in rep["roles"].values()))
         self.assertEqual(cfg.models.providers(), frozenset({"opencode"}))
         self.assertNotIn("investigator_alt", tomllib.loads(VARIANT.read_text())["review"])
@@ -170,7 +170,7 @@ class RepositoryOpenCode(RT.Base):
         first = rep["plan"]["firstRequest"]
         self.assertEqual((first["provider"], first["model"], first["schemaName"], first["billingKind"]),
                          ("opencode", OPENCODE_DEFAULT_MODEL, "InvestigatorTurn", "free-model"))
-        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("opencode-isolated-home@1", "2.1.4"))
+        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("opencode-isolated-home@2", "2.1.4"))
         self.assertRegex(first["configSha256"], "^sha256:[0-9a-f]{64}$")
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
@@ -195,7 +195,8 @@ class RepositoryOpenCode(RT.Base):
         self.assertEqual(rep["costs"]["runtime"]["thisCase"]["accountable"]["usdMicros"], 0)
         self.assertFalse((d / "terra-spend-book.jsonl").exists() and (d / "terra-spend-book.jsonl").read_bytes())
         seen = runners[0].seen
-        self.assertTrue(all(s["argv"][1:4] == ["run", "--standalone", "--format"] and "--auto" not in s["argv"] for s in seen))
+        self.assertTrue(all(O.split_sandbox(s["argv"])[1][1:4] == ["run", "--standalone", "--format"]
+                            and O.split_sandbox(s["argv"])[0] is not None and "--auto" not in s["argv"] for s in seen))
         self.assertTrue(all(not any(k.startswith(("OPENROUTER", "OPENAI", "ANTHROPIC")) for k in s["env"]) for s in seen))
 
     def test_live_mixed_opencode_arm_is_refused_before_state_key_or_cli(self):
@@ -244,7 +245,7 @@ class BenchmarkOpenCode(BT.Base):
         for k in ("argvSha256", "configSha256", "configTemplateSha256", "instructionsSha256", "envSha256"):
             self.assertRegex(first[k], "^sha256:[0-9a-f]{64}$")
         self.assertTrue(all(f["provider"] == "opencode" for f in p["capturedRequests"]))
-        self.assertTrue(all(v["isolation"] == "opencode-isolated-home@1" for v in p["models"].values()))
+        self.assertTrue(all(v["isolation"] == "opencode-isolated-home@2" for v in p["models"].values()))
         self.assertEqual(self.w.state_bytes(), before)
 
     def test_live_runs_every_role_free_and_the_plan_pin_is_the_actual_stdin_and_config(self):
@@ -260,7 +261,7 @@ class BenchmarkOpenCode(BT.Base):
         self.assertEqual(first["bodySha256"], hashlib.sha256(seen[0]["stdin"]).hexdigest())
         self.assertEqual(first["configSha256"],
                          "sha256:" + hashlib.sha256(seen[0]["env"]["OPENCODE_CONFIG_CONTENT"].encode()).hexdigest())
-        self.assertEqual(first["argvSha256"], O.argv_digest(seen[0]["argv"]))
+        self.assertEqual(first["argvSha256"], O.argv_digest(O.split_sandbox(seen[0]["argv"])[1]))
         self.assertEqual([s["argv"][s["argv"].index("--model") + 1] for s in seen], [OPENCODE_DEFAULT_MODEL] * 5)
         self.assertEqual(list(self.w.state.iterdir()), [])
         self.assertEqual(len((d / TERRA_LEDGER_NAME).read_text().splitlines()), 10)

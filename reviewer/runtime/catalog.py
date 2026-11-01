@@ -143,7 +143,7 @@ def terra_api_equivalent_micros(uncached: int, cached: int, output: int, prompt_
 # below are allowed (exact ids). Catalog facts (opencode/models.dev entry, public): openai-compatible chat completions at
 # opencode.ai/inference, $0 input/output, structured_output true, context 200000 / output 32000 tokens.
 OPENCODE_CLI_VERSION = "2.1.4"                 # exact: the adapter's argv/config/event/DB parsing is pinned to this CLI
-OPENCODE_ISOLATION_VERSION = "opencode-isolated-home@1"
+OPENCODE_ISOLATION_VERSION = "opencode-isolated-home@2"
 OPENCODE_MODELS: dict[str, dict] = {
     "opencode/deepseek-v4.1-flash-free": {"cliModel": "opencode/deepseek-v4.1-flash-free", "family": "deepseek",
                                           "contextTokens": 200_000, "outputTokens": 32_000, "structured": "json-schema"},

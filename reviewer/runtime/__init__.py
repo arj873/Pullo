@@ -4,7 +4,7 @@ OpenRouterProvider  - provider=anthropic, exact OpenRouter model IDs, bounded HT
 CodexTerraProvider  - provider=openai, GPT Terra (gpt-6.1-terra, gpt-5.6-terra) through the installed `codex exec`
                       in a fresh isolated CODEX_HOME per call (codex-isolated-home@2), no model tools.
 OpenCodeFreeProvider - provider=opencode, OpenCode Zen FREE models through the installed `opencode run` in a fresh
-                      credential-less home per call (opencode-isolated-home@1), every tool denied, $0 (free-model).
+                      credential-less home per call (opencode-isolated-home@2), every tool denied, $0 (free-model).
 
 Nothing here runs at import time: no key is read, no socket is opened, no subprocess is started."""
 

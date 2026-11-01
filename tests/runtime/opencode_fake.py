@@ -51,6 +51,48 @@ def error_ev(err):
     return ev("error", error=err)
 
 
+PAUSE = "__pause__:"
+
+
+def pause(seconds):
+    """Not a stream line: time passing inside the CLI. The executable fake sleeps; ScriptedRunner runs the adapter's
+    retry watch (`poll`) here, as the real runner would during that time."""
+    return f"{PAUSE}{seconds}"
+
+
+PROBE_MARK = "PULLO-SANDBOX-PROBE:"
+
+
+def sandbox_probe(stdin: bytes) -> dict:
+    """Inside the live sandbox (executable fake only): what the CLI process can see and write. The paths come from the
+    prompt: {"hidden": [dirs/files that must look empty/unreadable], "outside": a path outside the work dir}."""
+    text = stdin.decode("utf-8", "replace")
+    spec = json.loads(text[text.index(PROBE_MARK) + len(PROBE_MARK):].split("\n", 1)[0])
+    seen = {}
+    for path in spec["hidden"]:
+        if os.path.isdir(path):
+            seen[path] = {"entries": len(os.listdir(path))}
+        else:
+            try:
+                with open(path, "rb") as f:
+                    seen[path] = {"bytes": len(f.read())}
+            except OSError as e:
+                seen[path] = {"error": type(e).__name__}
+    try:
+        with open(spec["outside"], "w") as f:
+            f.write("x")
+        outside = "written"
+    except OSError as e:
+        outside = type(e).__name__
+    try:
+        with open(os.path.join(os.getcwd(), "inside"), "w") as f:
+            f.write("x")
+        inside = "written"
+    except OSError as e:
+        inside = type(e).__name__
+    return {"hidden": seen, "outside": outside, "inside": inside, "home": os.environ.get("HOME")}
+
+
 def write_db(data_home, model=MODEL, *, sessions=1, agent=O.AGENT, messages=None, parent=None):
     d = Path(data_home) / "opencode"
     d.mkdir(parents=True, exist_ok=True)
@@ -97,70 +139,79 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None):
     data = env["XDG_DATA_HOME"]
     model = argv[argv.index("--model") + 1]
     ans = json.dumps(OK_INV) if answer is None else answer
+    s = step_start()                         # the real CLI opens every provider request with a step_start event
     if scenario == "ok":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans), idle()])
-        return [text_ev(ans)], 0, b"", 0
-    if scenario == "retried-ok":
+        return [s, text_ev(ans)], 0, b"", 0
+    if scenario == "retried-ok":             # the DB shows a scheduled retry that neither the watch nor the stream saw
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans, retry={"attempt": 2, "at": 9, "error": RATE}),
                                         idle()])
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "fenced":
         t = "```json\n" + ans + "\n```"
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=t), idle()])
-        return [text_ev(t)], 0, b"", 0
+        return [s, text_ev(t)], 0, b"", 0
     if scenario == "prose":
         t = "Here is the JSON:\n" + ans
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=t), idle()])
-        return [text_ev(t)], 0, b"", 0
+        return [s, text_ev(t)], 0, b"", 0
     if scenario == "length":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans[:5], finish="length"), idle()])
-        return [text_ev(ans[:5])], 0, b"", 0
+        return [s, text_ev(ans[:5])], 0, b"", 0
     if scenario in ("toolcall", "executed"):
         part = {"type": "tool", "id": "call_1", "name": "read", "executed": scenario == "executed",
                 "state": {"status": "error", "input": {}, "error": {"type": "tool.execution", "message": "No tool"}}}
         write_db(data, model, messages=[SWITCH, USER, assistant(model, content=[part], finish="tool-calls"), idle()])
-        return [step_start(), tool_ev(), ev("step_finish", part={"type": "step-finish", "reason": "tool-calls"})], 0, b"", 0
+        return [s, tool_ev(), ev("step_finish", part={"type": "step-finish", "reason": "tool-calls"})], 0, b"", 0
     if scenario == "freelimit":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, finish="error", error=FREE, tokens=None),
                                         idle("failed", FREE)])
-        return [error_ev(FREE)], 1, b"", 0
-    if scenario == "retry":
+        return [s, error_ev(FREE)], 1, b"", 0
+    if scenario == "retry":                  # 2.1.4: the retry is recorded, then the CLI waits >= ~1.65 s to re-send
         write_db(data, model, messages=[SWITCH, USER, assistant(model, tokens=None,
                                                                 retry={"attempt": 2, "at": 9, "error": RATE})])
-        return [step_start(), step_start()], None, b"", 5
+        return [s, pause(1.6), step_start()], None, b"", 5
+    if scenario == "retry-fast":             # a retry request that left before any watch could see it (the fallback)
+        write_db(data, model, messages=[SWITCH, USER, assistant(model, tokens=None,
+                                                                retry={"attempt": 2, "at": 9, "error": RATE})])
+        return [s, step_start()], None, b"", 5
     if scenario == "timeout":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, tokens=None,
                                                                 retry={"attempt": 3, "at": 9, "error": RATE})])
-        return [step_start()], None, b"", 30
-    if scenario == "stderr-only":
+        return [s], None, b"", 30
+    if scenario == "stderr-only":            # the CLI failed before any request
         return [], 1, b"\x1b[91mError: \x1b[0mServer process exited with code 1\n", 0
     if scenario == "authfile":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans), idle()])
         (Path(data) / "opencode" / "auth.json").write_text("{}")
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "config-written":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans), idle()])
         cfg = Path(env["XDG_CONFIG_HOME"]) / "opencode"
         cfg.mkdir(parents=True, exist_ok=True)
         (cfg / "settings.json").write_text("{}")
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "second-session":
         write_db(data, model, sessions=2, messages=[SWITCH, USER, assistant(model, text=ans), idle()])
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "unknown-event":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=ans), idle()])
-        return [ev("session.weird"), text_ev(ans)], 0, b"", 0
+        return [s, ev("session.weird"), text_ev(ans)], 0, b"", 0
     if scenario == "synthetic-message":
         write_db(data, model, messages=[SWITCH, ("synthetic", {"text": "injected"}), USER, assistant(model, text=ans), idle()])
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "wrong-model":
         write_db(data, "opencode/big-pickle", messages=[SWITCH, USER, assistant("opencode/big-pickle", text=ans), idle()])
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "no-db":
-        return [text_ev(ans)], 0, b"", 0
+        return [s, text_ev(ans)], 0, b"", 0
     if scenario == "no-text":
         write_db(data, model, messages=[SWITCH, USER, assistant(model, text=None), idle()])
-        return [], 0, b"", 0
+        return [s], 0, b"", 0
+    if scenario == "sandbox-probe":          # executable fake only: report what the sandboxed process sees
+        t = json.dumps(sandbox_probe(stdin))
+        write_db(data, model, messages=[SWITCH, USER, assistant(model, text=t), idle()])
+        return [s, text_ev(t)], 0, b"", 0
     raise ValueError(scenario)
 
 
@@ -172,19 +223,22 @@ class ScriptedRunner:
         self.scenarios, self.answer, self.seen = list(scenarios), answer, []
         self.answers = list(answers) if answers is not None else None
 
-    def __call__(self, argv, stdin, env, cwd, timeout, *, audit=None, **kw):
+    def __call__(self, argv, stdin, env, cwd, timeout, *, audit=None, poll=None, **kw):
         sc = self.scenarios.pop(0) if self.scenarios else "ok"
         cfg = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
         self.seen.append({"argv": list(argv), "stdin": stdin, "env": dict(env), "cwd": cwd, "timeout": timeout,
-                          "config": cfg, "cwd_listing": os.listdir(cwd), "scenario": sc})
+                          "config": cfg, "cwd_listing": os.listdir(cwd), "scenario": sc, "polled": poll is not None})
         ans = json.dumps(self.answers.pop(0)) if self.answers else self.answer
         lines, rc, err, sleep = simulate(sc, argv, stdin, env, cwd, answer=ans)
         aborted = None
         out = b""
         for ln in lines:
-            out += ln.encode() + b"\n"
-            if audit is not None:
-                aborted = audit.feed(ln.encode()) or aborted
+            if ln.startswith(PAUSE):
+                aborted = (poll() if poll is not None else None) or aborted
+            else:
+                out += ln.encode() + b"\n"
+                if audit is not None:
+                    aborted = audit.feed(ln.encode()) or aborted
             if aborted:
                 break
         timed_out = sleep >= timeout and not aborted
@@ -205,11 +259,16 @@ if a[:2] == ["models", "--standalone"]:
 from tests.runtime.opencode_fake import simulate
 stdin = sys.stdin.buffer.read()
 argv = [sys.argv[0], *a]
-with open(LOG, "a") as f:
-    f.write(json.dumps({{"argv": argv, "env": dict(os.environ), "cwd": os.getcwd(), "stdin": stdin.decode(),
-                        "cwdListing": os.listdir(os.getcwd())}}) + "\n")
+try:                                         # inside the live sandbox only a bound log dir is writable
+    with open(LOG, "a") as f:
+        f.write(json.dumps({{"argv": argv, "env": dict(os.environ), "cwd": os.getcwd(), "stdin": stdin.decode(),
+                            "cwdListing": os.listdir(os.getcwd())}}) + "\n")
+except OSError:
+    pass
 lines, rc, err, sleep = simulate(SCENARIO, argv, stdin, dict(os.environ), os.getcwd())
 for ln in lines:
+    if ln.startswith("__pause__:"):
+        time.sleep(float(ln.split(":", 1)[1])); continue
     sys.stdout.write(ln + "\n"); sys.stdout.flush()
     time.sleep(0.05)
 if sleep:

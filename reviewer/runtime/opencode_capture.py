@@ -1,10 +1,12 @@
 """Offline loopback request-capture proof for the opencode adapter (OPENCODE-FREE-PROVIDER; internal).
 
 Run as `python3 -I -c "...opencode_capture import main..."` INSIDE `bwrap --unshare-net` (opencode_cli.capture_argv) with a
-JSON spec on stdin: {"opencode", "model", "mode": "answer"|"toolcall", "timeout"}. It starts a fake OpenAI-compatible
-chat-completions endpoint on 127.0.0.1, then drives the REAL `opencode run` through the live adapter class with Pullo's
-exact argv, env and per-call config; the only difference is the `opencode` provider's baseURL, pointed at the fake. No
-network exists in the namespace, so no request can reach a model, and no credential exists in the per-call home.
+JSON spec on stdin: {"opencode", "model", "mode": "answer"|"toolcall"|"status:429"|"status:500"|"status:503", "timeout"}.
+It starts a fake OpenAI-compatible chat-completions endpoint on 127.0.0.1, then drives the REAL `opencode run` through the
+live adapter class - and so through the live bwrap sandbox (nested; it keeps the namespace's loopback-only network) -
+with Pullo's exact argv, env and per-call config; the only difference is the `opencode` provider's baseURL, pointed at the
+fake. No network exists in the namespace, so no request can reach a model, and no credential exists in the per-call home.
+In a status mode the fake answers every request with that HTTP error and a marked provider body (the hidden-retry proof).
 Prints one JSON document: captured request bodies (prompt text replaced by its digest), the adapter's verdict and the
 expected prompt digest. `analyse()` (run by the caller, outside the namespace) turns that into problems."""
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
+import os
 import socketserver
 import sys
 import threading
@@ -36,6 +39,10 @@ def _digest(s) -> str:
     return hashlib.sha256(str(s).encode()).hexdigest()
 
 
+def status_marker(code: int) -> str:
+    return f"PULLO-CAPTURE-{code}-VERBATIM free tier rate limit"
+
+
 class _Fake(http.server.BaseHTTPRequestHandler):
     log: list = []
     mode = "answer"
@@ -56,6 +63,15 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         except ValueError:
             body = None
         self.log.append({"method": "POST", "path": self.path[:200], "body": body})
+        if self.mode.startswith("status:"):
+            code = int(self.mode.split(":", 1)[1])
+            err = json.dumps({"error": {"message": status_marker(code), "type": "pullo_capture"}}).encode()
+            self.send_response(code)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(err)))
+            self.end_headers()
+            self.wfile.write(err)
+            return
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.end_headers()
@@ -86,9 +102,14 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class _CaptureProvider(O.OpenCodeFreeProvider):
     base_url = None
+    sandbox_argv = None
 
     def _config(self, model, out_name):
         return O.config_text(model, out_name, base_url=self.base_url)
+
+    def _sandbox(self, work):
+        self.sandbox_argv = super()._sandbox(work)     # recorded: the proof must run through the live sandbox
+        return self.sandbox_argv
 
 
 def _scrub_body(body, prompt: str):
@@ -119,7 +140,7 @@ def _scrub_body(body, prompt: str):
 def main() -> int:
     spec = json.loads(sys.stdin.read())
     model, mode = spec["model"], spec.get("mode", "answer")
-    if model not in OPENCODE_MODELS or mode not in ("answer", "toolcall"):
+    if model not in OPENCODE_MODELS or mode not in O.CAPTURE_MODES:
         print(json.dumps({"error": "bad spec"}))
         return 2
     _Fake.log, _Fake.mode = [], mode
@@ -139,10 +160,16 @@ def main() -> int:
         verdict.update(status=res.response.get("status"), outputOk=res.response.get("output") == ANSWER)
     if res.error is not None:
         d = res.error.get("detail") or {}
-        verdict.update(code=res.error.get("code"), reason=d.get("reason"), itemType=d.get("itemType"))
+        verdict.update(code=res.error.get("code"), reason=d.get("reason"), itemType=d.get("itemType"),
+                       requestsSent=d.get("requestsSent"), retryRequestSent=d.get("retryRequestSent"),
+                       httpStatus=d.get("httpStatus"), wordsKept=status_marker(d.get("httpStatus") or 0)
+                       in (res.error.get("message") or ""))
     posts = [x for x in _Fake.log if x["method"] == "POST"]
-    print(json.dumps({"mode": mode, "model": model, "posts": len(posts), "gets": [x["path"] for x in _Fake.log
-                                                                                 if x["method"] == "GET"],
+    box = prov.sandbox_argv or []
+    sandbox = {"bwrap": bool(box) and os.path.basename(box[0]) == "bwrap", "roRoot": box[2:5] == ["--ro-bind", "/", "/"],
+               "masks": sum(1 for x in box if x in ("--tmpfs", "/dev/null")), "unshareNet": "--unshare-net" in box}
+    print(json.dumps({"mode": mode, "model": model, "posts": len(posts), "sandbox": sandbox,
+                      "gets": [x["path"] for x in _Fake.log if x["method"] == "GET"],
                       "paths": sorted({x["path"] for x in posts}), "bodies": [_scrub_body(x["body"], prompt) for x in posts],
                       "verdict": verdict, "disabled": prov.disabled_reason,
                       "expectedResponseFormat": O.response_format(SCHEMA)
@@ -188,7 +215,17 @@ def analyse(out: dict, model: str, mode: str) -> dict:
         if want_rf is not None and first.get("response_format") != want_rf:
             problems.append("the request lacks the pinned json_schema response_format")
     v = out.get("verdict") or {}
-    if mode == "answer":
+    box = out.get("sandbox") or {}
+    if not (box.get("bwrap") and box.get("roRoot")) or box.get("unshareNet"):
+        problems.append("the CLI did not run through the live bwrap sandbox")
+    if mode.startswith("status:"):
+        if out.get("posts") != 1:
+            problems.append(f"the CLI re-sent the request (hidden retry not prevented): {out.get('posts')} requests")
+        if v.get("reason") != "cli-retry" or v.get("requestsSent") != 1 or v.get("retryRequestSent") is not False:
+            problems.append("the scheduled retry was not killed before it was sent, or the request count is wrong")
+        if v.get("httpStatus") != int(mode.split(":", 1)[1]) or not v.get("wordsKept"):
+            problems.append("the provider's HTTP status / error words were not kept")
+    elif mode == "answer":
         if out.get("posts") != 1:
             problems.append(f"expected exactly one request, saw {out.get('posts')}")
         if v.get("status") != "ok" or not v.get("outputOk"):

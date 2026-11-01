@@ -92,6 +92,11 @@ class CallResult:
         return None if self.response is None else self.response["output"]
 
 
+def _opencode_free_model(model) -> bool:
+    from reviewer.runtime.catalog import OPENCODE_MODELS     # lazy: the gateway does not import the runtime at load time
+    return model in OPENCODE_MODELS
+
+
 class Gateway:
     def __init__(self, *, mode: str, profile: dict, budget: dict, run_id: str,
                  providers: dict | None = None, authorization: AuthorizationHandle | None = None,
@@ -508,10 +513,12 @@ class Gateway:
         # A subscription (Codex CLI) review call is bounded by this run's Plan ceiling at its API-equivalent
         # reservation, the adapter's per-run call cap and the per-call timeout, and recorded in the trace and runtime
         # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
-        # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only.
+        # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only;
+        # only for a pinned free model (defense in depth: authorization and the adapter already refuse any other model).
         subscription = (self.family == "review" and (
             (req["provider"] == "openai" and getattr(provider, "billing_kind", None) == "subscription-consumption")
-            or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model")))
+            or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model"
+                and _opencode_free_model(req["model"]))))
         if subscription:
             self._subscription_keys.add(rkey)
         refuse = self._reserve(rkey, stage, amount)

@@ -3,7 +3,7 @@
 Each role's provider comes from its ModelProfile entry (pullo.toml model -> provider; the allowlists are disjoint):
   anthropic -> OpenRouterProvider (paid, the operator's $50 trial key/book)
   openai    -> CodexTerraProvider (ChatGPT subscription through the installed Codex CLI, codex-isolated-home@2)
-  opencode  -> OpenCodeFreeProvider (OpenCode Zen free models through the installed opencode CLI, opencode-isolated-home@1;
+  opencode  -> OpenCodeFreeProvider (OpenCode Zen free models through the installed opencode CLI, opencode-isolated-home@2;
                OPENCODE-FREE-PROVIDER). It is a CLI arm like Terra: live_arm() calls it "terra" (its own operator-created
                CLI-arm state dir, never the OpenRouter trial state, never the key) and live_terra() returns CliProviders.
 A provider no role uses is a DisabledProvider, so an arm that needs no OpenRouter role never loads the key, and an
