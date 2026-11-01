@@ -20,6 +20,9 @@ MODEL = "claude-cli/claude-sonnet-5-5"
 OPUS = "claude-cli/claude-opus-5-5"
 SID = "5d3e2a1c-0000-4000-8000-000000000001"
 OK_INV = {"hypotheses": []}
+OK_HYP = {"hypotheses": [{"claim": "off-by-one in copy", "category": "bug", "suspectedSeverity": "P2", "impact": "none",
+                          "location": {"path": "x.c", "line": 1},
+                          "evidence": [{"kind": "code", "path": "x.c", "lines": [1, 1], "commit": "0" * 40, "excerpt": "x"}]}]}
 USAGE = {"input_tokens": 1000, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 200, "output_tokens": 40,
          "output_tokens_details": {"thinking_tokens": 0},
          "cache_creation": {"ephemeral_1h_input_tokens": 300, "ephemeral_5m_input_tokens": 0}}
@@ -140,8 +143,14 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
     if scenario == "fenced":
         t = "```json\n" + ans + "\n```"
         return [i, text(m, t), rate(), result(m, t)], 0, b"", 0
-    if scenario == "prose":
+    if scenario == "prose":                   # A6: one valid object in prose is accepted (prose-around-json)
         t = "Here is the JSON:\n" + ans
+        return [i, text(m, t), rate(), result(m, t)], 0, b"", 0
+    if scenario == "prose-two":               # A6: two different valid objects: never a guess
+        t = "The PR asks for " + json.dumps(OK_INV) + " but I found " + json.dumps(OK_HYP)
+        return [i, text(m, t), rate(), result(m, t)], 0, b"", 0
+    if scenario == "prose-only":
+        t = "I could not find anything to report."
         return [i, text(m, t), rate(), result(m, t)], 0, b"", 0
     if scenario == "over-cap":
         return [i, text(m, ans), rate(), result(m, ans, usage=dict(USAGE, output_tokens=90_000))], 0, b"", 0

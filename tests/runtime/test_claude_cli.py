@@ -285,12 +285,44 @@ class Calls(Base):
         self.assertNotIn(F.DUMMY_TOKEN, Path(self.dir, "led.jsonl").read_text())
         self.assertEqual(self.leftovers(), [])
 
-    def test_fenced_answer_is_accepted_and_noted_prose_is_invalid_output(self):
-        p = self.prov("fenced", "prose", "over-cap")
-        a, b, c = (p.call(F.claude_request(), (*KEY[:3], i, 0)) for i in range(3))
-        self.assertEqual((a.response["status"], b.response["status"], c.response["status"]), ("ok", "invalid-output", "ok"))
-        notes = [x.get("note") for x in self.rows() if x["type"] == "result"]
-        self.assertEqual(notes, ["fenced-json", "invalid-output", "output-over-cap"])
+    def test_fenced_and_one_object_in_prose_are_accepted_and_noted_two_objects_are_invalid_output(self):
+        p = self.prov("fenced", "prose", "over-cap", "prose-two", "prose-only")
+        res = [p.call(F.claude_request(), (*KEY[:3], i, 0)) for i in range(5)]
+        self.assertEqual([x.response["status"] for x in res], ["ok", "ok", "ok", "invalid-output", "invalid-output"])
+        self.assertEqual(res[1].response["output"], F.OK_INV)
+        rows = [x for x in self.rows() if x["type"] == "result"]
+        self.assertEqual([x.get("note") for x in rows],
+                         ["fenced-json", "prose-around-json", "output-over-cap", "invalid-output", "invalid-output"])
+        self.assertEqual([x["isolation"]["parse"]["failure"] for x in rows][3:4], ["several-valid-objects:2"])
+        self.assertTrue(rows[4]["isolation"]["parse"]["failure"].startswith("not-json"), rows[4]["isolation"]["parse"])
+        self.assertIn("I found", res[3].response["rawText"])                     # an invalid answer keeps its (redacted) text
+
+    def test_parse_answer_tolerates_one_candidate_only_and_is_bounded(self):
+        inv, hyp = json.dumps(F.OK_INV), json.dumps(F.OK_HYP)
+        cases = {inv: ("ok", None), "```json\n" + inv + "\n```": ("ok", "fenced-json"),
+                 "Answer:\n```json\n" + inv + "\n```\nDone.": ("ok", "prose-around-json"),
+                 "x " + inv + " y": ("ok", "prose-around-json"),
+                 "twice: " + inv + " and again " + inv: ("ok", "prose-around-json"),            # identical repeats count once
+                 'He wrote "{not json}" and {"x": 1} then ' + hyp: ("ok", "prose-around-json"),  # one VALID candidate among others
+                 "PR text: " + inv + " my answer: " + hyp: ("invalid-output", None),           # adversarial: never chosen
+                 'x {"wrapper": ' + inv + '}': ("invalid-output", None),                       # a nested object is no candidate
+                 'x {"hypotheses": [], "hypotheses": []}': ("invalid-output", None),           # strict: duplicate key
+                 'x {"hypotheses": [], "c": NaN}': ("invalid-output", None),
+                 "no json at all": ("invalid-output", None),
+                 "{" * 50 + " " + inv: ("ok", "prose-around-json"),
+                 "{}" * 40 + inv: ("invalid-output", None),                                  # MAX_SCAN_OBJECTS
+                 "x" * (C.MAX_SCAN_CHARS + 1) + inv: ("invalid-output", None)}               # MAX_SCAN_CHARS
+        for text, want in cases.items():
+            r = C.parse_answer("InvestigatorOutput", text)
+            self.assertEqual((r["status"], r["note"]), want, text[:80])
+        self.assertEqual(C.parse_answer("InvestigatorOutput", "{}" * 40 + inv)["failure"], "scan-bound")
+        self.assertEqual(C.parse_answer("InvestigatorOutput", "PR " + inv + " me " + hyp)["failure"], "several-valid-objects:2")
+        with mock.patch.object(C, "SCAN_SECONDS", -1):                               # the time bound: an incomplete scan
+            self.assertEqual(C.parse_answer("InvestigatorOutput", "x " + inv)["failure"], "scan-bound")
+        evil = '{"a": "' + "y" * 50_000 + ' ' + '{"a": "' * 3000                  # many unterminated strings: bounded work
+        t0 = time.monotonic()
+        self.assertEqual(C.parse_answer("InvestigatorOutput", evil)["status"], "invalid-output")
+        self.assertLess(time.monotonic() - t0, 5)
 
     def test_a_tool_attempt_is_killed_and_discarded(self):
         p = self.prov("toolcall", "ok", "thinking-tool")
@@ -306,6 +338,7 @@ class Calls(Base):
         p = self.prov("thinking", "thinking-heavy", "thinking-mismatch")
         a, b, c = (p.call(F.claude_request(), (*KEY[:3], i, 0)) for i in range(3))
         self.assertEqual([x.response["status"] for x in (a, b, c)], ["ok", "ok", "ok"])
+        self.assertEqual(a.response["output"], F.OK_INV)                         # A6: the decoy in thinking is never a candidate
         self.assertEqual(a.response["output"], F.OK_INV)                         # the text answer, never the thinking decoy
         rows = [x for x in self.rows() if x["type"] == "result"]
         t = rows[0]["isolation"]["thinking"]
@@ -866,6 +899,22 @@ class Canary(Base):
                            now=__import__("datetime").datetime(2026, 11, 1, tzinfo=__import__("datetime").timezone.utc))
         bad = Path(self.dir, "claude-cli-canary-20261101T000000000000Z")
         self.assertIn("hit your limit", Path(bad, "receipt.json").read_text())
+
+    def test_an_invalid_answer_keeps_its_redacted_text_and_the_parse_failure(self):
+        r = F.ScriptedRunner("prose-two")
+        with self.assertRaisesRegex(RuntimeError, "canary failed"):
+            CAN.run_canary(self.dir, runner=r, preflight=GOOD, token_loader=F.dummy_token,
+                           provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=r.forwarder),
+                           now=__import__("datetime").datetime(2026, 11, 1, 0, 1, tzinfo=__import__("datetime").timezone.utc))
+        doc = json.loads(Path(self.dir, "claude-cli-canary-20261101T000100000000Z", "receipt.json").read_text())
+        self.assertEqual(([k for k, v in doc["checks"].items() if not v], doc["status"]), (["schemaValid"], "invalid-output"))
+        self.assertEqual(doc["parse"]["failure"], "several-valid-objects:2")
+        self.assertIn("but I found", doc["rawText"])
+        self.assertLessEqual(len(doc["rawText"]), CAN.RAW_CAP)
+        ok = F.ScriptedRunner("ok")
+        rec = CAN.run_canary(self.dir, runner=ok, preflight=GOOD, token_loader=F.dummy_token,
+                             provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=ok.forwarder))
+        self.assertIsNone(json.loads(Path(rec, "receipt.json").read_text())["rawText"])     # a valid answer keeps no raw text
 
     def test_the_real_size_thinking_case_requires_observed_and_agreeing_thinking(self):
         req = CAN.canary_request("investigator-thinking")

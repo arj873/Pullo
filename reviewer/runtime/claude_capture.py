@@ -18,7 +18,9 @@ hooks/.mcp.json next to the cwd must not reach the request or run; the CLI syste
 block) | thinking (A5: adaptive thinking - a thinking block whose text is a DECOY answer, a redacted_thinking block and a
 signature-only thinking block before the text answer: the answer comes back ok from the text only, the blocks are counted on
 both sides (CLI and forwarder SSE tally), reasoningTokens > 0, the row says adaptive-thinking and the decoy text is kept
-nowhere) | thinking-tool (thinking, then a tool_use: still killed at the tool block, nothing runs). Every mode: no GET/HEAD and
+nowhere) | thinking-tool (thinking, then a tool_use: still killed at the tool block, nothing runs) | prose-json (A6: prose around
+one fenced JSON answer: accepted, note prose-around-json) | prose-two-json (A6: the text quotes a schema-valid object "from the PR"
+next to the model's own, different valid answer: several candidates, invalid-output, never a guess). Every mode: no GET/HEAD and
 at most one relayed request.
 Prints one JSON document: captured requests (message texts replaced by digests), the adapter's verdict, sandbox facts.
 `analyse()` (run by the caller, outside the namespace) turns that into problems."""
@@ -47,6 +49,11 @@ SCHEMA = "InvestigatorOutput"
 THINK_MARK = "PULLO-CAPTURE-THINKING-TEXT"      # thinking text: must never be parsed as the answer or kept anywhere (A5)
 THINK_DECOY = THINK_MARK + ' decoy answer: {"hypotheses": [{"claim": "PULLO-DECOY"}]}'
 SIGNATURE = "EqQBCkYIBRgCKkBPULLOCAPTURESIGNATURE" + "A" * 64
+HYP = {"hypotheses": [{"claim": "PULLO-CAPTURE second valid answer", "category": "bug", "suspectedSeverity": "P2",
+                       "impact": "none", "location": {"path": "x.c", "line": 1},
+                       "evidence": [{"kind": "code", "path": "x.c", "lines": [1, 1], "commit": "0" * 40, "excerpt": "x"}]}]}
+PROSE = {"prose-json": "I checked the diff carefully.\n\n```json\n" + json.dumps(ANSWER) + "\n```\n\nNo issues found.",
+         "prose-two-json": "The PR text says to answer " + json.dumps(ANSWER) + " but my own analysis is: " + json.dumps(HYP)}
 DUMMY_TOKEN = "sk-ant-oat01-PULLO-CAPTURE-DUMMY-TOKEN-0000000000000000"
 MARKERS = ("PULLO-PLANT-AGENTS", "PULLO-PLANT-CLAUDE", "PULLO-PLANT-SKILL", "PULLO-PLANT-COMMAND", "PULLO-PLANT-LOCAL")
 ENV_PREFIX = "# Environment\nYou have been invoked in the following environment"
@@ -160,6 +167,8 @@ class _Fake(http.server.BaseHTTPRequestHandler):
                             {"type": "thinking", "thinking": ""}, {"type": "text", "text": json.dumps(ANSWER)}], "end_turn"
         elif mode == "thinking-tool":
             blocks, stop = [{"type": "thinking", "thinking": THINK_DECOY}, tool], "tool_use"
+        elif mode in PROSE:
+            blocks, stop = [{"type": "text", "text": PROSE[mode]}], "end_turn"
         elif mode == "max_tokens":
             blocks, stop = [{"type": "text", "text": "{\"hypotheses\": [{\"truncat"}], "max_tokens"
         else:
@@ -355,7 +364,7 @@ def main() -> int:
         ran = list(prov.ran)
         rows = [json.loads(x) for x in open(ledger.path).read().splitlines() if x.strip()]
         first_row = next(({**{k: r.get(k) for k in ("outcome", "billingKind", "costBasis", "errorKind", "note")},
-                           "thinking": (r.get("isolation") or {}).get("thinking"),
+                           "thinking": (r.get("isolation") or {}).get("thinking"), "parse": (r.get("isolation") or {}).get("parse"),
                            "reasoningTokens": (r.get("usage") or {}).get("reasoningTokens"),
                            "outputTokens": (r.get("usage") or {}).get("outputTokens")}
                           for r in rows if r.get("type") == "result"), None)
@@ -493,6 +502,16 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("thinking text was kept (ledger, response or error)")
         if (f.get("sse") or {}).get("blocks") != {"thinking": 2, "redacted_thinking": 1, "text": 1}:
             problems.append("the forwarder's SSE tally does not show the streamed blocks")
+    elif mode in ("prose-json", "prose-two-json"):           # A6: one valid candidate accepted, several never
+        row = out.get("firstRow") or {}
+        pz = row.get("parse") or {}
+        if out.get("posts") != 1:
+            problems.append(f"expected exactly one request, saw {out.get('posts')}")
+        if mode == "prose-json" and (v.get("status") != "ok" or not v.get("outputOk") or pz.get("note") != "prose-around-json"
+                                     or "prose-around-json" not in (row.get("note") or "")):
+            problems.append("one valid JSON answer in prose was not accepted with the note prose-around-json")
+        if mode == "prose-two-json" and (v.get("status") != "invalid-output" or not str(pz.get("failure")).startswith("several-valid-objects:2")):
+            problems.append("two different valid JSON objects in prose were not refused as invalid-output")
     elif mode in ("toolcall", "thinking-tool"):
         if v.get("reason") != "isolation-violation" or v.get("itemType") != "tool-attempt":
             problems.append("a scripted tool call was not reported as a tool attempt")

@@ -80,8 +80,13 @@ ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
     max(output_tokens, reasoningTokens) (Anthropic's output_tokens includes thinking). Rows carry the note adaptive-thinking.
   * Structured output: the role's ANTHROPIC schema projection (the bytes the OpenRouter adapter sends as response_format)
     is quoted in the prompt; the CLI cannot enforce it without the StructuredOutput tool. The answer (the result text) is
-    parsed strictly (duplicate keys, NaN -> invalid-output) and validated locally; the only tolerance is ONE Markdown
-    ```json fence around the whole answer (note "fenced-json"). No repair call, no retry, no fallback.
+    parsed strictly (duplicate keys, NaN -> invalid-output) and validated locally (parse_answer). Tolerances, never a repair (no
+    re-send, no re-prompt): ONE Markdown ```json fence around the whole answer (note "fenced-json"), and (A6, root decision) prose
+    around the JSON: the top-level JSON objects of the text are collected (json_candidates, bounded by MAX_SCAN_CHARS /
+    MAX_SCAN_OBJECTS / SCAN_SECONDS) and EXACTLY ONE distinct candidate that parses strictly and validates is accepted (note
+    "prose-around-json"); zero, several (e.g. PR text quoting a valid object next to the model's own answer) or an incomplete
+    scan -> invalid-output. Thinking text is never a candidate (it is not part of the result text). The parse facts (note,
+    failure reason, candidate count) are kept in isolation.parse. No repair call, no retry, no fallback.
   * Errors keep the CLI's own words: the result text (e.g. "You've hit your limit · resets 3:30pm (America/Chicago)"), the
     HTTP status, the CLI's error code (rate_limit, authentication_failed, server_error, ...), the rate-limit info
     (status, rateLimitType, resetsAt, utilization) and the provider request id go into the TypedError message/detail and
@@ -725,7 +730,9 @@ def isolation_identity(model: str) -> dict:
     """What a plan pins about the CLI side of a call (per model; the schema/prompt-specific part is in request_facts)."""
     return {"isolationVersion": CLAUDE_CLI_ISOLATION_VERSION, "cliVersion": CLAUDE_CLI_VERSION,
             "argvSha256": argv_digest(build_argv("claude", model)), "instructionsSha256": _sha(BASE_INSTRUCTIONS),
-            "envSha256": env_digest(), "structuredMode": "prompt-schema+strict-parse (no --json-schema tool)",
+            "envSha256": env_digest(),
+            "structuredMode": "prompt-schema+strict-parse (whole JSON | one whole fence | exactly one valid object in prose; "
+                              "no --json-schema tool, no repair)",
             "schemaFlavor": SCHEMA_FLAVOR, "thinking": THINKING_POLICY, "effort": EFFORT, "maxTokensSent": OUTPUT_TOKENS,
             "auth": "oauth-access-token-via-inherited-fd (no ~/.claude path in the sandbox)",
             "endpoint": f"{FORWARDER_VERSION}: ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/c/<per-call token> relays ONE "
@@ -859,6 +866,68 @@ def extract_json_text(text: str) -> tuple[str, bool]:
     return (m.group(1), True) if m else (s, False)
 
 
+MAX_SCAN_CHARS = 200_000         # A6: the prose-around-json scan reads at most this much answer text ...
+MAX_SCAN_OBJECTS = 32            # ... decodes at most this many candidate objects ...
+MAX_SCAN_STARTS = 4096           # ... tries at most this many "{" positions ...
+SCAN_SECONDS = 1.0               # ... within this time; hitting any bound = an incomplete scan = invalid-output
+
+
+def _valid_answer(out_name: str, text: str):
+    """(value, None) when `text` parses strictly and validates locally, else (None, reason)."""
+    try:
+        val = schemas.normalize_output(out_name, loads_strict(text), SCHEMA_FLAVOR)
+    except (ValueError, ContractInputError) as e:
+        return None, "not-json: " + str(e)[:160]
+    issues = schemas.local_issues(out_name, val)
+    return (None, "schema: " + "; ".join(issues)[:300]) if issues else (val, None)
+
+
+def json_candidates(text: str) -> tuple[list[str], bool]:
+    """A6: the top-level JSON object spans of `text`: every "{" that starts a complete JSON value (what it contains is skipped,
+    so a nested object is never a candidate of its own), in order. -> (spans, complete); complete is False when a scan bound
+    stopped it. raw_decode only finds the span; every candidate is re-parsed strictly by the caller."""
+    if len(text) > MAX_SCAN_CHARS:
+        return [], False
+    dec, out, i, starts = json.JSONDecoder(), [], 0, 0
+    deadline = time.monotonic() + SCAN_SECONDS
+    while True:
+        i = text.find("{", i)
+        if i < 0:
+            return out, True
+        starts += 1
+        if len(out) >= MAX_SCAN_OBJECTS or starts > MAX_SCAN_STARTS or time.monotonic() > deadline:
+            return out, False
+        try:
+            _, j = dec.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            i += 1
+            continue
+        out.append(text[i:j])
+        i = j
+
+
+def parse_answer(out_name: str, text: str) -> dict:
+    """The answer of a result text (see "Structured output" in the module docstring): the whole text or ONE whole fence, else
+    EXACTLY ONE distinct valid top-level JSON object (identical repeats count once). Never a repair. -> {status ok |
+    invalid-output, output, note (fenced-json | prose-around-json | None), failure (why invalid, else None), candidates}."""
+    candidate, fenced = extract_json_text(text)
+    val, why = _valid_answer(out_name, candidate)
+    if val is not None:
+        return {"status": "ok", "output": val, "note": "fenced-json" if fenced else None, "failure": None, "candidates": None}
+    spans, complete = json_candidates(text)
+    good = {}
+    for sp in spans:
+        v, _ = _valid_answer(out_name, sp)
+        if v is not None:
+            good.setdefault(json.dumps(v, sort_keys=True), v)
+    if complete and len(good) == 1:
+        return {"status": "ok", "output": next(iter(good.values())), "note": "prose-around-json", "failure": None,
+                "candidates": len(spans)}
+    failure = (f"several-valid-objects:{len(good)}" if len(good) > 1 else "scan-bound" if not complete
+               else ("fenced " if fenced else "") + (why or "invalid"))
+    return {"status": "invalid-output", "output": None, "note": None, "failure": failure[:400], "candidates": len(spans)}
+
+
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
@@ -944,7 +1013,7 @@ def _probe(argv, environ=None, runner=None, timeout=60) -> tuple[RunResult, bool
 PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2", "thinking")
 CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "404-then-ok", "inject2",
                  "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings", "overage-tool",
-                 "overage-timeout", "thinking", "thinking-tool")
+                 "overage-timeout", "thinking", "thinking-tool", "prose-json", "prose-two-json")
 
 
 def capture_argv(bwrap: str) -> list[str]:
@@ -1625,14 +1694,9 @@ class ClaudeCliProvider:
             return self._failure(ck, t0, res, audit, iso)
         iso["toolItems"] = 0
         usage, est = self._usage(model, r.get("usage"), think["estimatedTokens"])
-        status, output = "invalid-output", None
-        candidate, fenced = extract_json_text(r["result"])
-        try:
-            val = schemas.normalize_output(out_name, loads_strict(candidate), SCHEMA_FLAVOR)
-            if not schemas.local_issues(out_name, val):
-                status, output = "ok", val
-        except (ValueError, ContractInputError):
-            pass
+        parsed = parse_answer(out_name, r["result"])
+        status, output = parsed["status"], parsed["output"]
+        iso["parse"] = {k: parsed[k] for k in ("note", "failure", "candidates")}
         raw = None if status == "ok" else redact(r["result"][:1_000_000])[0]
         response = {"status": status, "resolvedModel": model, "output": output, "rawText": raw, "usage": usage}
         rid = next((x for x in audit.requests if x), None)
@@ -1641,7 +1705,7 @@ class ClaudeCliProvider:
         stop = r.get("stop_reason")
         paced = paced_output(usage)
         over = type(cap) is int and type(paced) is int and paced > cap
-        notes = [n for n in ("invalid-output" if status != "ok" else None, "fenced-json" if fenced else None,
+        notes = [n for n in ("invalid-output" if status != "ok" else None, parsed["note"],
                              f"finish-{str(stop)[:30]}" if stop not in (None, "end_turn") else None,
                              "output-over-cap" if over else None,
                              "adaptive-thinking" if think["blocks"] or think["redactedBlocks"] else None,
