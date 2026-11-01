@@ -508,8 +508,10 @@ class Gateway:
         # A subscription (Codex CLI) review call is bounded by this run's Plan ceiling at its API-equivalent
         # reservation, the adapter's per-run call cap and the per-call timeout, and recorded in the trace and runtime
         # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
-        subscription = (self.family == "review" and req["provider"] == "openai" and
-                        getattr(provider, "billing_kind", None) == "subscription-consumption")
+        # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only.
+        subscription = (self.family == "review" and (
+            (req["provider"] == "openai" and getattr(provider, "billing_kind", None) == "subscription-consumption")
+            or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model")))
         if subscription:
             self._subscription_keys.add(rkey)
         refuse = self._reserve(rkey, stage, amount)
@@ -638,8 +640,8 @@ class Gateway:
     def _basis(self, provider, settled_basis, *, known_none=False):
         if provider == "synthetic":
             return "synthetic"
-        if provider == "openai" and not known_none:
-            return "estimated"          # subscription CLI usage priced at API-equivalent list rates: never a bill
+        if provider in ("openai", "opencode") and not known_none:
+            return "estimated"          # subscription / free-model CLI usage priced at list or pacing rates: never a bill
         return settled_basis or ("measured" if known_none else "estimated")
 
     def _cost_doc(self, c, amount, usd, usage, basis, over, *, replay_of=None):

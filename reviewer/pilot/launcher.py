@@ -442,6 +442,9 @@ def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, wo
             if needs(profile, "openai"):          # gate S1: this host's state is the OpenRouter trial state
                 raise PilotError("live Terra arms run through the repository/benchmark hosts with their own Terra "
                                  "state dir; this historical pilot only plans them")
+            if needs(profile, "opencode"):        # OPENCODE-FREE-PROVIDER: same rule for the free-model CLI arm
+                raise PilotError("live opencode arms run through the repository/benchmark hosts with their own CLI-arm "
+                                 "state dir; this historical pilot only plans them")
             terra = live_terra(profile, ledger, scope)
             key, router = None, DisabledProvider("anthropic")
             if needs(profile, "anthropic"):

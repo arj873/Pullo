@@ -500,6 +500,9 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
     if needs(profile, "openai"):                  # gate S1: this host's state is the OpenRouter trial state
         raise PositiveError("live Terra arms run through the repository/benchmark hosts with their own Terra state "
                             "dir; the positive-control host only plans them")
+    if needs(profile, "opencode"):                # OPENCODE-FREE-PROVIDER: same rule for the free-model CLI arm
+        raise PositiveError("live opencode arms run through the repository/benchmark hosts with their own CLI-arm "
+                            "state dir; the positive-control host only plans them")
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out, *_control_roots(o)])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,

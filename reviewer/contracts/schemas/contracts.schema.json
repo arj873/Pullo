@@ -2144,7 +2144,8 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode"
                   ]
                 },
                 "resolved": {
@@ -2296,7 +2297,8 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode"
                   ]
                 },
                 "resolved": {
@@ -2437,7 +2439,8 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode"
                   ]
                 },
                 "resolved": {
@@ -2578,7 +2581,8 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode"
                   ]
                 },
                 "resolved": {
@@ -2716,7 +2720,8 @@
           "enum": [
             "anthropic",
             "openai",
-            "synthetic"
+            "synthetic",
+            "opencode"
           ]
         },
         "role": {
@@ -4337,7 +4342,8 @@
             "enum": [
               "anthropic",
               "openai",
-              "synthetic"
+              "synthetic",
+              "opencode"
             ]
           },
           "minItems": 1,

@@ -918,7 +918,7 @@ Plan = define("Plan", Obj(
 ))
 
 DEV_ONLY_MODELS = frozenset({"gpt-6.1-sol", "claude-opus-5-5"})
-PROVIDERS = ("anthropic", "openai", "synthetic")
+PROVIDERS = ("anthropic", "openai", "synthetic", "opencode")   # opencode: OPENCODE-FREE-PROVIDER (free models via the opencode CLI)
 
 Price = Obj(required={"priceVersion": Str(min_len=1, max_len=64),
                       "inputPerMTokUsdMicros": UsdMicros,

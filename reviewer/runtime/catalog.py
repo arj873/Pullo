@@ -132,3 +132,54 @@ def terra_api_equivalent_micros(uncached: int, cached: int, output: int, prompt_
     ox = t["tierOutputX"] if prompt_tokens > t["tierAbovePromptTokens"] else 1.0
     return math.ceil(_ceil_cost(uncached, t["input"]) * ix + _ceil_cost(cached, t["cached"]) * ix
                      + _ceil_cost(output, t["output"]) * ox)
+
+
+# ---------------------------------------------------------------- opencode free models (OPENCODE-FREE-PROVIDER)
+# provider=opencode: OpenCode Zen FREE models through the installed `opencode run` (no account, no key: the CLI's built-in
+# `opencode` provider uses the public free-tier key). Model ids as `opencode models --standalone` lists them in a
+# credential-less, network-less isolated home of opencode 2.1.4 (embedded catalog, models fetch disabled), checked
+# 2026-11-01 without any inference: beam-free, big-pickle, deepseek-v4.1-flash-free, flint-40b-free, glm-5.3-flash-free,
+# mimo-v2.6-flash-free, nemotron-3-ultra-free, nemotron-3.5-lightning-free, nemotron-3.5-super-vl-free. Only the entries
+# below are allowed (exact ids). Catalog facts (opencode/models.dev entry, public): openai-compatible chat completions at
+# opencode.ai/inference, $0 input/output, structured_output true, context 200000 / output 32000 tokens.
+OPENCODE_CLI_VERSION = "2.1.4"                 # exact: the adapter's argv/config/event/DB parsing is pinned to this CLI
+OPENCODE_ISOLATION_VERSION = "opencode-isolated-home@1"
+OPENCODE_MODELS: dict[str, dict] = {
+    "opencode/deepseek-v4.1-flash-free": {"cliModel": "opencode/deepseek-v4.1-flash-free", "family": "deepseek",
+                                          "contextTokens": 200_000, "outputTokens": 32_000, "structured": "json-schema"},
+    "opencode/glm-5.3-flash-free": {"cliModel": "opencode/glm-5.3-flash-free", "family": "glm",
+                                    "contextTokens": 200_000, "outputTokens": 32_000, "structured": "json-schema"},
+}
+OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
+# The free models cost $0 (`billingKind` free-model: no bill, no key, no SpendBook). The engine still needs a nonzero
+# price to PACE a run (Plan ceiling, INVESTIGATE share, unit reserves, VERIFY/JUDGE floors), so the ModelProfile carries
+# a PACING price: the GPT-6.1-Terra list rates already pinned above (TERRA_6_PRICE), so a free-model arm is paced like the
+# Terra arm it replaces. These numbers are NOT an estimate of what the free model would cost anywhere, and never money.
+OPENCODE_PACING_PRICE_VERSION = "opencode-free-pacing@terra6-list-2026-10-29"
+OPENCODE_PACING_PRICE = {k: TERRA_6_PRICE[k] for k in ("input", "cached", "write", "output")}
+
+
+def opencode_gateway_price(model: str) -> dict:
+    if model not in OPENCODE_MODELS:
+        raise ValueError("unknown opencode free model")
+    p = OPENCODE_PACING_PRICE
+    return {"priceVersion": OPENCODE_PACING_PRICE_VERSION, "inputPerMTokUsdMicros": p["input"],
+            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write"],
+            "outputPerMTokUsdMicros": p["output"]}
+
+
+def opencode_worst_case_micros(model: str, request_bytes: int, max_output_tokens: int) -> int:
+    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearer input rate plus the full output
+    cap at the output rate (no long-context tier: the free models' context is 200K)."""
+    if model not in OPENCODE_MODELS:
+        raise ValueError("unknown opencode free model")
+    p = OPENCODE_PACING_PRICE
+    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write"]))
+            + _ceil_cost(max_output_tokens, p["output"]))
+
+
+def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) -> int:
+    """Pacing-rate arithmetic for measured opencode usage (receipts only; the actual charge is $0)."""
+    p = OPENCODE_PACING_PRICE
+    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write, p["write"])
+            + _ceil_cost(output, p["output"]))

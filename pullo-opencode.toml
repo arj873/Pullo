@@ -1,0 +1,32 @@
+# Pullo review-model configuration variant (schema pullo-config@1): the opencode FREE-model review arm
+# (OPENCODE-FREE-PROVIDER).
+#
+# Select it explicitly with --config pullo-opencode.toml. The default pullo.toml (Sonnet 5.5 through OpenRouter), the GPT
+# Terra variant pullo-terra.toml and the common scoring judge are unchanged by this file.
+#
+# provider "opencode" = OpenCode Zen FREE models through the installed opencode CLI (exactly 2.1.4), with no account, no
+# key and no OpenRouter involvement: $0 actual (billingKind free-model). Allowed models (exact ids):
+# opencode/deepseek-v4.1-flash-free (default), opencode/glm-5.3-flash-free. Every call runs `opencode run` in a fresh
+# credential-less per-call home (opencode-isolated-home@1): every tool denied by the pinned config, agent `pullo` with
+# Pullo's system prompt, no title call, no plugins/skills/MCP/instructions; audited event stream and session DB;
+# json_schema response_format. The engine paces the run with a PACING price (the Terra-6 list rates), not money.
+# Bounds: the $4 per-run Plan ceiling in pacing units, the per-role timeouts, a per-run call cap, no retries (a hidden CLI
+# retry is killed), no repairs or fallbacks.
+#
+# Before the first live use, root runs the one-call canary (see the opencode runbook). The spend authorization named by
+# --auth must list provider "opencode" and these models; its dollar fields bound PACING estimates (the arm costs $0) and
+# it never reads the OpenRouter key. This file selects models only and authorizes nothing.
+
+schema = "pullo-config@1"
+
+[review.investigator]
+provider = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
+
+[review.verifier]
+provider = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
+
+[review.judge]
+provider = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"

@@ -169,7 +169,44 @@ def modelprofile_minus_live(mp):
     return mp
 
 
+# OPENCODE-FREE-PROVIDER (declared for root acceptance, NOT self-approved): the shared provider enum PROVIDERS gains a
+# trailing "opencode" (RoleSpec.provider in ModelProfile roles/alternates, ModelRequest.provider, SpendAuthorization
+# .providers items). Exactly that enum member is subtracted below before the legacy pins are compared, and the three new
+# definition digests are pinned on their own, so no other change is excused. Documents' digests are unaffected.
+LEGACY_PROVIDERS = ["anthropic", "openai", "synthetic"]
+OPENCODE_DEFS = ("ModelProfile", "ModelRequest", "SpendAuthorization")
+OPENCODE_DEF_DIGESTS = {
+    "ModelProfile": "sha256:f767e02477467707db7b154d6634d83a8186932a1cffd9a0527f2f7517d0b5d4",
+    "ModelRequest": "sha256:89fbb204472fc01c2a485ad66190e37e61d0106b15bfac6c8d94d468f317dd6e",
+    "SpendAuthorization": "sha256:9c4e73890e57aecd0defca2cf8ef9cb5b62550f33501312aad051cf7a629f81a",
+}
+
+
+def minus_opencode(d):
+    """Remove the one trailing "opencode" member from every provider enum (asserting where it sits)."""
+    d = copy.deepcopy(d)
+    hits = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            e = n.get("enum")
+            if isinstance(e, list) and e[:3] == LEGACY_PROVIDERS and "opencode" in e:
+                assert e == LEGACY_PROVIDERS + ["opencode"], e
+                n["enum"] = list(LEGACY_PROVIDERS)
+                hits.append(1)
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+    walk(d)
+    assert hits, "no provider enum carries the declared opencode member"
+    return d
+
+
 def minus_live(name, d):
+    if name in OPENCODE_DEFS:
+        d = minus_opencode(d)
     return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
             else modelprofile_minus_live(d) if name == "ModelProfile" else d)
 
@@ -335,7 +372,10 @@ class L1L2Compatibility(Base):
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(C.digest(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
         self.assertEqual(C.digest(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
-        self.assertEqual(C.digest(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"]), ALTERNATES_DIGEST)
+        self.assertEqual(C.digest(minus_opencode(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"])),
+                         ALTERNATES_DIGEST)                                     # OPENCODE-FREE-PROVIDER enum subtracted
+        for name, want in OPENCODE_DEF_DIGESTS.items():                         # the declared new shapes, exactly
+            self.assertEqual(C.digest(REGISTRY[name].to_json()), want, name)
         self.assertEqual(C.digest(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)
