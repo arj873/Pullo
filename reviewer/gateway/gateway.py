@@ -97,6 +97,11 @@ def _opencode_free_model(model) -> bool:
     return model in OPENCODE_MODELS
 
 
+def _claude_cli_model(model) -> bool:
+    from reviewer.runtime.catalog import CLAUDE_CLI_MODELS   # lazy, as above
+    return model in CLAUDE_CLI_MODELS
+
+
 class Gateway:
     def __init__(self, *, mode: str, profile: dict, budget: dict, run_id: str,
                  providers: dict | None = None, authorization: AuthorizationHandle | None = None,
@@ -515,10 +520,14 @@ class Gateway:
         # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
         # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only;
         # only for a pinned free model (defense in depth: authorization and the adapter already refuse any other model).
+        # A claude-cli call (CLAUDE-CLI-PROVIDER) too: the Claude subscription, $0 actual, an API-equivalent reservation at
+        # Anthropic list rates; only for a pinned claude-cli model.
         subscription = (self.family == "review" and (
             (req["provider"] == "openai" and getattr(provider, "billing_kind", None) == "subscription-consumption")
             or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model"
-                and _opencode_free_model(req["model"]))))
+                and _opencode_free_model(req["model"]))
+            or (req["provider"] == "claude-cli" and getattr(provider, "billing_kind", None) == "claude-subscription"
+                and _claude_cli_model(req["model"]))))
         if subscription:
             self._subscription_keys.add(rkey)
         refuse = self._reserve(rkey, stage, amount)
@@ -647,7 +656,7 @@ class Gateway:
     def _basis(self, provider, settled_basis, *, known_none=False):
         if provider == "synthetic":
             return "synthetic"
-        if provider in ("openai", "opencode") and not known_none:
+        if provider in ("openai", "opencode", "claude-cli") and not known_none:
             return "estimated"          # subscription / free-model CLI usage priced at list or pacing rates: never a bill
         return settled_basis or ("measured" if known_none else "estimated")
 

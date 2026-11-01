@@ -1,0 +1,33 @@
+# Pullo review-model configuration variant (schema pullo-config@1): the Claude Code CLI review arm on the user's Claude
+# subscription, Claude Opus 5.5 (CLAUDE-CLI-PROVIDER). The sibling variant pullo-claude-cli.toml (Sonnet 5.5) differs only in the model.
+#
+# Select it explicitly with --config pullo-claude-cli-opus.toml. The default pullo.toml (Sonnet 5.5 through OpenRouter), the Terra and
+# opencode variants and the common scoring judge are unchanged by this file.
+#
+# provider "claude-cli" = Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`, exactly 2.1.309)
+# on the user's subscription (OAuth), never the OpenRouter key: $0 actual (billingKind claude-subscription). Allowed models
+# (exact ids): claude-cli/claude-sonnet-5-5, claude-cli/claude-opus-5-5. Every call runs `claude -p` with NO tools
+# (--tools "", --strict-mcp-config, no settings sources, no slash commands, file mentions off) in a fresh per-call home
+# (claude-cli-isolated@1) inside a bwrap sandbox that hides the whole user home (no ~/.claude path is exposed: the OAuth
+# access token arrives on an inherited pipe fd); audited stream-json; no retries (a scheduled CLI retry is killed before it
+# is sent), one agent turn, no thinking, no repairs or fallbacks; the role schema is quoted in the prompt and the answer is
+# parsed strictly. A usage limit, rate limit, overload or auth failure latches the run. The engine paces the run with the
+# Anthropic LIST rates of the same model (an API-equivalent estimate, not money).
+#
+# Before the first live use, root runs the one-call canary (python3 -m reviewer.runtime.claude_canary --confirm-live; see
+# the claude-cli runbook). The spend authorization named by --auth must list provider "claude-cli" and these models; its
+# dollar fields bound the API-equivalent estimates. This file selects models only and authorizes nothing.
+
+schema = "pullo-config@1"
+
+[review.investigator]
+provider = "claude-cli"
+model = "claude-cli/claude-opus-5-5"
+
+[review.verifier]
+provider = "claude-cli"
+model = "claude-cli/claude-opus-5-5"
+
+[review.judge]
+provider = "claude-cli"
+model = "claude-cli/claude-opus-5-5"

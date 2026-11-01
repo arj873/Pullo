@@ -6,6 +6,9 @@ Each role's provider comes from its ModelProfile entry (pullo.toml model -> prov
   opencode  -> OpenCodeFreeProvider (OpenCode Zen free models through the installed opencode CLI, opencode-isolated-home@2;
                OPENCODE-FREE-PROVIDER). It is a CLI arm like Terra: live_arm() calls it "terra" (its own operator-created
                CLI-arm state dir, never the OpenRouter trial state, never the key) and live_terra() returns CliProviders.
+  claude-cli -> ClaudeCliProvider (Claude Opus/Sonnet 5.5 through the installed Claude Code CLI on the user's subscription,
+               no tools, claude-cli-isolated@1; CLAUDE-CLI-PROVIDER). A CLI arm like opencode: "terra" state layout,
+               CliProviders(..., claude=adapter).
 A provider no role uses is a DisabledProvider, so an arm that needs no OpenRouter role never loads the key, and an
 arm with no Terra role never runs the Codex CLI preflight. Plan mode captures both kinds in call order without
 sending anything; the Terra capture declares the same billing kind as the live adapter, so the gateway takes the
@@ -22,6 +25,8 @@ from reviewer.gateway.errors import typed_error
 from reviewer.gateway.providers import ProviderResult
 from reviewer.pipeline.errors import PipelineError
 from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
+from reviewer.runtime.claude_cli import ClaudeCliProvider, ClaudeCliUnsupported
+from reviewer.runtime.claude_cli import request_facts as claude_request_facts
 from reviewer.runtime.codex_cli import CodexTerraProvider, CodexUnsupported, request_facts
 from reviewer.runtime.opencode_cli import OpenCodeFreeProvider, OpenCodeUnsupported
 from reviewer.runtime.opencode_cli import request_facts as opencode_request_facts
@@ -42,15 +47,16 @@ class TerraStateError(ValueError):
 
 
 class CliProviders:
-    """The CLI adapters of an opencode arm (what live_terra/plan_providers return when a role uses opencode): `openai` and
-    `opencode`, each a live/plan adapter or a DisabledProvider. A Terra-only arm keeps receiving the bare Codex adapter."""
+    """The CLI adapters of an opencode or claude-cli arm (what live_terra/plan_providers return when a role uses one):
+    `openai`, `opencode` and (claude-cli arms only) `claude`, each a live/plan adapter or a DisabledProvider. A Terra-only
+    arm keeps receiving the bare Codex adapter."""
 
-    def __init__(self, openai, opencode):
-        self.openai, self.opencode = openai, opencode
+    def __init__(self, openai, opencode, claude=None):
+        self.openai, self.opencode, self.claude = openai, opencode, claude
 
     @property
     def calls(self):
-        return getattr(self.openai, "calls", 0) + getattr(self.opencode, "calls", 0)
+        return getattr(self.openai, "calls", 0) + getattr(self.opencode, "calls", 0) + getattr(self.claude, "calls", 0)
 
 
 class ReviewProviders:
@@ -58,6 +64,8 @@ class ReviewProviders:
         if isinstance(terra, CliProviders):       # an opencode arm: route provider=opencode requests to its adapter
             self.mapping = {"anthropic": router, "openai": terra.openai, "synthetic": DisabledProvider("synthetic"),
                             "opencode": terra.opencode}
+            if terra.claude is not None:          # a claude-cli arm (CLAUDE-CLI-PROVIDER)
+                self.mapping["claude-cli"] = terra.claude
         else:                                     # every other arm: the mapping exactly as before
             self.mapping = {"anthropic": router, "openai": terra, "synthetic": DisabledProvider("synthetic")}
 
@@ -82,7 +90,11 @@ def live_arm(profile) -> str:
     if free and (router or terra):            # OPENCODE-FREE-PROVIDER: an opencode arm runs every role on opencode
         raise TerraStateError("live mixed opencode arms are not supported: run all roles on opencode free models "
                               "(plan mode still shows a mixed arm's requests)")
-    return "terra" if terra or free else "router"
+    claude = needs(profile, "claude-cli")
+    if claude and (router or terra or free):  # CLAUDE-CLI-PROVIDER: a claude-cli arm runs every role on claude-cli
+        raise TerraStateError("live mixed claude-cli arms are not supported: run all roles on claude-cli models "
+                              "(plan mode still shows a mixed arm's requests)")
+    return "terra" if terra or free or claude else "router"
 
 
 def open_terra_state(state_dir, handle, baseline: int) -> tuple:
@@ -113,11 +125,21 @@ def open_terra_state(state_dir, handle, baseline: int) -> tuple:
     return SpendBook(handle, state / TERRA_BOOK_NAME), ledger
 
 
-def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider, opencode_factory=OpenCodeFreeProvider):
+def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider, opencode_factory=OpenCodeFreeProvider,
+               claude_factory=ClaudeCliProvider):
     """The live Terra adapter for this run (its offline CLI/prompt-isolation preflight runs here, before any output
     exists), or a DisabledProvider when no role uses openai. An unsupported CLI is a typed config refusal.
     An opencode arm gets CliProviders(DisabledProvider("openai"), OpenCodeFreeProvider) (its offline preflight - exact CLI
     version, credential-less offline catalog, loopback capture proofs - runs here too)."""
+    if needs(profile, "claude-cli"):                  # CLAUDE-CLI-PROVIDER: offline preflight + capture proofs run here
+        if needs(profile, "openai") or needs(profile, "anthropic") or needs(profile, "opencode"):
+            raise PipelineError("config", "live mixed claude-cli arms are not supported")
+        models = sorted({s["model"] for s in [*profile["roles"].values(), *profile.get("alternates", {}).values()]})
+        try:
+            return CliProviders(DisabledProvider("openai"), DisabledProvider("opencode"),
+                                claude_factory(enabled=True, ledger=ledger, run_scope=scope, models=models))
+        except ClaudeCliUnsupported as e:
+            raise PipelineError("config", f"claude-cli isolation preflight failed: {str(e)[:300]}") from e
     if needs(profile, "opencode"):
         if needs(profile, "openai") or needs(profile, "anthropic"):
             raise PipelineError("config", "live mixed opencode arms are not supported")
@@ -149,6 +171,8 @@ class PlanCapture:
                 out.append(request_facts(item))
             elif kind == "opencode":
                 out.append(opencode_request_facts(item))
+            elif kind == "claude-cli":
+                out.append(claude_request_facts(item))
             elif item < len(transport_requests):
                 out.append(router_facts(transport_requests[item]))
         seen = {i for k, i in self.order if k == "anthropic"}
@@ -186,6 +210,21 @@ class OpenCodePlanProvider:
                               "not-sent")
 
 
+class ClaudeCliPlanProvider:
+    """Plan-only stand-in for ClaudeCliProvider: records the request, never runs the CLI."""
+    name = "claude-cli"
+    billing_kind = "claude-subscription"
+
+    def __init__(self, capture: PlanCapture):
+        self.capture, self.calls = capture, 0
+
+    def call(self, request, key):
+        self.calls += 1
+        self.capture.order.append(("claude-cli", request))
+        return ProviderResult(None, typed_error("provider-error", "plan mode: nothing is sent", retryable=False),
+                              "not-sent")
+
+
 class _RouterPlanTap:
     """Marks where in the call order an OpenRouter plan request was captured, then delegates unchanged."""
 
@@ -209,6 +248,9 @@ def plan_providers(profile, transport, router_factory) -> tuple[ReviewProviders,
     router = (_RouterPlanTap(router_factory(), capture, transport) if needs(profile, "anthropic")
               else DisabledProvider("anthropic"))
     terra = TerraPlanProvider(capture) if needs(profile, "openai") else DisabledProvider("openai")
+    if needs(profile, "claude-cli"):              # CLAUDE-CLI-PROVIDER: same order capture, claude-cli request facts
+        oc = OpenCodePlanProvider(capture) if needs(profile, "opencode") else DisabledProvider("opencode")
+        return ReviewProviders(router, CliProviders(terra, oc, ClaudeCliPlanProvider(capture))), capture
     if needs(profile, "opencode"):                # OPENCODE-FREE-PROVIDER: same order capture, opencode request facts
         return ReviewProviders(router, CliProviders(terra, OpenCodePlanProvider(capture))), capture
     return ReviewProviders(router, terra), capture
@@ -225,6 +267,8 @@ def planned_request(request):
         return request_facts(request)
     if request["provider"] == "opencode":
         return opencode_request_facts(request)
+    if request["provider"] == "claude-cli":
+        return claude_request_facts(request)
     return None
 
 

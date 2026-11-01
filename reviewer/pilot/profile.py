@@ -10,8 +10,8 @@ from __future__ import annotations
 from reviewer.config import ReviewModels
 from reviewer.contracts import validate
 from reviewer.contracts.budget import HOST_STOP_RECORDING, STANDARD_S0A_BUDGET
-from reviewer.runtime.catalog import (ALLOWED_ROUTER_MODELS, OPENCODE_MODELS, TERRA_MODELS, gateway_price,
-                                      opencode_gateway_price, terra_gateway_price)
+from reviewer.runtime.catalog import (ALLOWED_ROUTER_MODELS, CLAUDE_CLI_MODELS, OPENCODE_MODELS, TERRA_MODELS,
+                                      claude_cli_gateway_price, gateway_price, opencode_gateway_price, terra_gateway_price)
 
 MODEL = "anthropic/claude-sonnet-5.5"
 PROFILE_ID = "pilot-live"
@@ -37,6 +37,9 @@ def model_fields(provider: str, m: str) -> dict:
     if m in OPENCODE_MODELS:
         return {"provider": provider, "model": m, "family": OPENCODE_MODELS[m]["family"],
                 "price": opencode_gateway_price(m)}
+    if m in CLAUDE_CLI_MODELS:                    # CLAUDE-CLI-PROVIDER: Anthropic list rates (API-equivalent; $0 actual)
+        return {"provider": provider, "model": m, "family": CLAUDE_CLI_MODELS[m]["family"],
+                "price": claude_cli_gateway_price(m)}
     return {"provider": provider, "model": m, "family": "gpt" if m in TERRA_MODELS else "claude",
             "price": terra_gateway_price(m) if m in TERRA_MODELS else gateway_price(m)}
 
@@ -49,7 +52,8 @@ def live_profile(model: str | None = None, output_caps: dict | None = None, time
         raise ProfileError("pass either model or models, not both")
     if models is None:
         model = MODEL if model is None else model
-        if model not in ALLOWED_ROUTER_MODELS and model not in TERRA_MODELS and model not in OPENCODE_MODELS:
+        if (model not in ALLOWED_ROUTER_MODELS and model not in TERRA_MODELS and model not in OPENCODE_MODELS
+                and model not in CLAUDE_CLI_MODELS):
             raise ProfileError("model is not in the exact OpenRouter allowlist")
         models = ReviewModels.uniform(model)
     caps = {**OUTPUT_CAPS, **(output_caps or {})}

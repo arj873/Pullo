@@ -183,3 +183,53 @@ def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) 
     p = OPENCODE_PACING_PRICE
     return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write, p["write"])
             + _ceil_cost(output, p["output"]))
+
+
+# ---------------------------------------------------------------- Claude Code CLI on the subscription (CLAUDE-CLI-PROVIDER)
+# provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`, exactly 2.1.309) on
+# the user's Claude subscription (OAuth), with NO tools. Pullo-side ids are namespaced `claude-cli/<cli model id>` so the
+# allowlists stay disjoint (the model alone names its provider) and the bare `claude-opus-5-5` stays a development-only id
+# (contracts.DEV_ONLY_MODELS) for every other path. Only these entries are allowed (exact ids); the CLI gets `cliModel`.
+CLAUDE_CLI_VERSION = "2.1.309"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI
+CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@1"
+CLAUDE_CLI_MODELS: dict[str, dict] = {
+    "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "router": "anthropic/claude-opus-5.5",
+                                   "contextTokens": 1_000_000, "outputTokens": 128_000},
+    "claude-cli/claude-sonnet-5-5": {"cliModel": "claude-sonnet-5-5", "family": "claude",
+                                     "router": "anthropic/claude-sonnet-5.5", "contextTokens": 1_000_000,
+                                     "outputTokens": 128_000},
+}
+CLAUDE_CLI_DEFAULT_MODEL = "claude-cli/claude-sonnet-5-5"
+# The subscription costs $0 per call (`billingKind` claude-subscription: no bill, no key, no SpendBook). The engine paces a
+# run with the ANTHROPIC LIST RATES of the same model (the OpenRouter catalog rows above, which equal Anthropic's list
+# prices), so receipts carry an API-equivalent estimate. The CLI writes its prompt cache with the 1-hour TTL under OAuth,
+# so measured cache writes are paced at the 1h write rate. Never money.
+CLAUDE_CLI_PRICE_VERSION = "claude-cli-pacing@anthropic-list-2026-10-25"
+
+
+def _claude_cli_rates(model: str) -> dict:
+    if model not in CLAUDE_CLI_MODELS:
+        raise ValueError("unknown claude-cli model")
+    return ALLOWED_ROUTER_MODELS[CLAUDE_CLI_MODELS[model]["router"]]
+
+
+def claude_cli_gateway_price(model: str) -> dict:
+    p = _claude_cli_rates(model)
+    return {"priceVersion": CLAUDE_CLI_PRICE_VERSION, "inputPerMTokUsdMicros": p["input"],
+            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write1h"],
+            "outputPerMTokUsdMicros": p["output"]}
+
+
+def claude_cli_worst_case_micros(model: str, request_bytes: int, max_output_tokens: int) -> int:
+    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearest input rate (the 1h cache
+    write) plus the full output cap at the output rate."""
+    p = _claude_cli_rates(model)
+    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write1h"]))
+            + _ceil_cost(max_output_tokens, p["output"]))
+
+
+def claude_cli_pacing_micros(model: str, uncached: int, cached: int, write5m: int, write1h: int, output: int) -> int:
+    """List-rate arithmetic for measured usage (receipts only; the actual charge is $0)."""
+    p = _claude_cli_rates(model)
+    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write5m, p["write"])
+            + _ceil_cost(write1h, p["write1h"]) + _ceil_cost(output, p["output"]))

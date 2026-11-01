@@ -445,6 +445,9 @@ def _one(o, paths, case, cd, pins, profile, plan, handle, book, ledger, runs, wo
             if needs(profile, "opencode"):        # OPENCODE-FREE-PROVIDER: same rule for the free-model CLI arm
                 raise PilotError("live opencode arms run through the repository/benchmark hosts with their own CLI-arm "
                                  "state dir; this historical pilot only plans them")
+            if needs(profile, "claude-cli"):      # CLAUDE-CLI-PROVIDER: same rule for the subscription CLI arm
+                raise PilotError("live claude-cli arms run through the repository/benchmark hosts with their own CLI-arm "
+                                 "state dir; this historical pilot only plans them")
             terra = live_terra(profile, ledger, scope)
             key, router = None, DisabledProvider("anthropic")
             if needs(profile, "anthropic"):

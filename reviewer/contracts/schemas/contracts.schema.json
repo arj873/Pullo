@@ -2145,7 +2145,8 @@
                     "anthropic",
                     "openai",
                     "synthetic",
-                    "opencode"
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2298,7 +2299,8 @@
                     "anthropic",
                     "openai",
                     "synthetic",
-                    "opencode"
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2440,7 +2442,8 @@
                     "anthropic",
                     "openai",
                     "synthetic",
-                    "opencode"
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2582,7 +2585,8 @@
                     "anthropic",
                     "openai",
                     "synthetic",
-                    "opencode"
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2721,7 +2725,8 @@
             "anthropic",
             "openai",
             "synthetic",
-            "opencode"
+            "opencode",
+            "claude-cli"
           ]
         },
         "role": {
@@ -4343,7 +4348,8 @@
               "anthropic",
               "openai",
               "synthetic",
-              "opencode"
+              "opencode",
+              "claude-cli"
             ]
           },
           "minItems": 1,

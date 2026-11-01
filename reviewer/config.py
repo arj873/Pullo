@@ -5,7 +5,7 @@ or in a file the operator names with `--config`. The file is NEVER discovered fr
 current working directory or repository instructions. It selects models only: no secrets, hooks, budgets, retries,
 fallbacks or account settings, and it cannot authorize anything the spend authorization and the exact allowlists
 (OpenRouter for provider anthropic, the pinned GPT Terra models for provider openai, the pinned opencode free
-models for provider opencode) do not already allow. Unknown fields, unsupported providers and unknown models are refused, never
+models for provider opencode, the pinned Claude Code CLI models for provider claude-cli) do not already allow. Unknown fields, unsupported providers and unknown models are refused, never
 replaced by a fallback. Development-worker models are a separate concern and are not read here.
 
 Identity: the effective selection is bound through the ModelProfile it produces (role model and price are in the
@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reviewer.contracts.canonical import digest
-from reviewer.runtime.catalog import (ALLOWED_ROUTER_MODELS, OPENCODE_ISOLATION_VERSION, OPENCODE_MODELS, TERRA_MODELS,
-                                      TERRA_ISOLATION_VERSION)
+from reviewer.runtime.catalog import (ALLOWED_ROUTER_MODELS, CLAUDE_CLI_ISOLATION_VERSION, CLAUDE_CLI_MODELS,
+                                      OPENCODE_ISOLATION_VERSION, OPENCODE_MODELS, TERRA_MODELS, TERRA_ISOLATION_VERSION)
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = APP_ROOT / "pullo.toml"
@@ -41,16 +41,21 @@ ALT_ROLE = "investigator_alt"               # optional: the impact@v7/@v10 alter
 PROVIDER = "anthropic"                      # default: Anthropic models through OpenRouter (paid, the $50 trial key)
 OPENAI = "openai"                           # GPT Terra through the installed Codex CLI (ChatGPT subscription)
 OPENCODE = "opencode"                       # OpenCode Zen FREE models through the installed opencode CLI (no key, $0)
-PROVIDER_MODELS = {PROVIDER: frozenset(ALLOWED_ROUTER_MODELS), OPENAI: TERRA_MODELS, OPENCODE: frozenset(OPENCODE_MODELS)}
+CLAUDE_CLI = "claude-cli"                   # Claude Opus/Sonnet 5.5 through the installed Claude Code CLI (subscription, $0)
+PROVIDER_MODELS = {PROVIDER: frozenset(ALLOWED_ROUTER_MODELS), OPENAI: TERRA_MODELS, OPENCODE: frozenset(OPENCODE_MODELS),
+                   CLAUDE_CLI: frozenset(CLAUDE_CLI_MODELS)}
 # openai was held until the preventive per-call isolation existed. It now runs ONLY through CodexTerraProvider, whose
 # single execution path builds a fresh isolated CODEX_HOME per call (TERRA_ISOLATION_VERSION) after an offline
 # prompt-isolation proof, so accepting the provider here cannot bypass the isolation. Re-holding is one entry here.
 HELD_PROVIDERS: dict[str, str] = {}
 # opencode runs ONLY through OpenCodeFreeProvider (fresh credential-less home per call, every tool denied, audited
 # stream + session DB, offline loopback capture proof in the preflight): OPENCODE-FREE-PROVIDER.
-ISOLATION = {OPENAI: TERRA_ISOLATION_VERSION, OPENCODE: OPENCODE_ISOLATION_VERSION}
+# claude-cli runs ONLY through ClaudeCliProvider (fresh per-call home, no tools, OAuth access token on an inherited fd, masked
+# bwrap sandbox, offline loopback capture proof in the preflight): CLAUDE-CLI-PROVIDER.
+ISOLATION = {OPENAI: TERRA_ISOLATION_VERSION, OPENCODE: OPENCODE_ISOLATION_VERSION, CLAUDE_CLI: CLAUDE_CLI_ISOLATION_VERSION}
 BILLING = {OPENAI: "subscription-consumption (API-equivalent estimate)",
-           OPENCODE: "free-model ($0; pacing estimate at Terra-6 list rates, not money)"}
+           OPENCODE: "free-model ($0; pacing estimate at Terra-6 list rates, not money)",
+           CLAUDE_CLI: "claude-subscription ($0; API-equivalent estimate at Anthropic list rates, not money)"}
 MAX_BYTES = 8192
 _TOP, _REVIEW, _ROLE = {"schema", "review"}, set(ROLES) | {ALT_ROLE}, {"provider", "model"}
 
@@ -72,7 +77,7 @@ class ReviewModels:
             if not isinstance(m, str) or not any(m in ms for ms in PROVIDER_MODELS.values()):
                 raise ConfigError(f"{r}: model is not in the exact allowlists (anthropic via OpenRouter "
                                   f"{sorted(ALLOWED_ROUTER_MODELS)}, openai {sorted(TERRA_MODELS)}, "
-                                  f"opencode {sorted(OPENCODE_MODELS)})")
+                                  f"opencode {sorted(OPENCODE_MODELS)}, claude-cli {sorted(CLAUDE_CLI_MODELS)})")
             if self.provider(r) in HELD_PROVIDERS:
                 raise ConfigError(f"{r}: {HELD_PROVIDERS[self.provider(r)]}")
 
@@ -86,7 +91,8 @@ class ReviewModels:
     def provider(self, role: str) -> str:
         """The allowlists are disjoint, so the model alone names its provider."""
         m = self.model(role)
-        return OPENAI if m in TERRA_MODELS else OPENCODE if m in OPENCODE_MODELS else PROVIDER
+        return (OPENAI if m in TERRA_MODELS else OPENCODE if m in OPENCODE_MODELS else CLAUDE_CLI if m in CLAUDE_CLI_MODELS
+                else PROVIDER)
 
     def alternates_doc(self) -> dict:
         """{} without an alternate, else {"investigator": {provider, model}} (the impact@v7/@v10 alternate)."""

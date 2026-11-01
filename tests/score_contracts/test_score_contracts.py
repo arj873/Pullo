@@ -184,9 +184,43 @@ OPENCODE_DEF_DIGESTS = {
 }
 
 
-def minus_opencode(d):
-    """Remove the one trailing "opencode" member from every provider enum (asserting where it sits)."""
+# CLAUDE-CLI-PROVIDER (declared for root acceptance, NOT self-approved): the same shared provider enum gains one more trailing
+# member, "claude-cli", after "opencode" (the same six enum sites). `minus_claude_cli` removes exactly that member; the
+# opencode-era digests above must still hold on the result (so the gated opencode delta is unchanged), and the three
+# definitions' new digests are pinned on their own, so no other change is excused.
+CLAUDE_CLI_DEF_DIGESTS = {
+    "ModelProfile": "sha256:1e49d1b30b6ea7c46fbeb10d54c1ae7e81c0bf9afde0ca950e876e7f124f1201",
+    "ModelRequest": "sha256:5ec5b97442857df344232ff36e64826921ba8b5c21e1a3e88fc6cfddffe77a34",
+    "SpendAuthorization": "sha256:f99cb801e7e4c5fdbcbb85e4526c1f12c9b8b1bb8fbe44b98e100993eee3a09f",
+}
+
+
+def minus_claude_cli(d):
+    """Remove the one trailing "claude-cli" member (right after "opencode") from every provider enum (asserting where)."""
     d = copy.deepcopy(d)
+    hits = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            e = n.get("enum")
+            if isinstance(e, list) and e[:3] == LEGACY_PROVIDERS and "claude-cli" in e:
+                assert e == LEGACY_PROVIDERS + ["opencode", "claude-cli"], e
+                n["enum"] = LEGACY_PROVIDERS + ["opencode"]
+                hits.append(1)
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+    walk(d)
+    assert hits, "no provider enum carries the declared claude-cli member"
+    return d
+
+
+def minus_opencode(d):
+    """Remove the one trailing "opencode" member from every provider enum (asserting where it sits); the claude-cli
+    member after it is removed first."""
+    d = minus_claude_cli(d)
     hits = []
 
     def walk(n):
@@ -356,7 +390,9 @@ class Compatibility(Base):
         self.assertEqual(dig(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
         self.assertEqual(dig(minus_opencode(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"])),
                          ALTERNATES_DIGEST)                                     # OPENCODE-FREE-PROVIDER enum subtracted
-        for name, want in OPENCODE_DEF_DIGESTS.items():                         # the declared new shapes, exactly
+        for name, want in OPENCODE_DEF_DIGESTS.items():                         # the opencode-era shapes, unchanged
+            self.assertEqual(dig(minus_claude_cli(REGISTRY[name].to_json())), want, name)
+        for name, want in CLAUDE_CLI_DEF_DIGESTS.items():                       # CLAUDE-CLI-PROVIDER: the new shapes, exactly
             self.assertEqual(dig(REGISTRY[name].to_json()), want, name)
         self.assertEqual(dig(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
