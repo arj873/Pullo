@@ -119,7 +119,7 @@ def sandbox_probe(stdin: bytes) -> dict:
 PROBE_MARK = "PULLO-SANDBOX-PROBE:"
 
 
-def simulate(scenario, argv, stdin, env, cwd, *, answer=None):
+def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
     """-> (stdout lines, returncode, stderr bytes, sleep seconds). Side effects in the per-call home/cwd."""
     m = cli_model(argv)
     ans = json.dumps(OK_INV) if answer is None else answer
@@ -205,6 +205,9 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None):
     if scenario == "write-cred":
         Path(env["CLAUDE_CONFIG_DIR"], ".credentials.json").write_text("{}")
         return [i, text(m, ans), result(m, ans)], 0, b"", 0
+    if scenario == "persist-token":           # a CLI that cached the OAuth token in its config: must disable the adapter
+        Path(env["HOME"], ".claude.json").write_text(json.dumps({"oauthAccount": {"token": token}}))
+        return [i, text(m, ans), result(m, ans)], 0, b"", 0
     if scenario == "sandbox-probe":           # executable fake only: report what the sandboxed process sees
         t = json.dumps(sandbox_probe(stdin))
         return [i, text(m, t), result(m, t)], 0, b"", 0
@@ -225,7 +228,7 @@ class ScriptedRunner:
                           "cwd_listing": os.listdir(cwd), "scenario": sc,
                           "tokenSha256": hashlib.sha256(token.reveal().encode()).hexdigest() if token else None})
         ans = json.dumps(self.answers.pop(0)) if self.answers else self.answer
-        lines, rc, err, sleep = simulate(sc, argv, stdin, env, cwd, answer=ans)
+        lines, rc, err, sleep = simulate(sc, argv, stdin, env, cwd, answer=ans, token=token.reveal() if token else None)
         aborted, out = None, b""
         for ln in lines:
             out += ln.encode() + b"\n"

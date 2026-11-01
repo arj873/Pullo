@@ -695,10 +695,26 @@ def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None =
 
 # ------------------------------------------------------------------ post-call audits
 
-def audit_work_after(work: str) -> dict:
-    """By entry NAME only: a credential/settings/extension name anywhere under the per-call home, or anything written
-    into the cwd, is an isolation failure."""
+def audit_work_after(work: str, secret: Secret | None = None) -> dict:
+    """By entry NAME: a credential/settings/extension name anywhere under the per-call home, or anything written into the
+    cwd, is an isolation failure. With `secret`, every file the CLI left in the work dir is also scanned for the OAuth token
+    bytes (2.1.309 persists none: proved offline): a hit means the token reached disk."""
     p, forbidden, entries = Path(work), [], []
+    if secret is not None:
+        needle, budget = secret.reveal().encode("ascii"), 64 << 20
+        try:
+            for root, _dirs, files in os.walk(p):
+                for n in files:
+                    fp = Path(root, n)
+                    if fp.is_symlink() or not fp.is_file() or budget <= 0:
+                        continue
+                    with open(fp, "rb") as f:
+                        data = f.read(min(budget, 8 << 20))
+                    budget -= len(data)
+                    if needle in data:
+                        forbidden.append("token-persisted:" + str(fp.relative_to(p))[:60])
+        except OSError:
+            return {"ok": False, "forbidden": ["<work dir unreadable>"], "entries": []}
     try:
         for root, dirs, files in os.walk(p / "home"):
             depth = len(Path(root).relative_to(p).parts)
@@ -1011,7 +1027,7 @@ class ClaudeCliProvider:
                 return self._done(ck, t0, "unknown", self._err("provider-error", f"claude runner failed: {type(e).__name__}",
                                                               "unknown", reason="runner-crash"))
             iso["requestsSeen"] = self._seen(audit)
-            after = audit_work_after(work)
+            after = audit_work_after(work, token.secret)
             iso["workAfter"] = {k: after[k] for k in ("ok", "forbidden", "entries")}
             if not after["ok"]:
                 with self._lock:

@@ -303,7 +303,7 @@ class Calls(Base):
                 self.assertEqual((res.outcome, d["reason"], d["itemType"]), ("unknown", "isolation-violation", item))
 
     def test_a_written_cwd_or_a_persisted_credential_disables_the_adapter(self):
-        for sc in ("write-cwd", "write-cred"):
+        for sc in ("write-cwd", "write-cred", "persist-token"):
             with self.subTest(sc):
                 p = self.prov(sc, "ok")
                 res = p.call(F.claude_request(), KEY)
@@ -494,6 +494,9 @@ class Audits(unittest.TestCase):
             self.assertTrue(C.audit_work_after(d)["ok"])
             Path(d, "home", ".claude", "settings.json").write_text("{}")
             self.assertEqual(C.audit_work_after(d)["forbidden"], ["home/.claude/settings.json"])
+            Path(d, "tmp", "x.log").write_text("..." + F.DUMMY_TOKEN + "...")
+            self.assertIn("token-persisted:tmp/x.log", C.audit_work_after(d, F.dummy_token().secret)["forbidden"])
+            self.assertNotIn("token-persisted:tmp/x.log", C.audit_work_after(d)["forbidden"])
 
 
 def capture_out(**over):
