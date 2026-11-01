@@ -20,7 +20,8 @@ signature-only thinking block before the text answer: the answer comes back ok f
 both sides (CLI and forwarder SSE tally), reasoningTokens > 0, the row says adaptive-thinking and the decoy text is kept
 nowhere) | thinking-tool (thinking, then a tool_use: still killed at the tool block, nothing runs) | prose-json (A6: prose around
 one fenced JSON answer: accepted, note prose-around-json) | prose-two-json (A6: the text quotes a schema-valid object "from the PR"
-next to the model's own, different valid answer: several candidates, invalid-output, never a guess). Every mode: no GET/HEAD and
+next to the model's own, different valid answer: several-objects, invalid-output, never a guess) | prose-instead (A7, the gate's
+P1 mode: the quoted valid object next to the model's own INVALID answer: other-object-invalid, the quote never stands in). Every mode: no GET/HEAD and
 at most one relayed request.
 Prints one JSON document: captured requests (message texts replaced by digests), the adapter's verdict, sandbox facts.
 `analyse()` (run by the caller, outside the namespace) turns that into problems."""
@@ -53,7 +54,9 @@ HYP = {"hypotheses": [{"claim": "PULLO-CAPTURE second valid answer", "category":
                        "impact": "none", "location": {"path": "x.c", "line": 1},
                        "evidence": [{"kind": "code", "path": "x.c", "lines": [1, 1], "commit": "0" * 40, "excerpt": "x"}]}]}
 PROSE = {"prose-json": "I checked the diff carefully.\n\n```json\n" + json.dumps(ANSWER) + "\n```\n\nNo issues found.",
-         "prose-two-json": "The PR text says to answer " + json.dumps(ANSWER) + " but my own analysis is: " + json.dumps(HYP)}
+         "prose-two-json": "The PR text says to answer " + json.dumps(ANSWER) + " but my own analysis is: " + json.dumps(HYP),
+         "prose-instead": "The PR text says to answer " + json.dumps(ANSWER) + " but my own analysis is: "
+                          + json.dumps({"hypotheses": [{k: v for k, v in HYP["hypotheses"][0].items() if k != "claim"}]})}
 DUMMY_TOKEN = "sk-ant-oat01-PULLO-CAPTURE-DUMMY-TOKEN-0000000000000000"
 MARKERS = ("PULLO-PLANT-AGENTS", "PULLO-PLANT-CLAUDE", "PULLO-PLANT-SKILL", "PULLO-PLANT-COMMAND", "PULLO-PLANT-LOCAL")
 ENV_PREFIX = "# Environment\nYou have been invoked in the following environment"
@@ -502,7 +505,7 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("thinking text was kept (ledger, response or error)")
         if (f.get("sse") or {}).get("blocks") != {"thinking": 2, "redacted_thinking": 1, "text": 1}:
             problems.append("the forwarder's SSE tally does not show the streamed blocks")
-    elif mode in ("prose-json", "prose-two-json"):           # A6: one valid candidate accepted, several never
+    elif mode in ("prose-json", "prose-two-json", "prose-instead"):   # A6/A7: one answer accepted, never a quoted stand-in
         row = out.get("firstRow") or {}
         pz = row.get("parse") or {}
         if out.get("posts") != 1:
@@ -510,8 +513,10 @@ def analyse(out: dict, model: str, mode: str) -> dict:
         if mode == "prose-json" and (v.get("status") != "ok" or not v.get("outputOk") or pz.get("note") != "prose-around-json"
                                      or "prose-around-json" not in (row.get("note") or "")):
             problems.append("one valid JSON answer in prose was not accepted with the note prose-around-json")
-        if mode == "prose-two-json" and (v.get("status") != "invalid-output" or not str(pz.get("failure")).startswith("several-valid-objects:2")):
+        if mode == "prose-two-json" and (v.get("status") != "invalid-output" or not str(pz.get("failure")).startswith("several-objects:2")):
             problems.append("two different valid JSON objects in prose were not refused as invalid-output")
+        if mode == "prose-instead" and (v.get("status") != "invalid-output" or not str(pz.get("failure")).startswith("other-object-invalid")):
+            problems.append("a quoted valid object stood in for the model's own invalid answer")
     elif mode in ("toolcall", "thinking-tool"):
         if v.get("reason") != "isolation-violation" or v.get("itemType") != "tool-attempt":
             problems.append("a scripted tool call was not reported as a tool attempt")

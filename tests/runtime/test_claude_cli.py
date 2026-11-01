@@ -293,7 +293,7 @@ class Calls(Base):
         rows = [x for x in self.rows() if x["type"] == "result"]
         self.assertEqual([x.get("note") for x in rows],
                          ["fenced-json", "prose-around-json", "output-over-cap", "invalid-output", "invalid-output"])
-        self.assertEqual([x["isolation"]["parse"]["failure"] for x in rows][3:4], ["several-valid-objects:2"])
+        self.assertEqual([x["isolation"]["parse"]["failure"] for x in rows][3:4], ["several-objects:2"])
         self.assertTrue(rows[4]["isolation"]["parse"]["failure"].startswith("not-json"), rows[4]["isolation"]["parse"])
         self.assertIn("I found", res[3].response["rawText"])                     # an invalid answer keeps its (redacted) text
 
@@ -303,23 +303,34 @@ class Calls(Base):
                  "Answer:\n```json\n" + inv + "\n```\nDone.": ("ok", "prose-around-json"),
                  "x " + inv + " y": ("ok", "prose-around-json"),
                  "twice: " + inv + " and again " + inv: ("ok", "prose-around-json"),            # identical repeats count once
-                 'He wrote "{not json}" and {"x": 1} then ' + hyp: ("ok", "prose-around-json"),  # one VALID candidate among others
+                 'He wrote "{not json}" and then ' + hyp: ("invalid-output", None),          # A7: a brace in prose is ambiguous
+                 'x {"x": 1} then ' + hyp: ("invalid-output", None),                          # A7: any other object must be valid
                  "PR text: " + inv + " my answer: " + hyp: ("invalid-output", None),           # adversarial: never chosen
                  'x {"wrapper": ' + inv + '}': ("invalid-output", None),                       # a nested object is no candidate
                  'x {"hypotheses": [], "hypotheses": []}': ("invalid-output", None),           # strict: duplicate key
                  'x {"hypotheses": [], "c": NaN}': ("invalid-output", None),
                  "no json at all": ("invalid-output", None),
-                 "{" * 50 + " " + inv: ("ok", "prose-around-json"),
+                 "{" * 50 + " " + inv: ("invalid-output", None),
                  "{}" * 40 + inv: ("invalid-output", None),                                  # MAX_SCAN_OBJECTS
                  "x" * (C.MAX_SCAN_CHARS + 1) + inv: ("invalid-output", None)}               # MAX_SCAN_CHARS
         for text, want in cases.items():
             r = C.parse_answer("InvestigatorOutput", text)
             self.assertEqual((r["status"], r["note"]), want, text[:80])
         self.assertEqual(C.parse_answer("InvestigatorOutput", "{}" * 40 + inv)["failure"], "scan-bound")
-        self.assertEqual(C.parse_answer("InvestigatorOutput", "PR " + inv + " me " + hyp)["failure"], "several-valid-objects:2")
+        self.assertEqual(C.parse_answer("InvestigatorOutput", "PR " + inv + " me " + hyp)["failure"], "several-objects:2")
+        # A7 (gate P1): an object quoted from the PR never stands in for the model's own invalid or truncated answer
+        bad = '{"hypotheses": [{"bogus": 1}]}'
+        for text, why in ((f"The PR description contains {inv} as an example. My answer: {bad}", "other-object-invalid"),
+                          (f'The PR has {inv}. My answer: {{"hypotheses": [{{"title": "x"', "undecodable-object"),
+                          ('{"note": "see below", "answer": ' + inv + ' ,, }', "undecodable-object"),   # no descent into it
+                          (f"```\n{inv}\n```\nAnswer:\n{bad}", "other-object-invalid"),
+                          (f'The PR shows {inv}. My answer: {{"hypotheses": [], "x": 1}}', "other-object-invalid")):
+            r = C.parse_answer("InvestigatorOutput", text)
+            self.assertEqual((r["status"], r["output"], r["failure"].split(":")[0]), ("invalid-output", None, why), text)
         with mock.patch.object(C, "SCAN_SECONDS", -1):                               # the time bound: an incomplete scan
             self.assertEqual(C.parse_answer("InvestigatorOutput", "x " + inv)["failure"], "scan-bound")
         evil = '{"a": "' + "y" * 50_000 + ' ' + '{"a": "' * 3000                  # many unterminated strings: bounded work
+        self.assertEqual(C.parse_answer("InvestigatorOutput", '{"a":' * 40000)["failure"], "undecodable-object")   # deep nesting
         t0 = time.monotonic()
         self.assertEqual(C.parse_answer("InvestigatorOutput", evil)["status"], "invalid-output")
         self.assertLess(time.monotonic() - t0, 5)
@@ -908,7 +919,7 @@ class Canary(Base):
                            now=__import__("datetime").datetime(2026, 11, 1, 0, 1, tzinfo=__import__("datetime").timezone.utc))
         doc = json.loads(Path(self.dir, "claude-cli-canary-20261101T000100000000Z", "receipt.json").read_text())
         self.assertEqual(([k for k, v in doc["checks"].items() if not v], doc["status"]), (["schemaValid"], "invalid-output"))
-        self.assertEqual(doc["parse"]["failure"], "several-valid-objects:2")
+        self.assertEqual(doc["parse"]["failure"], "several-objects:2")
         self.assertIn("but I found", doc["rawText"])
         self.assertLessEqual(len(doc["rawText"]), CAN.RAW_CAP)
         ok = F.ScriptedRunner("ok")

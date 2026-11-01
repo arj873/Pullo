@@ -81,12 +81,15 @@ ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
   * Structured output: the role's ANTHROPIC schema projection (the bytes the OpenRouter adapter sends as response_format)
     is quoted in the prompt; the CLI cannot enforce it without the StructuredOutput tool. The answer (the result text) is
     parsed strictly (duplicate keys, NaN -> invalid-output) and validated locally (parse_answer). Tolerances, never a repair (no
-    re-send, no re-prompt): ONE Markdown ```json fence around the whole answer (note "fenced-json"), and (A6, root decision) prose
-    around the JSON: the top-level JSON objects of the text are collected (json_candidates, bounded by MAX_SCAN_CHARS /
-    MAX_SCAN_OBJECTS / SCAN_SECONDS) and EXACTLY ONE distinct candidate that parses strictly and validates is accepted (note
-    "prose-around-json"); zero, several (e.g. PR text quoting a valid object next to the model's own answer) or an incomplete
-    scan -> invalid-output. Thinking text is never a candidate (it is not part of the result text). The parse facts (note,
-    failure reason, candidate count) are kept in isolation.parse. No repair call, no retry, no fallback.
+    re-send, no re-prompt): ONE Markdown ```json fence around the whole answer (note "fenced-json"), and (A6, root decision; A7
+    = gate P1) prose around ONE answer: the top-level JSON objects of the text are collected (json_candidates, bounded by
+    MAX_SCAN_CHARS / MAX_SCAN_OBJECTS / SCAN_SECONDS) and the answer is accepted (note "prose-around-json") only when EVERY one
+    of them parses strictly, validates, and is the SAME value. Any "{" that does not start a complete JSON value (a truncated or
+    malformed object, a brace in prose) makes the text ambiguous (undecodable-object), and any invalid object
+    (other-object-invalid) or a second, different one (several-objects:N) refuses too, so an object quoted from the PR can never
+    stand in for the model's own invalid or truncated answer; zero objects or an incomplete scan -> invalid-output as well.
+    Thinking text is never a candidate (it is not part of the result text). The parse facts (note, failure reason, candidate
+    count) are kept in isolation.parse. No repair call, no retry, no fallback.
   * Errors keep the CLI's own words: the result text (e.g. "You've hit your limit · resets 3:30pm (America/Chicago)"), the
     HTTP status, the CLI's error code (rate_limit, authentication_failed, server_error, ...), the rate-limit info
     (status, rateLimitType, resetsAt, utilization) and the provider request id go into the TypedError message/detail and
@@ -731,8 +734,8 @@ def isolation_identity(model: str) -> dict:
     return {"isolationVersion": CLAUDE_CLI_ISOLATION_VERSION, "cliVersion": CLAUDE_CLI_VERSION,
             "argvSha256": argv_digest(build_argv("claude", model)), "instructionsSha256": _sha(BASE_INSTRUCTIONS),
             "envSha256": env_digest(),
-            "structuredMode": "prompt-schema+strict-parse (whole JSON | one whole fence | exactly one valid object in prose; "
-                              "no --json-schema tool, no repair)",
+            "structuredMode": "prompt-schema+strict-parse (whole JSON | one whole fence | prose around objects that are all "
+                              "valid and identical; no --json-schema tool, no repair)",
             "schemaFlavor": SCHEMA_FLAVOR, "thinking": THINKING_POLICY, "effort": EFFORT, "maxTokensSent": OUTPUT_TOKENS,
             "auth": "oauth-access-token-via-inherited-fd (no ~/.claude path in the sandbox)",
             "endpoint": f"{FORWARDER_VERSION}: ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/c/<per-call token> relays ONE "
@@ -882,49 +885,58 @@ def _valid_answer(out_name: str, text: str):
     return (None, "schema: " + "; ".join(issues)[:300]) if issues else (val, None)
 
 
-def json_candidates(text: str) -> tuple[list[str], bool]:
-    """A6: the top-level JSON object spans of `text`: every "{" that starts a complete JSON value (what it contains is skipped,
-    so a nested object is never a candidate of its own), in order. -> (spans, complete); complete is False when a scan bound
-    stopped it. raw_decode only finds the span; every candidate is re-parsed strictly by the caller."""
+def json_candidates(text: str) -> tuple[list[str], str]:
+    """The top-level JSON object spans of `text`, in order: each "{" must start a complete JSON value, whose contents are
+    skipped (a nested object is never a candidate of its own). -> (spans, "complete" | "undecodable-object" | "scan-bound"):
+    A7 (gate P1): a "{" that does not start a complete JSON value (truncated, malformed, a brace in prose) ends the scan as
+    undecodable-object, so the scan never descends into a malformed outer object; a scan bound ends it as scan-bound.
+    raw_decode only finds a span; the caller re-parses every span strictly."""
     if len(text) > MAX_SCAN_CHARS:
-        return [], False
+        return [], "scan-bound"
     dec, out, i, starts = json.JSONDecoder(), [], 0, 0
     deadline = time.monotonic() + SCAN_SECONDS
     while True:
         i = text.find("{", i)
         if i < 0:
-            return out, True
+            return out, "complete"
         starts += 1
         if len(out) >= MAX_SCAN_OBJECTS or starts > MAX_SCAN_STARTS or time.monotonic() > deadline:
-            return out, False
+            return out, "scan-bound"
         try:
             _, j = dec.raw_decode(text, i)
         except (ValueError, RecursionError):
-            i += 1
-            continue
+            return out, "undecodable-object"
         out.append(text[i:j])
         i = j
 
 
 def parse_answer(out_name: str, text: str) -> dict:
     """The answer of a result text (see "Structured output" in the module docstring): the whole text or ONE whole fence, else
-    EXACTLY ONE distinct valid top-level JSON object (identical repeats count once). Never a repair. -> {status ok |
-    invalid-output, output, note (fenced-json | prose-around-json | None), failure (why invalid, else None), candidates}."""
+    prose around top-level JSON objects that ALL parse strictly, validate and are the same value (A7, gate P1: compared as the
+    strictly parsed values, so an extra key makes them different). Never a repair. -> {status ok | invalid-output, output,
+    note (fenced-json | prose-around-json | None), failure (why invalid, else None), candidates}."""
     candidate, fenced = extract_json_text(text)
     val, why = _valid_answer(out_name, candidate)
     if val is not None:
         return {"status": "ok", "output": val, "note": "fenced-json" if fenced else None, "failure": None, "candidates": None}
-    spans, complete = json_candidates(text)
-    good = {}
-    for sp in spans:
-        v, _ = _valid_answer(out_name, sp)
-        if v is not None:
-            good.setdefault(json.dumps(v, sort_keys=True), v)
-    if complete and len(good) == 1:
-        return {"status": "ok", "output": next(iter(good.values())), "note": "prose-around-json", "failure": None,
-                "candidates": len(spans)}
-    failure = (f"several-valid-objects:{len(good)}" if len(good) > 1 else "scan-bound" if not complete
-               else ("fenced " if fenced else "") + (why or "invalid"))
+    spans, scan = json_candidates(text)
+    failure, seen, out = None, set(), None
+    if scan != "complete":
+        failure = scan
+    elif not spans:
+        failure = ("fenced " if fenced else "") + (why or "invalid")
+    else:
+        for sp in spans:
+            v, bad = _valid_answer(out_name, sp)
+            if v is None:
+                failure = "other-object-invalid: " + bad
+                break
+            seen.add(json.dumps(loads_strict(sp), sort_keys=True))
+            out = v
+        if failure is None and len(seen) > 1:
+            failure = f"several-objects:{len(seen)}"
+    if failure is None:
+        return {"status": "ok", "output": out, "note": "prose-around-json", "failure": None, "candidates": len(spans)}
     return {"status": "invalid-output", "output": None, "note": None, "failure": failure[:400], "candidates": len(spans)}
 
 
@@ -1013,7 +1025,7 @@ def _probe(argv, environ=None, runner=None, timeout=60) -> tuple[RunResult, bool
 PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2", "thinking")
 CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "404-then-ok", "inject2",
                  "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings", "overage-tool",
-                 "overage-timeout", "thinking", "thinking-tool", "prose-json", "prose-two-json")
+                 "overage-timeout", "thinking", "thinking-tool", "prose-json", "prose-two-json", "prose-instead")
 
 
 def capture_argv(bwrap: str) -> list[str]:
