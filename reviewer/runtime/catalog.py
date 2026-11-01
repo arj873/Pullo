@@ -191,7 +191,7 @@ def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) 
 # allowlists stay disjoint (the model alone names its provider) and the bare `claude-opus-5-5` stays a development-only id
 # (contracts.DEV_ONLY_MODELS) for every other path. Only these entries are allowed (exact ids); the CLI gets `cliModel`.
 CLAUDE_CLI_VERSION = "2.1.309"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI
-CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@2"     # @2 (phase A3): host loopback forwarder, attachments off
+CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@3"     # @3 (phase A5): adaptive thinking admitted (passive, counted events)
 CLAUDE_CLI_MODELS: dict[str, dict] = {
     "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "contextTokens": 1_000_000,
                                    "outputTokens": 128_000},

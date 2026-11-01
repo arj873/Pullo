@@ -15,7 +15,11 @@ unified rate-limit headers; the CLI's words are kept, the adapter latches and re
 served from paid extra usage: latched, never $0) | max_tokens (the CLI's hidden continuation never reaches upstream) | inject /
 inject2 (`@path` mentions, `@agent-...`, `ultrathink`, decorators, a slash line, and planted AGENTS.md/CLAUDE.md/settings
 hooks/.mcp.json next to the cwd must not reach the request or run; the CLI system message must be EXACTLY the Environment
-block). Every mode: no GET/HEAD and at most one relayed request.
+block) | thinking (A5: adaptive thinking - a thinking block whose text is a DECOY answer, a redacted_thinking block and a
+signature-only thinking block before the text answer: the answer comes back ok from the text only, the blocks are counted on
+both sides (CLI and forwarder SSE tally), reasoningTokens > 0, the row says adaptive-thinking and the decoy text is kept
+nowhere) | thinking-tool (thinking, then a tool_use: still killed at the tool block, nothing runs). Every mode: no GET/HEAD and
+at most one relayed request.
 Prints one JSON document: captured requests (message texts replaced by digests), the adapter's verdict, sandbox facts.
 `analyse()` (run by the caller, outside the namespace) turns that into problems."""
 
@@ -40,6 +44,9 @@ from .envfile import Secret
 
 ANSWER = {"hypotheses": []}
 SCHEMA = "InvestigatorOutput"
+THINK_MARK = "PULLO-CAPTURE-THINKING-TEXT"      # thinking text: must never be parsed as the answer or kept anywhere (A5)
+THINK_DECOY = THINK_MARK + ' decoy answer: {"hypotheses": [{"claim": "PULLO-DECOY"}]}'
+SIGNATURE = "EqQBCkYIBRgCKkBPULLOCAPTURESIGNATURE" + "A" * 64
 DUMMY_TOKEN = "sk-ant-oat01-PULLO-CAPTURE-DUMMY-TOKEN-0000000000000000"
 MARKERS = ("PULLO-PLANT-AGENTS", "PULLO-PLANT-CLAUDE", "PULLO-PLANT-SKILL", "PULLO-PLANT-COMMAND", "PULLO-PLANT-LOCAL")
 ENV_PREFIX = "# Environment\nYou have been invoked in the following environment"
@@ -145,9 +152,14 @@ class _Fake(http.server.BaseHTTPRequestHandler):
             return
         model = body.get("model", "?") if isinstance(body, dict) else "?"
         overage = mode in ("overage", "overage-tool", "overage-timeout")
+        tool = {"type": "tool_use", "id": "toolu_capture", "name": "Bash", "input": {"command": f"touch {MARK}-tool"}}
         if mode == "toolcall" or mode == "overage-tool":
-            blocks, stop = [{"type": "tool_use", "id": "toolu_capture", "name": "Bash",
-                             "input": {"command": f"touch {MARK}-tool"}}], "tool_use"
+            blocks, stop = [tool], "tool_use"
+        elif mode == "thinking":                        # A5: what Sonnet/Opus 5.5 stream when they think adaptively
+            blocks, stop = [{"type": "thinking", "thinking": THINK_DECOY}, {"type": "redacted_thinking"},
+                            {"type": "thinking", "thinking": ""}, {"type": "text", "text": json.dumps(ANSWER)}], "end_turn"
+        elif mode == "thinking-tool":
+            blocks, stop = [{"type": "thinking", "thinking": THINK_DECOY}, tool], "tool_use"
         elif mode == "max_tokens":
             blocks, stop = [{"type": "text", "text": "{\"hypotheses\": [{\"truncat"}], "max_tokens"
         else:
@@ -181,6 +193,17 @@ class _Fake(http.server.BaseHTTPRequestHandler):
                                            "content_block": {"type": "text", "text": ""}})
                 ev("content_block_delta", {"type": "content_block_delta", "index": i,
                                            "delta": {"type": "text_delta", "text": b["text"]}})
+            elif b["type"] == "thinking":
+                ev("content_block_start", {"type": "content_block_start", "index": i,
+                                           "content_block": {"type": "thinking", "thinking": "", "signature": ""}})
+                if b["thinking"]:
+                    ev("content_block_delta", {"type": "content_block_delta", "index": i,
+                                               "delta": {"type": "thinking_delta", "thinking": b["thinking"]}})
+                ev("content_block_delta", {"type": "content_block_delta", "index": i,
+                                           "delta": {"type": "signature_delta", "signature": SIGNATURE}})
+            elif b["type"] == "redacted_thinking":
+                ev("content_block_start", {"type": "content_block_start", "index": i,
+                                           "content_block": {"type": "redacted_thinking", "data": "EmwKAhgB" + "R" * 96}})
             else:
                 ev("content_block_start", {"type": "content_block_start", "index": i, "content_block": {
                     "type": "tool_use", "id": b["id"], "name": b["name"], "input": {}}})
@@ -313,6 +336,7 @@ def main() -> int:
     srv = _Server(("127.0.0.1", 0), _Fake)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     second = None
+    think_leak = None
     first_log: list = []
     try:
         token = C.AccessToken(Secret(DUMMY_TOKEN), None, "capture-dummy")
@@ -330,8 +354,13 @@ def main() -> int:
         res = prov.call(req, ("INVESTIGATE", "investigator", "capture", 0, 0))
         ran = list(prov.ran)
         rows = [json.loads(x) for x in open(ledger.path).read().splitlines() if x.strip()]
-        first_row = next(({k: r.get(k) for k in ("outcome", "billingKind", "costBasis", "errorKind", "note")}
+        first_row = next(({**{k: r.get(k) for k in ("outcome", "billingKind", "costBasis", "errorKind", "note")},
+                           "thinking": (r.get("isolation") or {}).get("thinking"),
+                           "reasoningTokens": (r.get("usage") or {}).get("reasoningTokens"),
+                           "outputTokens": (r.get("usage") or {}).get("outputTokens")}
                           for r in rows if r.get("type") == "result"), None)
+        kept = json.dumps(rows) + json.dumps(res.response) + json.dumps(res.error)
+        think_leak = THINK_MARK in kept or "PULLO-DECOY" in kept
         time.sleep(0.6)
         first_log = list(_Fake.log)                      # the proof is about the first call; the second only checks latching                                  # a retry the kill did not stop would arrive in this window
         if mode in ("usage-limit", "overage", "overage-tool", "overage-timeout", "404-then-ok") or mode.startswith("status:"):
@@ -370,7 +399,9 @@ def main() -> int:
                       "bearerIsDummy": [x["bearerIsDummy"] for x in posts], "apiKeyHeader": [x["apiKeyHeader"] for x in posts],
                       "betas": [x["beta"] for x in posts][:1], "verdict": verdict, "disabled": prov.disabled_reason,
                       "latched": (prov.latched or {}).get("errorType"), "second": second, "executed": ran,
-                      "forwarder": {k: fwd.get(k) for k in ("version", "requestsSent", "requestsAttempted", "refused", "upstreamStatus")},
+                      "forwarder": {k: fwd.get(k) for k in ("version", "requestsSent", "requestsAttempted", "refused", "upstreamStatus",
+                                                            "sse")},
+                      "thinkLeak": think_leak,
                       "firstRow": first_row,
                       "baseUrlIsForwarder": bool(prov.seen_base_url and C.BASE_URL_RE.fullmatch(prov.seen_base_url)),
                       "leaks": {"hostname": bool(host) and host in raw, "osRelease": "VERSION_ID" in raw or "PRETTY_NAME" in raw,
@@ -445,7 +476,24 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append(f"expected exactly one request, saw {out.get('posts')}")
         if v.get("status") != "ok" or not v.get("outputOk"):
             problems.append("the scripted answer did not come back through the adapter as status ok")
-    elif mode == "toolcall":
+    elif mode == "thinking":                                   # A5: adaptive thinking admitted, counted, never kept
+        row = out.get("firstRow") or {}
+        t = row.get("thinking") or {}
+        if out.get("posts") != 1:
+            problems.append(f"expected exactly one request, saw {out.get('posts')}")
+        if v.get("status") != "ok" or not v.get("outputOk"):
+            problems.append("an adaptive-thinking answer did not come back as status ok with the text answer")
+        if (t.get("blocks"), t.get("redactedBlocks"), t.get("crossCheck")) != (2, 1, "match"):
+            problems.append(f"the thinking blocks were not counted on both sides: {t}")
+        if not (type(row.get("reasoningTokens")) is int and row["reasoningTokens"] > 0) or t.get("estimatedTokens") != row.get("reasoningTokens"):
+            problems.append("the thinking tokens were not recorded as usage.reasoningTokens")
+        if "adaptive-thinking" not in (row.get("note") or ""):
+            problems.append("the row does not disclose adaptive thinking")
+        if out.get("thinkLeak") is not False:
+            problems.append("thinking text was kept (ledger, response or error)")
+        if (f.get("sse") or {}).get("blocks") != {"thinking": 2, "redacted_thinking": 1, "text": 1}:
+            problems.append("the forwarder's SSE tally does not show the streamed blocks")
+    elif mode in ("toolcall", "thinking-tool"):
         if v.get("reason") != "isolation-violation" or v.get("itemType") != "tool-attempt":
             problems.append("a scripted tool call was not reported as a tool attempt")
         if out.get("posts") != 1:

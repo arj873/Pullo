@@ -9,11 +9,12 @@
 # on the user's subscription (OAuth), never the OpenRouter key: $0 actual (billingKind claude-subscription). Allowed models
 # (exact ids): claude-cli/claude-sonnet-5-5, claude-cli/claude-opus-5-5. Every call runs `claude -p` with NO tools
 # (--tools "", --strict-mcp-config, no settings sources, no slash commands, file mentions off) in a fresh per-call home
-# (claude-cli-isolated@1) inside a bwrap sandbox that hides the whole user home (no ~/.claude path is exposed: the OAuth
+# (claude-cli-isolated@3) inside a bwrap sandbox that hides the whole user home (no ~/.claude path is exposed: the OAuth
 # access token arrives on an inherited pipe fd); audited stream-json; no retries (a scheduled CLI retry is killed before it
-# is sent), one agent turn, no thinking, no repairs or fallbacks; the role schema is quoted in the prompt and the answer is
-# parsed strictly. A usage limit, rate limit, overload or auth failure latches the run. The engine paces the run with a
-# PACING price - the same Terra-6 list rates as the opencode arm - not money and not Claude's price.
+# is sent), one agent turn, adaptive thinking (effort high; passive, counted), no repairs or fallbacks; the role schema is
+# quoted in the prompt and the answer is parsed strictly. A usage limit, rate limit, overload or auth failure latches the
+# run. The engine paces the run with a PACING price - the same Terra-6 list rates as the opencode arm - not money and not
+# Claude's price.
 #
 # Before the first live use, root runs the one-call canary (python3 -m reviewer.runtime.claude_canary --confirm-live; see
 # the claude-cli runbook). The spend authorization named by --auth must list provider "claude-cli" and these models; its

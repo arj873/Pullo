@@ -58,6 +58,14 @@ def text(model_cli, t, **kw):
     return assistant(model_cli, [{"type": "text", "text": t}], **kw)
 
 
+THINK_DECOY = 'PULLO-FAKE-THINKING decoy {"hypotheses": [{"claim": "PULLO-DECOY"}]}'   # must never be parsed or kept (A5)
+
+
+def think_event(total, delta):
+    return ev("system", subtype="thinking_tokens", estimated_tokens=total, estimated_tokens_delta=delta,
+              uuid="5d3e2a1c-0000-4000-8000-0000000000aa")
+
+
 def api_error(model_cli, t, status, code, rid="req_fake_1"):
     return ev("assistant", message={"id": "msg_err", "type": "message", "role": "assistant", "model": "<synthetic>",
                                     "content": [{"type": "text", "text": t}], "stop_reason": "stop_sequence"},
@@ -194,9 +202,24 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
         return [init("claude-haiku-5-5"), text("claude-haiku-5-5", ans), result("claude-haiku-5-5", ans)], 0, b"", 0
     if scenario == "unknown-event":
         return [i, ev("system", subtype="hook_response"), text(m, ans), result(m, ans)], 0, b"", 0
-    if scenario == "thinking":
-        return [i, assistant(m, [{"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": ans}]),
+    if scenario in ("thinking", "thinking-heavy", "thinking-mismatch"):   # A5: what 2.1.309 prints when the model thinks
+        est = 5000 if scenario == "thinking-heavy" else 4
+        blocks = [assistant(m, [{"type": "thinking", "thinking": THINK_DECOY, "signature": "sig-1"}], thinking_duration_ms=12)]
+        if scenario == "thinking":
+            blocks += [assistant(m, [{"type": "redacted_thinking", "data": "opaque-redacted"}]),
+                       assistant(m, [{"type": "thinking", "thinking": "", "signature": "sig-2"}])]
+        return [i, think_event(14, 14), think_event(14 + est, est), *blocks, text(m, ans), rate(), result(m, ans)], 0, b"", 0
+    if scenario == "thinking-badshape":       # a thinking block of an unknown shape still fails closed
+        return [i, assistant(m, [{"type": "thinking", "thinking": "hmm"}]), text(m, ans), result(m, ans)], 0, b"", 0
+    if scenario == "thinking-event-badshape":
+        return [i, ev("system", subtype="thinking_tokens", estimated_tokens=3, estimated_tokens_delta=3, text="x"), text(m, ans),
                 result(m, ans)], 0, b"", 0
+    if scenario == "thinking-tool":           # thinking, then a tool call: still killed at the tool block
+        return [i, think_event(14, 14), assistant(m, [{"type": "thinking", "thinking": THINK_DECOY, "signature": "s"}]),
+                assistant(m, [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "id"}}]),
+                result(m, None, subtype="error_max_turns", is_error=True, stop="tool_use", turns=2)], 1, b"", 0
+    if scenario == "sse-tool":                # the CLI shows a plain answer, the upstream SSE carried a tool_use block
+        return [i, text(m, ans), rate(), result(m, ans)], 0, b"", 0
     if scenario == "no-result":
         return [i, text(m, ans)], 0, b"", 0
     if scenario == "multi-turn":
@@ -237,6 +260,10 @@ UPSTREAM_STATUS = {"retry401": 401, "usage-limit": 429, "throttle": 429, "overlo
                    "refusal": 200}
 OVERAGE_HEADERS = {"anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-overage-status": "allowed",
                    "anthropic-ratelimit-unified-overage-in-use": "true"}
+# The upstream SSE content blocks the host forwarder tallies per scenario (A5 cross-check); default one text block.
+UPSTREAM_BLOCKS = {"thinking": {"thinking": 2, "redacted_thinking": 1, "text": 1}, "thinking-heavy": {"thinking": 1, "text": 1},
+                   "thinking-mismatch": {"thinking": 2, "text": 1}, "sse-tool": {"text": 1, "tool_use": 1},
+                   "thinking-tool": {"thinking": 1, "tool_use": 1}, "toolcall": {"tool_use": 1}, "overage-tool": {"tool_use": 1}}
 UPSTREAM_RATE = {"overage": OVERAGE_HEADERS, "overage-tool": OVERAGE_HEADERS, "overage-timeout": OVERAGE_HEADERS,
                  "usage-limit": {"anthropic-ratelimit-unified-status": "rejected"}}
 
@@ -274,6 +301,9 @@ class FakeForwarder:
             slot.rate_headers = dict(UPSTREAM_RATE.get(scenario, {}))
             if slot.upstream_status != 200:
                 slot.upstream_error = '{"type":"error","error":{"message":"fake upstream ' + str(slot.upstream_status) + '"}}'
+            else:
+                slot.sse = {"blocks": dict(UPSTREAM_BLOCKS.get(scenario, {"text": 1})), "outputTokens": None, "stopReason": None,
+                            "unparsed": 0}
 
 
 class ScriptedRunner:
@@ -372,8 +402,9 @@ def dummy_token():
     return C.AccessToken(Secret(DUMMY_TOKEN), None, "test-dummy")
 
 
-def start_upstream(status=200, headers=()):
-    """A loopback stand-in for api.anthropic.com behind the real Forwarder (tests only). -> (url, server, log of requests)."""
+def start_upstream(status=200, headers=(), sse=None):
+    """A loopback stand-in for api.anthropic.com behind the real Forwarder (tests only). -> (url, server, log of requests).
+    `sse`: the 200 body to stream instead of a bare message_stop."""
     import http.server
     import socketserver
     import threading
@@ -388,7 +419,8 @@ def start_upstream(status=200, headers=()):
             raw = self.rfile.read(n) if n else b""
             log.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"),
                         "acceptEncoding": self.headers.get("accept-encoding"), "body": raw})
-            body = b"event: message_stop\ndata: {}\n\n" if status == 200 else b'{"type":"error","error":{"message":"up"}}'
+            body = (sse if sse is not None else b"event: message_stop\ndata: {}\n\n") if status == 200 else \
+                b'{"type":"error","error":{"message":"up"}}'
             self.send_response(status)
             self.send_header("content-type", "text/event-stream" if status == 200 else "application/json")
             self.send_header("request-id", f"req_up_{len(log)}")

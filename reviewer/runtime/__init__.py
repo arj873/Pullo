@@ -6,7 +6,7 @@ CodexTerraProvider  - provider=openai, GPT Terra (gpt-6.1-terra, gpt-5.6-terra) 
 OpenCodeFreeProvider - provider=opencode, OpenCode Zen FREE models through the installed `opencode run` in a fresh
                       credential-less home per call (opencode-isolated-home@2), every tool denied, $0 (free-model).
 ClaudeCliProvider   - provider=claude-cli, Claude Opus/Sonnet 5.5 through the installed `claude -p` on the user's subscription
-                      (claude-cli-isolated@1): no tools, OAuth access token on an inherited fd, masked bwrap sandbox, $0.
+                      (claude-cli-isolated@3): no tools, OAuth access token on an inherited fd, masked bwrap sandbox, $0.
 
 Nothing here runs at import time: no key is read, no socket is opened, no subprocess is started."""
 

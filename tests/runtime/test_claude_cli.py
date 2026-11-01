@@ -124,7 +124,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(a, C.isolation_identity(F.MODEL))
         self.assertEqual({k for k in a if a[k] != b[k]}, {"argvSha256"})
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
-                         ("claude-cli-isolated@2", "2.1.309", "claude-bwrap-masked@2"))
+                         ("claude-cli-isolated@3", "2.1.309", "claude-bwrap-masked@2"))
 
     def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
         oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
@@ -280,7 +280,7 @@ class Calls(Base):
                                             "cacheWriteInputTokens": 300, "outputTokens": 40, "reasoningTokens": 0})
         self.assertEqual((res_row["generationId"], res_row["isolation"]["requestsSeen"], res_row["isolation"]["toolItems"],
                           res_row["isolation"]["requestsSent"], res_row["isolation"]["forwarder"]["version"]),
-                         ("req_fake_1", 1, 0, 1, "claude-loopback-forwarder@1"))
+                         ("req_fake_1", 1, 0, 1, "claude-loopback-forwarder@2"))
         self.assertEqual(self.led.totals()["committedUsdMicros"], 0)
         self.assertNotIn(F.DUMMY_TOKEN, Path(self.dir, "led.jsonl").read_text())
         self.assertEqual(self.leftovers(), [])
@@ -293,19 +293,48 @@ class Calls(Base):
         self.assertEqual(notes, ["fenced-json", "invalid-output", "output-over-cap"])
 
     def test_a_tool_attempt_is_killed_and_discarded(self):
-        p = self.prov("toolcall", "ok")
+        p = self.prov("toolcall", "ok", "thinking-tool")
         res = p.call(F.claude_request(), KEY)
         d = res.error["detail"]
         self.assertEqual((res.outcome, d["reason"], d["itemType"]), ("unknown", "isolation-violation", "tool-attempt"))
         self.assertIsNone(p.disabled_reason)                                     # nothing could run: no tool exists
         self.assertEqual(p.call(F.claude_request(), (*KEY[:3], 1, 0)).outcome, "processed")
+        res = p.call(F.claude_request(), (*KEY[:3], 2, 0))                       # A5: thinking first changes nothing
+        self.assertEqual((res.outcome, res.error["detail"]["itemType"]), ("unknown", "tool-attempt"))
+
+    def test_adaptive_thinking_is_admitted_counted_paced_and_never_kept(self):
+        p = self.prov("thinking", "thinking-heavy", "thinking-mismatch")
+        a, b, c = (p.call(F.claude_request(), (*KEY[:3], i, 0)) for i in range(3))
+        self.assertEqual([x.response["status"] for x in (a, b, c)], ["ok", "ok", "ok"])
+        self.assertEqual(a.response["output"], F.OK_INV)                         # the text answer, never the thinking decoy
+        rows = [x for x in self.rows() if x["type"] == "result"]
+        t = rows[0]["isolation"]["thinking"]
+        self.assertEqual((t["blocks"], t["redactedBlocks"], t["events"], t["estimatedTokens"], t["sseBlocks"], t["sseRedactedBlocks"],
+                          t["crossCheck"]), (2, 1, 2, 18, 2, 1, "match"))
+        self.assertEqual((rows[0]["usage"]["reasoningTokens"], rows[0]["usage"]["outputTokens"], rows[0]["note"]),
+                         (18, 40, "adaptive-thinking"))
+        u = F.USAGE                                   # output_tokens (40) already includes the 18 thinking tokens: paced on 40
+        self.assertEqual(rows[0]["apiEquivalentEstimateUsdMicros"], claude_cli_pacing_micros(
+            F.MODEL, u["input_tokens"], u["cache_read_input_tokens"], u["cache_creation_input_tokens"], 40))
+        self.assertEqual((rows[1]["usage"]["reasoningTokens"], rows[1]["note"]), (5014, "output-over-cap,adaptive-thinking"))
+        self.assertEqual(rows[1]["apiEquivalentEstimateUsdMicros"], claude_cli_pacing_micros(          # never below the estimate
+            F.MODEL, u["input_tokens"], u["cache_read_input_tokens"], u["cache_creation_input_tokens"], 5014))
+        self.assertEqual((rows[2]["isolation"]["thinking"]["crossCheck"], rows[2]["note"]),
+                         ("mismatch", "adaptive-thinking,thinking-count-mismatch"))
+        kept = Path(self.dir, "led.jsonl").read_text() + json.dumps([x.response for x in (a, b, c)])
+        self.assertNotIn("PULLO-FAKE-THINKING", kept)
+        self.assertNotIn("PULLO-DECOY", kept)
+        self.assertNotIn("opaque-redacted", kept)
+        self.assertNotIn("sig-1", kept)
 
     def test_isolation_audit_failures_discard_output(self):
         for sc, item in (("init-tools", "init-surface:init-tools"), ("init-mcp", "init-surface:init-mcp_servers"),
                          ("init-plugin", "init-surface:init-plugins"), ("wrong-model", "init-surface:init-model"),
                          ("two-requests", "extra-request"), ("max_tokens", "extra-turn"),
                          ("extra-model", "extra-model:claude-haiku-5-5"), ("unknown-event", "unknown-event:system/hook_response"),
-                         ("thinking", "unknown-event:content/thinking"), ("multi-turn", "num-turns:2"),
+                         ("thinking-badshape", "unknown-event:content/thinking-shape"),
+                         ("thinking-event-badshape", "unknown-event:system/thinking_tokens-shape"),
+                         ("sse-tool", "upstream-block:tool_use"), ("multi-turn", "num-turns:2"),
                          ("nonstream", "nonstreaming-fallback"), ("unrelayed", "answer-not-relayed:0")):
             with self.subTest(sc):
                 p = self.prov(sc)
@@ -520,6 +549,33 @@ class Audits(unittest.TestCase):
         self.assertEqual(self.feed(F.init(m, slash_commands=["init"])).reason, "init-surface")
         a = self.feed(F.init(m), "not json", F.ev("weird"))
         self.assertEqual((a.bad, a.unknown, a.reason), (1, ["weird"], None))
+        a = self.feed(F.init(m), F.think_event(10, 10), F.think_event(12, 2), F.assistant(m, [{"type": "thinking", "thinking": "t",
+                                                                                         "signature": "s"}]))
+        self.assertEqual((a.thinking, a.unknown, a.reason), ({"thinking": 1, "redacted_thinking": 0, "events": 2, "estimatedTokens": 12},
+                                                             [], None))
+        for bad in (F.ev("system", subtype="thinking_tokens", estimated_tokens=-1, estimated_tokens_delta=1),
+                    F.ev("system", subtype="thinking_tokens", estimated_tokens=1, estimated_tokens_delta=True),
+                    F.ev("system", subtype="thinking_tokens", estimated_tokens=1)):
+            self.assertEqual(self.feed(F.init(m), bad).unknown, ["system/thinking_tokens-shape"], bad)
+        for blk, want in (({"type": "redacted_thinking", "data": 1}, "content/redacted_thinking-shape"),
+                          ({"type": "thinking", "thinking": "t", "signature": "s", "citations": []}, "content/thinking-shape")):
+            self.assertEqual(self.feed(F.init(m), F.assistant(m, [blk])).unknown, [want])
+
+    def test_sse_tally_counts_blocks_across_chunk_boundaries_and_keeps_no_text(self):
+        evs = [{"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+               {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+               {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta",
+                                                                     "thinking": "SECRET content_block_start message_delta"}},
+               {"type": "content_block_start", "index": 1, "content_block": {"type": "redacted_thinking", "data": "x"}},
+               {"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}},
+               {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 77}}]
+        raw = b"".join(f"event: {e['type']}\ndata: {json.dumps(e, separators=(',', ':'))}\n\n".encode() for e in evs)
+        t = C._SseTally()
+        for i in range(0, len(raw), 7):                                            # 7-byte chunks: lines split anywhere
+            t.feed(raw[i:i + 7])
+        self.assertEqual(t.facts, {"blocks": {"thinking": 1, "redacted_thinking": 1, "text": 1}, "outputTokens": 77,
+                                   "stopReason": "end_turn", "unparsed": 0})
+        self.assertNotIn("SECRET", json.dumps(t.facts))
 
     def test_classify(self):
         self.assertEqual(C.classify(429, "rate_limit", {"status": "rejected", "rateLimitType": "seven_day"}, ""),
@@ -811,6 +867,26 @@ class Canary(Base):
         bad = Path(self.dir, "claude-cli-canary-20261101T000000000000Z")
         self.assertIn("hit your limit", Path(bad, "receipt.json").read_text())
 
+    def test_the_real_size_thinking_case_requires_observed_and_agreeing_thinking(self):
+        req = CAN.canary_request("investigator-thinking")
+        self.assertGreater(len(C._prompt(req).encode()), 50_000)                   # the size of the first live request that thought
+        th = F.ScriptedRunner("thinking")
+        rec = CAN.run_canary(self.dir, case="investigator-thinking", runner=th, preflight=GOOD, token_loader=F.dummy_token,
+                             provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=th.forwarder))
+        doc = json.loads(Path(rec, "receipt.json").read_text())
+        self.assertTrue(doc["ok"] and doc["checks"]["thinkingObserved"] and doc["checks"]["thinkingCrossCheck"], doc["checks"])
+        self.assertEqual((doc["thinkingPolicy"], doc["thinking"]["blocks"], doc["reasoningTokens"]),
+                         ("adaptive thinking (effort high)", 2, 18))
+        self.assertNotIn("PULLO-FAKE-THINKING", Path(rec, "receipt.json").read_text() + Path(rec, "runtime-ledger.jsonl").read_text())
+        for sc, check in (("ok", "thinkingObserved"), ("thinking-mismatch", "thinkingCrossCheck")):
+            r = F.ScriptedRunner(sc)
+            with self.assertRaisesRegex(RuntimeError, "canary failed"):
+                CAN.run_canary(self.dir, case="investigator-thinking", runner=r, preflight=GOOD, token_loader=F.dummy_token,
+                               provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=r.forwarder),
+                               now=__import__("datetime").datetime(2026, 11, 1, 0, 0, len(sc), tzinfo=__import__("datetime").timezone.utc))
+            failed = json.loads(Path(self.dir, f"claude-cli-canary-20261101T0000{len(sc):02d}000000Z", "receipt.json").read_text())
+            self.assertEqual([k for k, v in failed["checks"].items() if not v], [check], sc)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -873,6 +949,25 @@ class ForwarderUnit(unittest.TestCase):
         self.assertNotIn("DUMMY", json.dumps(facts))                                         # no header value is recorded
         self.assertEqual(self.req(base, body=good)[0], 404)                                  # a closed slot relays nothing
 
+    def test_the_relay_tallies_the_upstream_sse_blocks(self):
+        evs = [{"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+               {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "PULLO-SECRET"}},
+               {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+               {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}},
+               {"type": "message_stop"}]
+        sse = b"".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in evs)
+        url, srv, log = F.start_upstream(sse=sse)
+        self.addCleanup(srv.shutdown)
+        fwd = C.Forwarder(url)
+        self.addCleanup(fwd._srv.shutdown)
+        slot = fwd.open("claude-sonnet-5-5", 10)
+        status, body = self.req(fwd.base_url(slot), body={"model": "claude-sonnet-5-5", "stream": True, "tools": [],
+                                                          "max_tokens": C.OUTPUT_TOKENS, "messages": []})
+        f = fwd.close(slot)
+        self.assertEqual((status, body), (200, sse))                                      # relayed byte for byte
+        self.assertEqual(f["sse"], {"blocks": {"thinking": 1, "text": 1}, "outputTokens": 9, "stopReason": "end_turn", "unparsed": 0})
+        self.assertNotIn("PULLO-SECRET", json.dumps(f))
+
     def test_upstream_errors_keep_status_and_words(self):
         url, srv, log = F.start_upstream(status=429, headers=[("anthropic-ratelimit-unified-status", "rejected")])
         self.addCleanup(srv.shutdown)
@@ -907,6 +1002,9 @@ class FailClosedUnderTests(unittest.TestCase):
             f = C.Forwarder(C.UPSTREAM)                                              # a relay can only fail, on-host
             self.addCleanup(f._srv.shutdown)
             self.assertEqual(urllib_parse(f._up), ("127.0.0.1", 9))
+            g = C.Forwarder()                                                        # N5: the default is resolved at call time
+            self.addCleanup(g._srv.shutdown)
+            self.assertEqual(urllib_parse(g._up), ("127.0.0.1", 9))
 
 
 def urllib_parse(u):

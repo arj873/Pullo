@@ -1,8 +1,9 @@
 """provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`) on the user's
 Claude subscription, with NO tools - runtime only (CLAUDE-CLI-PROVIDER).
 
-Isolation `claude-cli-isolated@2` (Claude Code 2.1.309 exactly; behaviour read from the CLI's bundled source and proved
-offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 gate fixes S1-S4, N1-N4):
+Isolation `claude-cli-isolated@3` (Claude Code 2.1.309 exactly; behaviour read from the CLI's bundled source and proved
+offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 gate fixes S1-S4, N1-N4; @3 = phase A5:
+ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
   * ONE ENDPOINT - the host loopback FORWARDER (`claude-loopback-forwarder@1`, class Forwarder, one per adapter = per run, run by
     this trusted host process): every live call gets ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/c/<per-call random token>. It
     relays exactly ONE `POST /v1/messages?beta=true` per call to https://api.anthropic.com - only a JSON body with "stream": true,
@@ -45,8 +46,8 @@ offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 
     it is a CLI-side `StructuredOutput` TOOL plus a `DeferredToolPlaceholder` tool, with hidden repair turns: up to 5 re-sends
     on a schema-invalid tool input and a "[structured-output-enforce]" re-prompt on a text answer), --dangerously-skip-
     permissions, --permission-mode, --fallback-model, --resume/--continue, --mcp-config, --plugin-dir, --add-dir, --agents.
-  * ENV_FLAGS: no retries (CLAUDE_CODE_MAX_RETRIES=0), one agent turn (CLAUDE_CODE_MAX_TURNS=1), no thinking (the OpenRouter
-    arm sends none either), no `@path` file mentions (2.1.309 EXPANDS `@/abs/file` in -p mode: a PR line like that would
+  * ENV_FLAGS: no retries (CLAUDE_CODE_MAX_RETRIES=0), one agent turn (CLAUDE_CODE_MAX_TURNS=1), no `thinking` request key
+    (CLAUDE_CODE_DISABLE_THINKING; the models still think ADAPTIVELY under --effort high, see THINKING), no `@path` file mentions (2.1.309 EXPANDS `@/abs/file` in -p mode: a PR line like that would
     otherwise attach host files to the prompt), no CLAUDE.md/memory, no refusal retry or fallback model, no non-streaming
     fallback request, NO ATTACHMENTS (S4: without it, PR text such as `@Override`, `@agent-general-purpose` or "ultrathink"
     makes the CLI add its own system-role notes - "read them with your file tools", "Please invoke the agent", "requesting
@@ -65,6 +66,18 @@ offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 
     the max_tokens continuation, the 404 non-streaming re-send - are refused by the forwarder. The result must name only the
     pinned model in modelUsage, and a success must PROVE it streamed (ttft_stream_ms / first_content_frame_ms, present on every
     streamed answer; S3) - else isolation-violation nonstreaming-fallback.
+  * THINKING (A5; root decision: admitted, not suppressed - effort high stays): with --effort high Sonnet/Opus 5.5 think
+    adaptively on real-size prompts although the request has no `thinking` key. 2.1.309 then shows, besides the text answer, a
+    `system/thinking_tokens` event per streamed thinking delta ({estimated_tokens, estimated_tokens_delta}) and one `assistant`
+    event per thinking block: `thinking` {thinking, signature} (the text may be empty: signature only) or `redacted_thinking`
+    {data}. Exactly these shapes are PASSIVE, COUNTED events (THINKING_EVENT_KEYS / THINKING_BLOCK_KEYS); any other shape, and
+    every other unknown event, still fails closed, and a tool_use after thinking is still killed at its block. Thinking text is
+    never parsed as the answer (the answer is the result text only) and never kept: only block counts and the CLI's token
+    estimate (usage.reasoningTokens; an explicit output_tokens_details.thinking_tokens wins when non-zero). The forwarder tallies
+    the upstream SSE content blocks by type and the final output_tokens as an independent cross-check (forwarder.sse); an
+    upstream block outside text/thinking/redacted_thinking (e.g. a tool_use the CLI did not show) is an isolation violation, and
+    a CLI/SSE thinking-count difference is noted (thinking-count-mismatch). Pacing and the output-over-cap note use
+    max(output_tokens, reasoningTokens) (Anthropic's output_tokens includes thinking). Rows carry the note adaptive-thinking.
   * Structured output: the role's ANTHROPIC schema projection (the bytes the OpenRouter adapter sends as response_format)
     is quoted in the prompt; the CLI cannot enforce it without the StructuredOutput tool. The answer (the result text) is
     parsed strictly (duplicate keys, NaN -> invalid-output) and validated locally; the only tolerance is ONE Markdown
@@ -95,9 +108,11 @@ offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 
     LIVE FORWARDER inside `bwrap --unshare-net` with the exact live argv/env and a dummy OAuth token on the same fd path - the
     only difference is the forwarder's UPSTREAM, a loopback fake instead of api.anthropic.com: the request must offer no tools,
     carry the expected system blocks with BASE_INSTRUCTIONS, the Pullo prompt as the first user text, exactly the Environment
-    block after it, thinking off and the pinned model; no GET reaches the forwarder; a scripted answer comes back ok; a scripted
-    tool call is reported, never executed; a 401 and a 404 reach upstream exactly once and latch; a subscription usage limit
-    keeps the CLI's words and latches; an extra-usage answer latches and is never $0.
+    block after it, no thinking request key and the pinned model; no GET reaches the forwarder; a scripted answer comes back ok;
+    an adaptive-thinking answer (thinking + redacted_thinking + signature-only blocks around the text) comes back ok with its
+    token estimate and no thinking text kept; a scripted tool call (also one after thinking) is reported, never executed;
+    a 401 and a 404 reach upstream exactly once and latch; a subscription usage limit keeps the CLI's words and latches; an
+    extra-usage answer latches and is never $0.
 Billing: claude-subscription. $0 actual (no key, no SpendBook, committed 0); the engine paces the run, and receipts carry a
 PACING estimate, at the Terra-6 list rates the opencode arm uses (catalog.CLAUDE_CLI_PACING_PRICE; estimateBasis
 pacing-terra6-list-rates), never money and never Claude's own price. Usage tokens are recorded as measured. A report that sums
@@ -182,6 +197,12 @@ BASE_INSTRUCTIONS = (
 SYSTEM_SUBTYPES = frozenset({"init", "api_retry", "model_refusal_no_fallback", "status"})   # status: e.g. a local "Prompt is too long"
 STREAM_TYPES = frozenset({"system", "assistant", "rate_limit_event", "result"})
 CONTENT_TYPES = frozenset({"text"})
+# A5 adaptive thinking (see THINKING in the module docstring): the ONLY admitted shapes, passive and counted.
+THINKING_EVENT_KEYS = frozenset({"type", "subtype", "estimated_tokens", "estimated_tokens_delta", "session_id", "uuid"})
+THINKING_BLOCK_KEYS = {"thinking": frozenset({"type", "thinking", "signature"}), "redacted_thinking": frozenset({"type", "data"})}
+SSE_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking"})        # upstream content blocks the forwarder admits
+THINKING_POLICY = ("adaptive (effort high): thinking / redacted_thinking blocks and system/thinking_tokens events are passive, "
+                   "counted events; thinking text is never parsed or kept")
 BUILTIN_PLUGINS = ("cc-plugin-agents-md@builtin", "cc-plugin-plugin-authoring@builtin")
 # Names that must never appear in the per-call home or cwd after a call (a persisted token, settings, extensions).
 FORBIDDEN_HOME_NAMES = frozenset({".credentials.json", "credentials.json", "settings.json", "settings.local.json",
@@ -206,7 +227,7 @@ RETRY_POLICY = ("CLAUDE_CODE_MAX_RETRIES=0;forwarder-relays-one-request-per-call
                 "requestsSeen-lower-bound")
 _TOKEN = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{16,512}")
 SANDBOX_VERSION = "claude-bwrap-masked@2"       # @2 (phase A3): user-owned mounts, /mnt, /media, /run/media hidden too
-FORWARDER_VERSION = "claude-loopback-forwarder@1"
+FORWARDER_VERSION = "claude-loopback-forwarder@2"     # @2 (A5): tallies the upstream SSE content blocks (cross-check)
 UPSTREAM = "https://api.anthropic.com"          # the one host the forwarder relays to (tests/capture: a loopback fake)
 FORWARD_PATH = "/v1/messages?beta=true"
 MAX_FORWARD_BODY = 8 << 20
@@ -214,7 +235,7 @@ BASE_URL_RE = re.compile(r"\Ahttp://127\.0\.0\.1:[0-9]{1,5}/c/[A-Za-z0-9_-]{32,6
 # Request headers never relayed upstream (hop-by-hop, recomputed, or an encoding the relay would have to undo).
 _HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer",
                   "trailers", "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding"})
-# The top-level request keys 2.1.309 sends for this argv/env (thinking off: no "thinking" / "context_management"); anything else
+# The top-level request keys 2.1.309 sends for this argv/env (no "thinking" / "context_management" key); anything else
 # (mcp_servers, container, thinking, tool_choice, ...) is refused, and so is a duplicate key (strict JSON) (re-gate R3).
 FORWARD_KEYS = frozenset({"model", "messages", "system", "max_tokens", "metadata", "stream", "tools", "output_config"})
 # Upstream response headers relayed back (everything else is dropped).
@@ -325,6 +346,7 @@ class StreamAudit:
     rate: list = field(default_factory=list)
     unknown: list = field(default_factory=list)
     bad: int = 0
+    thinking: dict = field(default_factory=lambda: {"thinking": 0, "redacted_thinking": 0, "events": 0, "estimatedTokens": 0})
 
     def _abort(self, why):
         self.reason = self.reason or why
@@ -348,6 +370,13 @@ class StreamAudit:
             elif st == "api_retry":
                 self.retries.append({k: ev.get(k) for k in ("attempt", "retry_delay_ms", "error_status", "error")})
                 self._abort("cli-retry")
+            elif st == "thinking_tokens":                    # A5: passive and counted, exactly this shape
+                n, d = ev.get("estimated_tokens"), ev.get("estimated_tokens_delta")
+                if set(ev) <= THINKING_EVENT_KEYS and type(n) is int and type(d) is int and n >= 0 and d >= 0:
+                    self.thinking["events"] += 1
+                    self.thinking["estimatedTokens"] += d
+                else:
+                    self.unknown.append("system/thinking_tokens-shape")
             elif st not in SYSTEM_SUBTYPES:
                 self.unknown.append(f"system/{str(st)[:30]}")
         elif t == "assistant":
@@ -361,6 +390,11 @@ class StreamAudit:
                 ct = c.get("type") if isinstance(c, dict) else None
                 if ct in ("tool_use", "server_tool_use") or (isinstance(ct, str) and ct.endswith("tool_use")):
                     self._abort("tool-attempt")
+                elif ct in THINKING_BLOCK_KEYS:                  # A5: counted; the text/data is never read or kept
+                    if set(c) == THINKING_BLOCK_KEYS[ct] and all(isinstance(v, str) for v in c.values()):
+                        self.thinking[ct] += 1
+                    else:
+                        self.unknown.append(f"content/{ct}-shape")
                 elif ct not in CONTENT_TYPES:
                     self.unknown.append(f"content/{str(ct)[:30]}")
         elif t == "user":
@@ -692,7 +726,7 @@ def isolation_identity(model: str) -> dict:
     return {"isolationVersion": CLAUDE_CLI_ISOLATION_VERSION, "cliVersion": CLAUDE_CLI_VERSION,
             "argvSha256": argv_digest(build_argv("claude", model)), "instructionsSha256": _sha(BASE_INSTRUCTIONS),
             "envSha256": env_digest(), "structuredMode": "prompt-schema+strict-parse (no --json-schema tool)",
-            "schemaFlavor": SCHEMA_FLAVOR, "thinking": "disabled", "effort": EFFORT, "maxTokensSent": OUTPUT_TOKENS,
+            "schemaFlavor": SCHEMA_FLAVOR, "thinking": THINKING_POLICY, "effort": EFFORT, "maxTokensSent": OUTPUT_TOKENS,
             "auth": "oauth-access-token-via-inherited-fd (no ~/.claude path in the sandbox)",
             "endpoint": f"{FORWARDER_VERSION}: ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/c/<per-call token> relays ONE "
                         f"POST {FORWARD_PATH} (stream true, the pinned model, no tools) to {UPSTREAM}; everything else 404",
@@ -907,10 +941,10 @@ def _probe(argv, environ=None, runner=None, timeout=60) -> tuple[RunResult, bool
 # Loopback proofs in every live preflight (through the live sandbox AND the live forwarder): a scripted answer, a scripted tool call,
 # a 401 and a 404 (their re-sends never reach upstream; both latch), a subscription usage limit (the CLI's words kept), an answer
 # served from extra usage (latched, never $0) and the inject2 prompt (the CLI system message is exactly the Environment block).
-PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2")
+PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2", "thinking")
 CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "404-then-ok", "inject2",
                  "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings", "overage-tool",
-                 "overage-timeout")
+                 "overage-timeout", "thinking", "thinking-tool")
 
 
 def capture_argv(bwrap: str) -> list[str]:
@@ -998,13 +1032,58 @@ class Slot:
     body_sha256: str | None = None
     body_bytes: int | None = None
     relay_error: str | None = None
+    sse: dict | None = None          # A5: upstream SSE tally of a 200 relay {"blocks": {type: n}, "outputTokens", "stopReason"}
 
     def facts(self) -> dict:
         return {"version": FORWARDER_VERSION, "requestsSent": self.forwarded, "requestsAttempted": len(self.attempts),
                 "refused": [a for a in self.attempts if a["verdict"] != "forwarded"][:16], "upstreamStatus": self.upstream_status,
                 "requestBodyBytes": self.body_bytes, "requestBodySha256": self.body_sha256, "relayError": self.relay_error,
                 "upstreamError": self.upstream_error, "upstreamRequestId": self.request_id,
-                "rateLimitHeaders": dict(self.rate_headers) or None}
+                "rateLimitHeaders": dict(self.rate_headers) or None, "sse": {**self.sse, "blocks": dict(self.sse["blocks"])} if self.sse is not None else None}
+
+
+class _SseTally:
+    """A5: counts the upstream SSE content blocks by type and keeps the final usage.output_tokens / stop_reason of a relayed
+    response (an independent cross-check of what the CLI shows). Only content_block_start / message_delta data lines are parsed;
+    no text is kept (thinking and answer deltas are never decoded). `facts` is updated in place."""
+    MAX_LINE = 1 << 20
+
+    def __init__(self):
+        self.buf = bytearray()
+        self.facts = {"blocks": {}, "outputTokens": None, "stopReason": None, "unparsed": 0}
+
+    def feed(self, chunk: bytes) -> None:
+        self.buf += chunk
+        while True:
+            i = self.buf.find(b"\n")
+            if i < 0:
+                if len(self.buf) > self.MAX_LINE:              # a huge delta line: never needed, drop it
+                    self.buf.clear()
+                return
+            line = bytes(self.buf[:i]).strip()
+            del self.buf[:i + 1]
+            if line.startswith(b"data:") and len(line) <= self.MAX_LINE and (b"content_block_start" in line
+                                                                            or b"message_delta" in line):
+                self._line(line[5:])
+
+    def _line(self, data: bytes) -> None:
+        try:
+            ev = json.loads(data)
+        except ValueError:
+            self.facts["unparsed"] += 1
+            return
+        if not isinstance(ev, dict):
+            return
+        if ev.get("type") == "content_block_start" and isinstance(ev.get("content_block"), dict):
+            t = str(ev["content_block"].get("type"))[:40]
+            self.facts["blocks"][t] = self.facts["blocks"].get(t, 0) + 1
+        elif ev.get("type") == "message_delta":
+            u = ev.get("usage") if isinstance(ev.get("usage"), dict) else {}
+            if type(u.get("output_tokens")) is int:
+                self.facts["outputTokens"] = u["output_tokens"]
+            d = ev.get("delta") if isinstance(ev.get("delta"), dict) else {}
+            if d.get("stop_reason") is not None:
+                self.facts["stopReason"] = str(d["stop_reason"])[:40]
 
 
 class _ForwardServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -1022,8 +1101,8 @@ class Forwarder:
     request headers (its Bearer token) are relayed unchanged, nothing but the upstream status, request id, error words and
     anthropic-ratelimit-unified-* values is recorded. Binds 127.0.0.1 only; one per adapter (run)."""
 
-    def __init__(self, upstream: str = UPSTREAM):
-        u = urllib.parse.urlsplit(upstream)
+    def __init__(self, upstream: str | None = None):
+        u = urllib.parse.urlsplit(UPSTREAM if upstream is None else upstream)   # N5: the default resolved at call time
         if u.scheme not in ("http", "https") or not u.hostname or u.query or u.fragment:
             raise ValueError("forwarder upstream must be an http(s) origin")
         self._up, self._lock, self._slots, self.stray = u, threading.Lock(), {}, 0
@@ -1147,10 +1226,13 @@ class Forwarder:
                 h.wfile.write(body)
             else:
                 h.end_headers()
+                tally = _SseTally()
+                slot.sse = tally.facts
                 while True:
                     chunk = resp.read1(65536)
                     if not chunk:
                         break
+                    tally.feed(chunk)
                     h.wfile.write(chunk)
                     h.wfile.flush()
         except (OSError, http.client.HTTPException) as e:          # upstream unreachable / client gone (the kill)
@@ -1174,6 +1256,29 @@ def extra_usage(info: dict | None, headers: dict | None) -> bool:
                 or h.get("anthropic-ratelimit-unified-overage-in-use") == "true"
                 or (h.get("anthropic-ratelimit-unified-status") == "rejected"
                     and h.get("anthropic-ratelimit-unified-overage-status") == "allowed"))
+
+
+def thinking_facts(audit: StreamAudit, sse: dict | None) -> dict:
+    """A5: what a call's adaptive thinking amounted to (counts only, never text): the CLI's thinking / redacted_thinking blocks
+    and thinking_tokens estimate, the forwarder's SSE tally of the same blocks, and whether the two agree (crossCheck: match |
+    mismatch | unchecked = no SSE tally, e.g. no 200 relay)."""
+    t = audit.thinking
+    blocks = (sse or {}).get("blocks") if isinstance(sse, dict) else None
+    out = {"policy": "adaptive-effort-high", "blocks": t["thinking"], "redactedBlocks": t["redacted_thinking"], "events": t["events"],
+           "estimatedTokens": t["estimatedTokens"],
+           "sseBlocks": blocks.get("thinking", 0) if isinstance(blocks, dict) else None,
+           "sseRedactedBlocks": blocks.get("redacted_thinking", 0) if isinstance(blocks, dict) else None}
+    out["crossCheck"] = "unchecked" if out["sseBlocks"] is None else "match" if (out["sseBlocks"], out["sseRedactedBlocks"]) == (
+        out["blocks"], out["redactedBlocks"]) else "mismatch"
+    return out
+
+
+def paced_output(usage: dict) -> int | None:
+    """The output token count pacing and the over-cap note use: max(outputTokens, reasoningTokens) (A5)."""
+    o, r = usage.get("outputTokens"), usage.get("reasoningTokens")
+    if type(o) is not int:
+        return None
+    return max(o, r) if type(r) is int else o
 
 
 # ------------------------------------------------------------------ the adapter
@@ -1461,6 +1566,8 @@ class ClaudeCliProvider:
         iso = dict(iso)
         sent = iso.get("requestsSent", 0)
         lost = "not-sent" if sent == 0 else "unknown"              # nothing relayed = nothing reached Anthropic
+        sse = (iso.get("forwarder") or {}).get("sse")
+        iso["thinking"] = think = thinking_facts(audit, sse)       # A5: on every path (counts only)
         if res.aborted == "tool-attempt":
             return self._done(ck, t0, lost, self._err(             # detected at the assistant block: nothing ran
                 "provider-error", "isolation violation: the model attempted a tool call (none is offered); output "
@@ -1499,6 +1606,8 @@ class ClaudeCliProvider:
                     self.disabled_reason = "answer-not-relayed"
             elif not (type(r.get("ttft_stream_ms")) in (int, float) or type(r.get("first_content_frame_ms")) in (int, float)):
                 violation = "nonstreaming-fallback"              # S3: a streamed answer always carries these markers
+        if violation is None and isinstance(sse, dict) and set(sse.get("blocks") or {}) - SSE_BLOCK_TYPES:
+            violation = "upstream-block:" + ",".join(sorted(set(sse["blocks"]) - SSE_BLOCK_TYPES))[:40]   # A5 cross-check
         if violation is not None:
             return self._done(ck, t0, lost, self._err(
                 "provider-error", "isolation audit failed: unexpected CLI event, model or request path; output discarded",
@@ -1511,11 +1620,11 @@ class ClaudeCliProvider:
                                   errorKind="no-final-message", isolation=iso)
             return self._failure(ck, t0, res, audit, iso)
         if extra_usage(audit.rate[-1] if audit.rate else None, (iso.get("forwarder") or {}).get("rateLimitHeaders")):
-            return self._extra_usage(ck, t0, audit, iso, self._usage(model, r.get("usage"))[0])
+            return self._extra_usage(ck, t0, audit, iso, self._usage(model, r.get("usage"), think["estimatedTokens"])[0])
         if r.get("is_error") or r.get("subtype") != "success" or not isinstance(r.get("result"), str):
             return self._failure(ck, t0, res, audit, iso)
         iso["toolItems"] = 0
-        usage, est = self._usage(model, r.get("usage"))
+        usage, est = self._usage(model, r.get("usage"), think["estimatedTokens"])
         status, output = "invalid-output", None
         candidate, fenced = extract_json_text(r["result"])
         try:
@@ -1530,10 +1639,13 @@ class ClaudeCliProvider:
         if rid:
             response["providerRequestId"] = str(rid)[:200]
         stop = r.get("stop_reason")
-        over = type(cap) is int and type(usage.get("outputTokens")) is int and usage["outputTokens"] > cap
+        paced = paced_output(usage)
+        over = type(cap) is int and type(paced) is int and paced > cap
         notes = [n for n in ("invalid-output" if status != "ok" else None, "fenced-json" if fenced else None,
                              f"finish-{str(stop)[:30]}" if stop not in (None, "end_turn") else None,
-                             "output-over-cap" if over else None) if n]
+                             "output-over-cap" if over else None,
+                             "adaptive-thinking" if think["blocks"] or think["redactedBlocks"] else None,
+                             "thinking-count-mismatch" if think["crossCheck"] == "mismatch" else None) if n]
         iso["cliCostUsd"] = r.get("total_cost_usd") if type(r.get("total_cost_usd")) in (int, float) else None
         if audit.rate:
             iso["rateLimit"] = {k: audit.rate[-1].get(k) for k in ("status", "rateLimitType", "resetsAt", "utilization",
@@ -1546,16 +1658,19 @@ class ClaudeCliProvider:
                           finishReason=str(stop)[:40] if stop is not None else None, note=",".join(notes) or None)
 
     @staticmethod
-    def _usage(model, u) -> tuple[dict, int | None]:
+    def _usage(model, u, reasoning: int = 0) -> tuple[dict, int | None]:
         """Anthropic usage buckets: input_tokens is non-cached input, cache reads and writes separate. Pullo's outputTokens is
-        everything the model generated; reasoningTokens its thinking part (0: thinking is off). Paced at the Terra-6 rates."""
+        everything the model generated (Anthropic's output_tokens includes thinking); reasoningTokens its adaptive-thinking part
+        (output_tokens_details.thinking_tokens when non-zero, else the CLI's thinking_tokens estimate `reasoning`). Paced at the
+        Terra-6 rates on max(outputTokens, reasoningTokens) (A5: thinking is never paced below its own estimate)."""
         keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
         if not isinstance(u, dict) or not all(type(u.get(k)) is int and u[k] >= 0 for k in keys):
             return {"uncachedInputTokens": None, "cachedInputTokens": None, "cacheWriteInputTokens": None,
                     "outputTokens": None, "reasoningTokens": None}, None
         writes = u["cache_creation_input_tokens"]
         det = u.get("output_tokens_details") if isinstance(u.get("output_tokens_details"), dict) else {}
-        think = det.get("thinking_tokens") if type(det.get("thinking_tokens")) is int else 0
+        think = det.get("thinking_tokens") if type(det.get("thinking_tokens")) is int and det["thinking_tokens"] > 0 else \
+            (reasoning if type(reasoning) is int and reasoning > 0 else 0)
         usage = {"uncachedInputTokens": u["input_tokens"], "cachedInputTokens": u["cache_read_input_tokens"],
                  "cacheWriteInputTokens": writes, "outputTokens": u["output_tokens"], "reasoningTokens": think}
-        return usage, claude_cli_pacing_micros(model, u["input_tokens"], u["cache_read_input_tokens"], writes, u["output_tokens"])
+        return usage, claude_cli_pacing_micros(model, u["input_tokens"], u["cache_read_input_tokens"], writes, paced_output(usage))
