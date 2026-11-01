@@ -2,6 +2,7 @@
 events the real claude 2.1.309 produces; no network, no credential, no live call. RealCliCaptureProof runs the REAL CLI
 against a loopback fake Anthropic endpoint inside a network-less namespace (a dummy token; no inference)."""
 
+import functools
 import hashlib
 import json
 import os
@@ -30,7 +31,7 @@ HOSTILE_ENV = {"PATH": os.environ["PATH"], "HOME": "/home/operator", "OPENROUTER
                "ANTHROPIC_API_KEY": "sk-ant-api03-x", "ANTHROPIC_BASE_URL": "http://evil", "CLAUDE_CODE_OAUTH_TOKEN": "t",
                "CLAUDE_CONFIG_DIR": "/home/operator/.claude", "HTTPS_PROXY": "http://proxy", "LANG": "C.UTF-8",
                "CLAUDE_CODE_USE_BEDROCK": "1", "XDG_CONFIG_HOME": "/home/operator/.config"}
-ALLOWED_ENV = {*C.ENV_PASS, *C.ENV_HOME_KEYS, *dict(C.ENV_FLAGS)}
+ALLOWED_ENV = {*C.ENV_PASS, *C.ENV_HOME_KEYS, *dict(C.ENV_FLAGS), "ANTHROPIC_BASE_URL"}   # the base URL: the forwarder slot only
 
 
 def _bwrap_works() -> bool:
@@ -58,6 +59,7 @@ class Base(unittest.TestCase):
         self.led = RuntimeLedger(os.path.join(self.dir, "led.jsonl"), 50_000_000)
         kw.setdefault("environ", HOSTILE_ENV)
         kw.setdefault("token_loader", F.dummy_token)
+        kw.setdefault("forwarder", self.runner.forwarder)
         return C.ClaudeCliProvider(enabled=True, ledger=self.led, runner=self.runner, preflight=GOOD,
                                    workdir_parent=self.dir, **kw)
 
@@ -92,7 +94,7 @@ class Settings(unittest.TestCase):
     def test_env_is_built_from_scratch_with_the_pinned_switches_and_no_credential(self):
         with tempfile.TemporaryDirectory() as d:
             env = C.isolated_home(d, HOSTILE_ENV)["env"]
-        self.assertEqual(set(env), ALLOWED_ENV - {"LC_ALL"})
+        self.assertEqual(set(env), ALLOWED_ENV - {"LC_ALL", "ANTHROPIC_BASE_URL"})   # the adapter adds the forwarder slot per call
         for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "OPENROUTER_API_KEY", "HTTPS_PROXY",
                   "CLAUDE_CODE_USE_BEDROCK", C.TOKEN_FD_ENV):
             self.assertNotIn(k, env)
@@ -122,7 +124,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(a, C.isolation_identity(F.MODEL))
         self.assertEqual({k for k in a if a[k] != b[k]}, {"argvSha256"})
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
-                         ("claude-cli-isolated@1", "2.1.309", "claude-bwrap-masked@1"))
+                         ("claude-cli-isolated@2", "2.1.309", "claude-bwrap-masked@2"))
 
     def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
         oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
@@ -260,6 +262,7 @@ class Calls(Base):
         self.assertEqual(s["stdin"], C._prompt(r).encode())
         self.assertEqual(s["cwd_listing"], [])
         self.assertEqual(set(s["env"]) - ALLOWED_ENV, set())
+        self.assertRegex(s["env"]["ANTHROPIC_BASE_URL"], C.BASE_URL_RE)            # the only endpoint: the host forwarder
         self.assertNotIn(C.TOKEN_FD_ENV, s["env"])                               # added by the runner, never the caller
         self.assertEqual(s["tokenSha256"], hashlib.sha256(F.DUMMY_TOKEN.encode()).hexdigest())
         self.assertNotIn(F.DUMMY_TOKEN, json.dumps(s["env"]) + " ".join(s["argv"]) + s["stdin"].decode())
@@ -275,8 +278,9 @@ class Calls(Base):
         self.assertEqual((res_row["estimateBasis"], res_row["priceVersion"]), ("pacing-terra6-list-rates", CLAUDE_CLI_PRICE_VERSION))
         self.assertEqual(res_row["usage"], {"uncachedInputTokens": 1000, "cachedInputTokens": 200,
                                             "cacheWriteInputTokens": 300, "outputTokens": 40, "reasoningTokens": 0})
-        self.assertEqual((res_row["generationId"], res_row["isolation"]["requestsSeen"], res_row["isolation"]["toolItems"]),
-                         ("req_fake_1", 1, 0))
+        self.assertEqual((res_row["generationId"], res_row["isolation"]["requestsSeen"], res_row["isolation"]["toolItems"],
+                          res_row["isolation"]["requestsSent"], res_row["isolation"]["forwarder"]["version"]),
+                         ("req_fake_1", 1, 0, 1, "claude-loopback-forwarder@1"))
         self.assertEqual(self.led.totals()["committedUsdMicros"], 0)
         self.assertNotIn(F.DUMMY_TOKEN, Path(self.dir, "led.jsonl").read_text())
         self.assertEqual(self.leftovers(), [])
@@ -301,12 +305,40 @@ class Calls(Base):
                          ("init-plugin", "init-surface:init-plugins"), ("wrong-model", "init-surface:init-model"),
                          ("two-requests", "extra-request"), ("max_tokens", "extra-turn"),
                          ("extra-model", "extra-model:claude-haiku-5-5"), ("unknown-event", "unknown-event:system/hook_response"),
-                         ("thinking", "unknown-event:content/thinking"), ("multi-turn", "num-turns:2")):
+                         ("thinking", "unknown-event:content/thinking"), ("multi-turn", "num-turns:2"),
+                         ("nonstream", "nonstreaming-fallback"), ("unrelayed", "answer-not-relayed:0")):
             with self.subTest(sc):
                 p = self.prov(sc)
                 res = p.call(F.claude_request(), KEY)
                 d = res.error["detail"]
-                self.assertEqual((res.outcome, d["reason"], d["itemType"]), ("unknown", "isolation-violation", item))
+                sent = F.SENT.get(sc, 1)                                            # exact, from the forwarder
+                self.assertEqual((res.outcome, d["reason"], d["itemType"], d.get("requestsSent")),
+                                 ("not-sent" if sent == 0 else "unknown", "isolation-violation", item, sent))
+        p = self.prov("unrelayed", "ok")
+        p.call(F.claude_request(), KEY)
+        self.assertEqual(p.disabled_reason, "answer-not-relayed")                  # an answer from anywhere but the forwarder
+
+    def test_extra_usage_is_never_zero_and_latches(self):
+        p = self.prov("overage", "ok")
+        res = p.call(F.claude_request(), KEY)
+        d = res.error["detail"]
+        self.assertEqual((res.outcome, d["reason"], d["errorType"], d["latched"], res.response), ("unknown", "extra-usage",
+                                                                                                    "claude.extra-usage", True, None))
+        self.assertEqual(d["rateLimit"]["isUsingOverage"], True)
+        row = self.rows()[-1]
+        self.assertEqual((row["billingKind"], row["costBasis"]), ("claude-extra-usage", "extra-usage-charge-unknown"))
+        self.assertIn("may have been billed as extra usage", row["note"])
+        self.assertEqual(p.call(F.claude_request(), (*KEY[:3], 1, 0)).error["detail"]["reason"], "limit-latched")
+        self.assertTrue(C.extra_usage(None, {"anthropic-ratelimit-unified-overage-in-use": "true"}))      # host-side headers alone
+        self.assertTrue(C.extra_usage({"status": "rejected", "overageStatus": "allowed"}, None))
+        self.assertFalse(C.extra_usage({"status": "allowed", "isUsingOverage": False}, {"anthropic-ratelimit-unified-status": "allowed"}))
+
+    def test_a_404_model_unavailable_latches_with_the_upstream_status(self):
+        p = self.prov("model404", "ok")
+        res = p.call(F.claude_request(), KEY)
+        d = res.error["detail"]
+        self.assertEqual((res.outcome, d["errorType"], d["httpStatus"], d["requestsSent"], d["latched"]),
+                         ("rejected-before-processing", "claude.model-unavailable", 404, 1, True))
 
     def test_a_written_cwd_or_a_persisted_credential_disables_the_adapter(self):
         for sc in ("write-cwd", "write-cred", "persist-token"):
@@ -353,7 +385,7 @@ class Calls(Base):
         p = self.prov("retry401", "ok")
         res = p.call(F.claude_request(), KEY)
         d = res.error["detail"]
-        self.assertEqual((d["reason"], d["errorType"], d["httpStatus"], d["cliError"], d["requestsSeen"], d["retryRequestSeen"]),
+        self.assertEqual((d["reason"], d["errorType"], d["httpStatus"], d["cliError"], d["requestsSent"], d["retryRequestSent"]),
                          ("cli-retry", "claude.auth", 401, "authentication_failed", 1, False))
         self.assertEqual(res.outcome, "rejected-before-processing")
         self.assertIn("hidden retry", res.error["message"])
@@ -412,11 +444,11 @@ class Calls(Base):
     def test_runner_crash_and_missing_binary(self):
         led = RuntimeLedger(os.path.join(self.dir, "led.jsonl"), 50_000_000)
         for exc, outcome, reason in ((FileNotFoundError(), "not-sent", "claude-missing"),
-                                     (RuntimeError("x"), "unknown", "runner-crash")):
+                                     (RuntimeError("x"), "not-sent", "runner-crash")):     # the forwarder relayed nothing
             def boom(*a, _e=exc, **k):
                 raise _e
             p = C.ClaudeCliProvider(enabled=True, ledger=led, runner=boom, preflight=GOOD, workdir_parent=self.dir,
-                                    token_loader=F.dummy_token, run_scope=reason)
+                                    token_loader=F.dummy_token, run_scope=reason, forwarder=F.FakeForwarder())
             res = p.call(F.claude_request(), KEY)
             self.assertEqual((res.outcome, res.error["detail"]["reason"]), (outcome, reason))
         self.assertEqual(self.leftovers(), [])
@@ -486,6 +518,10 @@ class Audits(unittest.TestCase):
         self.assertEqual(C.classify(None, None, None, "Not logged in · Please run /login"), "claude.auth")
         self.assertEqual(C.classify(402, None, None, ""), "claude.billing")
         self.assertEqual(C.classify(400, None, None, ""), "claude.invalid-request")
+        self.assertEqual(C.classify(400, "invalid_request", None, "API Error: Opus 5.5's safeguards flagged this message"),
+                         "claude.refusal")                                           # N1: refusal before invalid-request
+        self.assertEqual(C.classify(404, None, None, ""), "claude.model-unavailable")
+        self.assertEqual(C.classify(None, None, None, "Prompt is too long"), "claude.prompt-too-long")
         self.assertEqual(C.classify(503, None, None, ""), "claude.server-error")
 
     def test_json_extraction_tolerates_one_whole_fence_only(self):
@@ -511,11 +547,12 @@ def capture_out(**over):
             "metadataKeys": ["user_id"],
             "system": [{"kind": "billing"}, {"kind": "identity"}, {"kind": "base"}],
             "messages": [{"role": "user", "isPrompt": True, "markers": []},
-                         {"role": "system", "envBlock": True, "head": "# Environment", "chars": 900, "markers": []}]}
+                         {"role": "system", "envBlock": True, "envExact": True, "head": "# Environment", "chars": 900, "markers": []}]}
     out = {"mode": "answer", "model": m, "posts": 1, "paths": ["/v1/messages?beta=true"], "others": [], "bodies": [body],
            "bearerIsDummy": [True], "apiKeyHeader": [False], "betas": ["claude-code-20250219,oauth-2025-04-20"],
            "verdict": {"outcome": "processed", "status": "ok", "outputOk": True}, "disabled": None, "executed": [],
-           "leaks": {"hostname": False, "osRelease": False, "tokenInBody": False},
+           "leaks": {"hostname": False, "osRelease": False, "tokenInBody": False}, "baseUrlIsForwarder": True,
+           "forwarder": {"version": C.FORWARDER_VERSION, "requestsSent": 1, "requestsAttempted": 1, "refused": [], "upstreamStatus": 200},
            "sandbox": {"bwrap": True, "roRoot": True, "homeTmpfs": True, "hardened": True, "masks": 6, "unshareNet": False}}
     out.update(over)
     return out
@@ -538,12 +575,17 @@ class CaptureAnalysis(unittest.TestCase):
             "no-sandbox": capture_out(sandbox={"bwrap": False}),
             "leak": capture_out(leaks={"hostname": True}),
             "ran": capture_out(executed=["cwd/pullo-mark-bang"]),
+            "not-exact-env": capture_out(bodies=[dict(b, messages=[b["messages"][0], dict(b["messages"][1], envExact=False)])]),
+            "no-forwarder": capture_out(baseUrlIsForwarder=False),
+            "a-get": capture_out(forwarder=dict(capture_out()["forwarder"], refused=[{"method": "GET", "path": "/api/claude_code/settings",
+                                                                                     "verdict": "method-or-path"}])),
+            "count-mismatch": capture_out(forwarder=dict(capture_out()["forwarder"], requestsSent=2)),
         }
         for name, out in bad.items():
             with self.subTest(name):
                 self.assertFalse(CAP.analyse(out, F.MODEL, "answer")["supported"])
         ul = capture_out(mode="usage-limit", verdict={"httpStatus": 429, "wordsKept": True, "errorType": "claude.usage-limit",
-                                                      "rateLimitStatus": "rejected"}, latched="claude.usage-limit",
+                                                      "rateLimitStatus": "rejected", "requestsSent": 1}, latched="claude.usage-limit",
                          second={"outcome": "not-sent", "reason": "limit-latched", "newRequests": 0})
         self.assertTrue(CAP.analyse(ul, F.MODEL, "usage-limit")["supported"])
         self.assertFalse(CAP.analyse(dict(ul, second={"outcome": "processed", "newRequests": 1}), F.MODEL,
@@ -569,8 +611,21 @@ def fake_bin(base, scenario, **kw):
     return F.write_fake_binary(d, scenario, **kw)
 
 
+UPSTREAM_URL, _UP_SRV, UPSTREAM_LOG = None, None, []
+
+
+def local_upstream():
+    """ONE loopback stand-in for api.anthropic.com shared by the tests that run the REAL Forwarder: it must never relay off-host."""
+    global UPSTREAM_URL, _UP_SRV
+    if UPSTREAM_URL is None:
+        UPSTREAM_URL, _UP_SRV, log = F.start_upstream()
+        UPSTREAM_LOG.append(log)
+    return UPSTREAM_URL
+
+
 def exposed(binp, **kw):
     kw.setdefault("token_loader", F.dummy_token)
+    kw.setdefault("upstream", local_upstream())                                  # NEVER the production upstream in a test
     p = _Exposed(enabled=True, claude=binp, preflight=GOOD, **kw)
     p.fake_dir = os.path.dirname(binp)
     return p
@@ -712,12 +767,12 @@ class RealCliCaptureProof(unittest.TestCase):
         for k, v in rep["requestIsolation"].items():
             self.assertEqual((v["supported"], v["tools"], v["posts"]), (True, [], 1), k)
 
-    def test_errors_limits_continuations_and_injection_on_the_real_cli(self):
-        for mode in ("status:429", "status:529", "status:500", "max_tokens", "inject"):
+    def test_every_other_mode_on_the_real_cli_through_the_forwarder(self):
+        for mode in [m for m in C.CAPTURE_MODES if m not in C.PREFLIGHT_CAPTURE_MODES]:   # 404-then-ok, remote-settings, ...
             with self.subTest(mode):
                 cap = C.check_request_isolation("claude", F.MODEL, mode=mode)
                 self.assertTrue(cap["supported"], cap)
-                self.assertLessEqual(cap["posts"], 1 if mode != "max_tokens" else C.MAX_REQUESTS_PER_CALL)
+                self.assertEqual(cap["posts"], 1)                                   # exact: the forwarder relays at most one
 
 
 class Canary(Base):
@@ -728,13 +783,17 @@ class Canary(Base):
             CAN.main(["--out-dir", self.dir, "--confirm-live"])
 
     def test_canary_passes_on_a_clean_answer_and_keeps_the_cli_words_on_failure(self):
-        rec = CAN.run_canary(self.dir, runner=F.ScriptedRunner("ok"), preflight=GOOD, token_loader=F.dummy_token)
+        ok = F.ScriptedRunner("ok")
+        rec = CAN.run_canary(self.dir, runner=ok, preflight=GOOD, token_loader=F.dummy_token,
+                             provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=ok.forwarder))
         doc = json.loads(Path(rec, "receipt.json").read_text())
         self.assertTrue(doc["ok"] and all(doc["checks"].values()), doc["checks"])
         self.assertEqual((doc["billingKind"], doc["actualUsdMicros"], doc["openRouterCalls"]), ("claude-subscription", 0, 0))
         self.assertNotIn(F.DUMMY_TOKEN, Path(rec, "receipt.json").read_text() + Path(rec, "runtime-ledger.jsonl").read_text())
         with self.assertRaisesRegex(RuntimeError, "canary failed"):
-            CAN.run_canary(self.dir, runner=F.ScriptedRunner("usage-limit"), preflight=GOOD, token_loader=F.dummy_token,
+            lim = F.ScriptedRunner("usage-limit")
+            CAN.run_canary(self.dir, runner=lim, preflight=GOOD, token_loader=F.dummy_token,
+                           provider_factory=functools.partial(C.ClaudeCliProvider, forwarder=lim.forwarder),
                            now=__import__("datetime").datetime(2026, 11, 1, tzinfo=__import__("datetime").timezone.utc))
         bad = Path(self.dir, "claude-cli-canary-20261101T000000000000Z")
         self.assertIn("hit your limit", Path(bad, "receipt.json").read_text())
@@ -742,3 +801,69 @@ class Canary(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwarderUnit(unittest.TestCase):
+    """The REAL Forwarder against a loopback upstream (no CLI, no sandbox): what it relays, refuses, counts and records."""
+
+    def setUp(self):
+        self.url, self.srv, self.log = F.start_upstream(headers=[("anthropic-ratelimit-unified-status", "allowed"),
+                                                                 ("anthropic-ratelimit-unified-overage-in-use", "false")])
+        self.addCleanup(self.srv.shutdown)
+        self.fwd = C.Forwarder(self.url)
+        self.addCleanup(self.fwd._srv.shutdown)
+
+    def req(self, base, method="POST", path=C.FORWARD_PATH, body=None, headers=None):
+        import http.client
+        import urllib.parse
+        u = urllib.parse.urlsplit(base)
+        c = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
+        raw = json.dumps(body).encode() if body is not None else None
+        c.request(method, u.path + path, body=raw, headers={"content-type": "application/json", "authorization": "Bearer DUMMY",
+                                                            **(headers or {})})
+        r = c.getresponse()
+        out = (r.status, r.read())
+        c.close()
+        return out
+
+    def test_relays_one_streamed_post_and_refuses_everything_else(self):
+        slot = self.fwd.open("claude-sonnet-5-5", 10)
+        base = self.fwd.base_url(slot)
+        self.assertRegex(base, C.BASE_URL_RE)
+        good = {"model": "claude-sonnet-5-5", "stream": True, "tools": [], "messages": [{"role": "user", "content": "x"}]}
+        self.assertEqual(self.req(base, "GET", "/api/claude_code/settings")[0], 404)       # remote settings: never relayed
+        self.assertEqual(self.req(base, "HEAD", "/api/hello")[0], 404)
+        for bad, why in ((dict(good, stream=False), "not-streaming"), (dict(good, model="claude-haiku-5-5"), "model"),
+                         (dict(good, tools=[{"name": "Bash"}]), "tools"), (dict(good, tool_choice={"type": "any"}), "tools")):
+            self.assertEqual(self.req(base, body=bad)[0], 404, why)
+        self.assertEqual(self.req(base, path="/v1/messages/count_tokens?beta=true", body=good)[0], 404)
+        status, body = self.req(base, body=good)
+        self.assertEqual((status, body), (200, b"event: message_stop\ndata: {}\n\n"))
+        self.assertEqual(self.req(base, body=good)[0], 404)                                  # a second request: refused
+        self.assertEqual(self.req("http://127.0.0.1:%d/c/%s" % (self.fwd.port, "x" * 40), body=good)[0], 404)   # unknown token
+        facts = self.fwd.close(slot)
+        self.assertEqual((facts["requestsSent"], facts["requestsAttempted"], facts["upstreamStatus"]), (1, 9, 200))
+        self.assertEqual([a["verdict"] for a in facts["refused"]],
+                         ["method-or-path", "method-or-path", "not-streaming", "model", "tools", "tools", "method-or-path",
+                          "second-request"])
+        self.assertEqual(facts["rateLimitHeaders"], {"anthropic-ratelimit-unified-status": "allowed",
+                                                     "anthropic-ratelimit-unified-overage-in-use": "false"})
+        self.assertEqual(self.fwd.stray, 1)
+        self.assertEqual([(x["method"], x["path"], x["auth"], x["acceptEncoding"]) for x in self.log],
+                         [("POST", C.FORWARD_PATH, "Bearer DUMMY", "identity")])             # exactly one, headers relayed
+        self.assertNotIn("DUMMY", json.dumps(facts))                                         # no header value is recorded
+        self.assertEqual(self.req(base, body=good)[0], 404)                                  # a closed slot relays nothing
+
+    def test_upstream_errors_keep_status_and_words(self):
+        url, srv, log = F.start_upstream(status=429, headers=[("anthropic-ratelimit-unified-status", "rejected")])
+        self.addCleanup(srv.shutdown)
+        fwd = C.Forwarder(url)
+        self.addCleanup(fwd._srv.shutdown)
+        slot = fwd.open("claude-opus-5-5", 10)
+        status, body = self.req(fwd.base_url(slot), body={"model": "claude-opus-5-5", "stream": True, "messages": []})
+        f = fwd.close(slot)
+        self.assertEqual((status, f["upstreamStatus"], f["requestsSent"], f["rateLimitHeaders"]),
+                         (429, 429, 1, {"anthropic-ratelimit-unified-status": "rejected"}))
+        self.assertIn('"message":"up"', f["upstreamError"])
+        with self.assertRaises(ValueError):
+            C.Forwarder("ftp://x")

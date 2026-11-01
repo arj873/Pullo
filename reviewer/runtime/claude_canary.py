@@ -9,7 +9,9 @@ Model workers must NEVER pass --confirm-live. Without it nothing runs. The call 
 proofs; the CLI runs with no tools in the masked bwrap sandbox, the OAuth access token on an inherited fd) with a
 tool-temptation prompt, max_calls=1, no retries (a scheduled CLI retry is killed before it is sent), no fallback, no
 OpenRouter key or transport, and its own fresh runtime ledger inside the receipt directory (never the OpenRouter trial
-state). It passes only with a schema-valid answer, zero tool attempts, exactly one provider request seen, only the pinned
+state). Every request goes through the adapter's host loopback forwarder (claude-loopback-forwarder@1) to api.anthropic.com - the
+canary is the first proof that OAuth subscription auth works through it. It passes only with a schema-valid answer, zero tool
+attempts, exactly one request relayed by the forwarder (and one seen in the stream), no extra usage, only the pinned
 model in the CLI's usage and an intact per-call home/cwd. The receipt records a subscription call ($0) with a PACING
 estimate only (Terra-6 list rates); a failure keeps the CLI's own words (e.g. "You've hit your limit · resets ..."). A failed
 canary keeps its receipt. The token itself is never written anywhere."""
@@ -97,7 +99,9 @@ def run_canary(out_dir, *, case: str = "investigator-final", model: str = CLAUDE
             "zeroToolItems": iso.get("toolItems") == 0,
             "workIntact": (iso.get("workAfter") or {}).get("ok") is True,
             "oneProviderCall": provider.calls == 1,
-            "oneRequestSeen": iso.get("requestsSeen") == 1,       # no hidden retry / extra turn left the CLI
+            "oneRequestSeen": iso.get("requestsSeen") == 1,       # the stream shows one request
+            "oneRequestSent": iso.get("requestsSent") == 1,       # EXACT: the host forwarder relayed exactly one (S1/N4)
+            "noExtraUsage": res_row.get("billingKind") != "claude-extra-usage",
             "subscriptionRow": res_row.get("billingKind") == "claude-subscription" and res_row.get("kind") == "claude-cli",
             "notLatched": provider.latched is None,
         }

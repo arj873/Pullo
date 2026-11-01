@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -68,13 +69,15 @@ def rate(status="allowed", **kw):
 
 
 def result(model_cli, res=None, *, subtype="success", is_error=False, status=None, stop="end_turn", turns=1, usage=USAGE,
-           models=None, terminal="completed", errors=None):
+           models=None, terminal="completed", errors=None, streamed=True):
     d = {"subtype": subtype, "is_error": is_error, "num_turns": turns, "result": res, "stop_reason": stop,
          "terminal_reason": terminal, "api_error_status": status, "total_cost_usd": 0.0123, "usage": usage,
          "modelUsage": {m: {"inputTokens": 1000, "outputTokens": 40} for m in (models if models is not None else [model_cli])},
          "permission_denials": []}
     if errors is not None:
         d["errors"] = errors
+    if streamed and not is_error:                # 2.1.309 stamps every STREAMED answer with these (absent on a fallback)
+        d.update(ttft_ms=40, ttft_stream_ms=39, first_content_frame_ms=40)
     return ev("result", **d)
 
 
@@ -208,19 +211,76 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
     if scenario == "persist-token":           # a CLI that cached the OAuth token in its config: must disable the adapter
         Path(env["HOME"], ".claude.json").write_text(json.dumps({"oauthAccount": {"token": token}}))
         return [i, text(m, ans), result(m, ans)], 0, b"", 0
+    if scenario == "overage":                 # the plan window is exhausted; the answer was served from paid extra usage
+        return [i, text(m, ans), rate("rejected", rateLimitType="five_hour", overageStatus="allowed", isUsingOverage=True,
+                                      overageInUse=True), result(m, ans)], 0, b"", 0
+    if scenario == "model404":
+        t = "API Error: 404 model not found"
+        return [i, api_error(m, t, 404, "not_found_error"),
+                result(m, t, is_error=True, status=404, stop="stop_sequence", terminal="api_error", usage=None, models=[])], 1, b"", 0
+    if scenario == "nonstream":               # a success without the streaming markers (the hidden non-streaming re-send)
+        return [i, text(m, ans), result(m, ans, streamed=False)], 0, b"", 0
+    if scenario == "unrelayed":               # a success the forwarder never relayed (the CLI talked to something else)
+        return [i, text(m, ans), result(m, ans)], 0, b"", 0
     if scenario == "sandbox-probe":           # executable fake only: report what the sandboxed process sees
         t = json.dumps(sandbox_probe(stdin))
         return [i, text(m, t), result(m, t)], 0, b"", 0
     raise ValueError(scenario)
 
 
+# What the host forwarder relays per scenario (the real CLI's requests): 0 = the CLI stopped before any request.
+SENT = {"not-logged-in": 0, "stderr-only": 0, "init-tools": 0, "init-mcp": 0, "init-plugin": 0, "wrong-model": 0, "unrelayed": 0}
+UPSTREAM_STATUS = {"retry401": 401, "usage-limit": 429, "throttle": 429, "overloaded": 529, "server500": 500, "model404": 404,
+                   "refusal": 200}
+UPSTREAM_RATE = {"overage": {"anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-overage-status": "allowed",
+                             "anthropic-ratelimit-unified-overage-in-use": "true"},
+                 "usage-limit": {"anthropic-ratelimit-unified-status": "rejected"}}
+
+
+class FakeForwarder:
+    """Stand-in for claude_cli.Forwarder in scripted tests (no socket): the scripted runner records what the CLI sent through it."""
+    port = 1
+
+    def __init__(self):
+        self.slots, self.closed = {}, []
+
+    def open(self, model_cli, timeout):
+        slot = C.Slot(secrets.token_urlsafe(32), model_cli, timeout)
+        self.slots[slot.token] = slot
+        return slot
+
+    def base_url(self, slot):
+        return f"http://127.0.0.1:{self.port}/c/{slot.token}"
+
+    def close(self, slot):
+        self.slots.pop(slot.token, None)
+        f = slot.facts()
+        self.closed.append(f)
+        return f
+
+    def record(self, env, scenario):
+        slot = self.slots.get(str(env.get("ANTHROPIC_BASE_URL", "")).rsplit("/", 1)[-1])
+        if slot is None:
+            return
+        n = SENT.get(scenario, 1)
+        slot.forwarded = n
+        slot.attempts = [{"method": "POST", "path": C.FORWARD_PATH, "verdict": "forwarded"}] * n
+        if n:
+            slot.upstream_status = UPSTREAM_STATUS.get(scenario, 200)
+            slot.rate_headers = dict(UPSTREAM_RATE.get(scenario, {}))
+            if slot.upstream_status != 200:
+                slot.upstream_error = '{"type":"error","error":{"message":"fake upstream ' + str(slot.upstream_status) + '"}}'
+
+
 class ScriptedRunner:
     """An in-process stand-in for run_bounded_stream: one scenario per call (default "ok"); the stdout lines go through
-    the adapter's live audit exactly as the real runner feeds them, and the run stops at the first abort (the kill)."""
+    the adapter's live audit exactly as the real runner feeds them, and the run stops at the first abort (the kill). Its
+    `forwarder` (a FakeForwarder) is what the adapter must be given: it records the scenario's requests."""
 
     def __init__(self, *scenarios, answer=None, answers=None):
         self.scenarios, self.answer, self.seen = list(scenarios), answer, []
         self.answers = list(answers) if answers is not None else None
+        self.forwarder = FakeForwarder()
 
     def __call__(self, argv, stdin, env, cwd, timeout, *, audit=None, token=None, **kw):
         sc = self.scenarios.pop(0) if self.scenarios else "ok"
@@ -229,6 +289,7 @@ class ScriptedRunner:
                           "tokenSha256": hashlib.sha256(token.reveal().encode()).hexdigest() if token else None})
         ans = json.dumps(self.answers.pop(0)) if self.answers else self.answer
         lines, rc, err, sleep = simulate(sc, argv, stdin, env, cwd, answer=ans, token=token.reveal() if token else None)
+        self.forwarder.record(env, sc)
         aborted, out = None, b""
         for ln in lines:
             out += ln.encode() + b"\n"
@@ -258,6 +319,16 @@ try:                                         # inside the live sandbox only a bo
                             "cwdListing": os.listdir(os.getcwd())}}) + "\n")
 except OSError:
     pass
+base = os.environ.get("ANTHROPIC_BASE_URL")
+if base and SCENARIO not in {no_send!r}:     # as the real CLI: ONE streamed POST through the host forwarder
+    import urllib.request
+    m = argv[argv.index("--model") + 1]
+    body = json.dumps({{"model": m, "stream": True, "tools": [], "messages": [{{"role": "user", "content": "x"}}]}}).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request(base + "/v1/messages?beta=true", body, {{"content-type": "application/json"}}),
+                               timeout=10).read()
+    except Exception:
+        pass
 lines, rc, err, sleep = simulate(SCENARIO, argv, stdin, dict(os.environ), os.getcwd())
 for ln in lines:
     sys.stdout.write(ln + "\n"); sys.stdout.flush()
@@ -273,7 +344,7 @@ def write_fake_binary(directory, scenario="ok", *, version=None, flags=None) -> 
     """-> (path of an executable fake claude, path of its call log)."""
     d = Path(directory)
     path, log = d / f"fake-claude-{scenario}", d / f"fake-claude-{scenario}.log"
-    path.write_text(FAKE_BIN.format(python=sys.executable, root=str(ROOT), scenario=scenario, log=str(log),
+    path.write_text(FAKE_BIN.format(python=sys.executable, root=str(ROOT), scenario=scenario, log=str(log), no_send=sorted(SENT),
                                     version=version or C.CLAUDE_CLI_VERSION,
                                     flags=list(C.REQUIRED_HELP_FLAGS if flags is None else flags)))
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -294,3 +365,38 @@ def claude_request(role="investigator", text="Diff:\n+x = 1\n", model=MODEL, **o
 def dummy_token():
     from reviewer.runtime.envfile import Secret
     return C.AccessToken(Secret(DUMMY_TOKEN), None, "test-dummy")
+
+
+def start_upstream(status=200, headers=()):
+    """A loopback stand-in for api.anthropic.com behind the real Forwarder (tests only). -> (url, server, log of requests)."""
+    import http.server
+    import socketserver
+    import threading
+    log = []
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _any(self):
+            n = int(self.headers.get("content-length") or 0)
+            raw = self.rfile.read(n) if n else b""
+            log.append({"method": self.command, "path": self.path, "auth": self.headers.get("authorization"),
+                        "acceptEncoding": self.headers.get("accept-encoding"), "body": raw})
+            body = b"event: message_stop\ndata: {}\n\n" if status == 200 else b'{"type":"error","error":{"message":"up"}}'
+            self.send_response(status)
+            self.send_header("content-type", "text/event-stream" if status == 200 else "application/json")
+            self.send_header("request-id", f"req_up_{len(log)}")
+            for k, v in headers:
+                self.send_header(k, v)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = do_POST = _any
+
+    class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+    srv = S(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{srv.server_address[1]}", srv, log

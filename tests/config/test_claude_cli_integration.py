@@ -41,7 +41,7 @@ def scripted_claude(answers, runners, scenarios=()):
         runners.append(runner)
         return P.CliProviders(P.DisabledProvider("openai"), P.DisabledProvider("opencode"), O.ClaudeCliProvider(
             enabled=True, ledger=ledger, run_scope=scope, runner=runner, preflight={"supported": True},
-            token_loader=dummy_token))
+            token_loader=dummy_token, forwarder=runner.forwarder))
     return factory
 
 
@@ -69,7 +69,7 @@ class ConfigAndProfile(unittest.TestCase):
             rep = cfg.report()
             self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
                              {r: ("claude-cli", model) for r in ("investigator", "verifier", "judge")})
-            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@1"
+            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@2"
                                 and v["billing"] == "claude-subscription ($0; pacing estimate at Terra-6 list rates, not money)"
                                 for v in rep["roles"].values()))
             self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
@@ -209,7 +209,7 @@ class RepositoryClaudeCli(RT.Base):
         first = rep["plan"]["firstRequest"]
         self.assertEqual((first["provider"], first["model"], first["schemaName"], first["billingKind"]),
                          ("claude-cli", MODEL, "InvestigatorTurn", "claude-subscription"))
-        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@1", "2.1.309"))
+        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@2", "2.1.309"))
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
         self.assertEqual(self.w.state_bytes(), before)
@@ -235,7 +235,8 @@ class RepositoryClaudeCli(RT.Base):
         seen = runners[0].seen
         self.assertTrue(all(O.split_sandbox(s["argv"])[1] == O.build_argv("claude", MODEL)
                             and O.split_sandbox(s["argv"])[0] is not None for s in seen))
-        self.assertTrue(all(not any(k.startswith(("OPENROUTER", "OPENAI", "ANTHROPIC")) for k in s["env"]) for s in seen))
+        self.assertTrue(all(not any(k.startswith(("OPENROUTER", "OPENAI", "ANTHROPIC")) for k in s["env"] if k != "ANTHROPIC_BASE_URL")
+                            and O.BASE_URL_RE.fullmatch(s["env"]["ANTHROPIC_BASE_URL"]) for s in seen))   # the forwarder slot only
         self.assertNotIn(DUMMY_TOKEN, (d / TERRA_LEDGER_NAME).read_text())
 
     def test_live_mixed_claude_cli_arm_is_refused_before_state_key_or_cli(self):
@@ -282,7 +283,7 @@ class BenchmarkClaudeCli(BT.Base):
         for k in ("argvSha256", "instructionsSha256", "envSha256", "sandboxSha256"):
             self.assertRegex(first[k], "^sha256:[0-9a-f]{64}$")
         self.assertTrue(all(f["provider"] == "claude-cli" for f in p["capturedRequests"]))
-        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@1" for v in p["models"].values()))
+        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@2" for v in p["models"].values()))
         self.assertEqual(self.w.state_bytes(), before)
 
     def test_live_runs_every_role_on_the_subscription_and_the_plan_pin_is_the_actual_stdin(self):
