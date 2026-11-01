@@ -167,6 +167,7 @@ def main() -> int:
     posts = [x for x in _Fake.log if x["method"] == "POST"]
     box = prov.sandbox_argv or []
     sandbox = {"bwrap": bool(box) and os.path.basename(box[0]) == "bwrap", "roRoot": box[2:5] == ["--ro-bind", "/", "/"],
+               "homeTmpfs": box[7:9] == ["--tmpfs", O.real_home()],
                "masks": sum(1 for x in box if x in ("--tmpfs", "/dev/null")), "unshareNet": "--unshare-net" in box}
     print(json.dumps({"mode": mode, "model": model, "posts": len(posts), "sandbox": sandbox,
                       "gets": [x["path"] for x in _Fake.log if x["method"] == "GET"],
@@ -216,7 +217,7 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("the request lacks the pinned json_schema response_format")
     v = out.get("verdict") or {}
     box = out.get("sandbox") or {}
-    if not (box.get("bwrap") and box.get("roRoot")) or box.get("unshareNet"):
+    if not (box.get("bwrap") and box.get("roRoot") and box.get("homeTmpfs")) or box.get("unshareNet"):
         problems.append("the CLI did not run through the live bwrap sandbox")
     if mode.startswith("status:"):
         if out.get("posts") != 1:

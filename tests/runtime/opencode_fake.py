@@ -65,12 +65,14 @@ PROBE_MARK = "PULLO-SANDBOX-PROBE:"
 
 def sandbox_probe(stdin: bytes) -> dict:
     """Inside the live sandbox (executable fake only): what the CLI process can see and write. The paths come from the
-    prompt: {"hidden": [dirs/files that must look empty/unreadable], "outside": a path outside the work dir}."""
+    prompt: {"hidden": [dirs/files that must look absent, empty or unreadable], "outside": a path outside the work dir}."""
     text = stdin.decode("utf-8", "replace")
     spec = json.loads(text[text.index(PROBE_MARK) + len(PROBE_MARK):].split("\n", 1)[0])
     seen = {}
     for path in spec["hidden"]:
-        if os.path.isdir(path):
+        if not os.path.lexists(path):
+            seen[path] = {"absent": True}
+        elif os.path.isdir(path):
             seen[path] = {"entries": len(os.listdir(path))}
         else:
             try:

@@ -8,8 +8,11 @@ offline against a loopback fake endpoint, no inference):
     (~/.local/share/opencode/auth.json), config, plugins, skills, AGENTS.md/CLAUDE.md and background service are not
     used. With no credential the CLI's catalog holds ONLY the `opencode` provider's free models (paid models need a key),
     so even a misbehaving CLI cannot bill the OpenRouter key or the ChatGPT subscription. The dir is deleted afterwards.
-  * SANDBOX (`opencode-bwrap-masked@1`, defense in depth): every live call runs inside `bwrap` - the host filesystem
-    read-only (--ro-bind / /), a fresh /dev, EMPTY tmpfs over the user's ~/.local/share/opencode, ~/.config/opencode,
+  * SANDBOX (`opencode-bwrap-masked@2`, defense in depth): every live call runs inside `bwrap` - the host filesystem
+    read-only (--ro-bind / /), a fresh /dev, an EMPTY tmpfs over the WHOLE user home (the passwd entry, not $HOME: no
+    ~/.codex, ~/.ssh, ~/.claude, ~/.config/gh, ... is visible; the opencode binary must live outside it, else
+    OpenCodeUnsupported), and - redundant under it but kept, and covering paths outside the home - EMPTY tmpfs over the
+    user's ~/.local/share/opencode, ~/.config/opencode,
     ~/.local/state/opencode, ~/.cache/opencode, ~/.aws and ~/.local/state/pullo, /dev/null over the .env of the reviewer
     repo root and of the process cwd and over every HOST_MASKS path (root's runner adds the code_review .env), only the
     per-call work dir writable, the network kept (the free endpoint),
@@ -137,7 +140,7 @@ ERR_TEXT = 600                   # chars of CLI message / provider body kept in 
 DB_POLL_SEC = 0.2                # session-DB retry watch period (2.1.4 waits >= ~1.65 s between scheduling and re-sending)
 RETRY_POLICY = "killed-when-scheduled:db-poll-200ms;fallback-killed-at-second-step-start;requestsSent-counted"
 # The live sandbox (S3). Home-relative dirs hidden behind an empty tmpfs; .env files hidden behind /dev/null.
-SANDBOX_VERSION = "opencode-bwrap-masked@1"
+SANDBOX_VERSION = "opencode-bwrap-masked@2"
 SANDBOX_HOME_MASKS = (".local/share/opencode", ".config/opencode", ".local/state/opencode", ".cache/opencode", ".aws",
                       ".local/state/pullo")
 # Absolute paths a HOST runner adds to the masks before any call (additive only), e.g. the code_review checkout's .env when
@@ -363,6 +366,19 @@ def _user_homes() -> list[str]:
     return list(dict.fromkeys(h for h in homes if h and os.path.isabs(h)))
 
 
+def real_home() -> str | None:
+    """The user's home from the passwd entry (never $HOME), resolved; None if there is none usable (no sandbox, no call)."""
+    try:
+        h = os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        return None
+    return h if os.path.isabs(h) and h != "/" and os.path.isdir(h) else None
+
+
+def under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def sandbox_masks() -> list[tuple[str, str]]:
     """[(kind, real path)] of every EXISTING host path the live sandbox hides, parents first: "dir" -> an empty tmpfs,
     "file" -> /dev/null. The user's opencode data/config/state/cache dirs, ~/.aws and ~/.local/state/pullo, the .env of
@@ -389,9 +405,10 @@ def sandbox_masks() -> list[tuple[str, str]]:
     return out
 
 
-def sandbox_prefix(bwrap: str, work: str, masks) -> list[str]:
-    """The bwrap argv that wraps a live `opencode run` (ends with "--"; the CLI argv follows)."""
-    argv = [bwrap, "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev"]
+def sandbox_prefix(bwrap: str, work: str, masks, home: str) -> list[str]:
+    """The bwrap argv that wraps a live `opencode run` (ends with "--"; the CLI argv follows): the whole user home becomes an empty
+    tmpfs right after the read-only root, then the per-path masks, then the per-call work dir (reachable even under the home)."""
+    argv = [bwrap, "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", home]
     for kind, path in masks:
         argv += ["--tmpfs", path] if kind == "dir" else ["--ro-bind", "/dev/null", path]
     return argv + ["--bind", work, work, "--chdir", os.path.join(work, "cwd"), "--"]
@@ -408,6 +425,8 @@ def split_sandbox(argv) -> tuple[list[str] | None, list[str]]:
 
 def sandbox_identity() -> dict:
     spec = {"version": SANDBOX_VERSION, "flags": ["--die-with-parent", "--ro-bind / /", "--dev /dev"],
+            "homeTmpfs": "--tmpfs <passwd home> after --ro-bind / / and before the masks and the work-dir --bind; refused if the "
+                         "opencode binary resolves under the home",
             "tmpfsHomeDirs": list(SANDBOX_HOME_MASKS), "devNullFiles": ["<reviewer repo root>/.env", "<process cwd>/.env"],
             "hostMasks": "HOST_MASKS (absolute, additive; recorded per call as sandboxArgvSha256)",
             "writable": "--bind <per-call work dir>", "network": "kept (the free endpoint)", "missingPaths": "skipped"}
@@ -480,7 +499,7 @@ def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None =
     bw = shutil.which("bwrap")
     if prefix is None:
         problems.append("review call is not inside the bwrap sandbox")
-    elif not bw or prefix != sandbox_prefix(bw, work, sandbox_masks()):
+    elif not bw or real_home() is None or prefix != sandbox_prefix(bw, work, sandbox_masks(), real_home()):
         problems.append("sandbox argv differs from the pinned bwrap sandbox for this call")
     if model not in OPENCODE_MODELS or inner != build_argv(inner[0] if inner else "", model):
         problems.append("argv differs from the pinned review argv for this model")
@@ -815,6 +834,11 @@ def check_cli_isolation(opencode: str = "opencode", runner=None, environ=None, *
     want = sorted(models or OPENCODE_MODELS)
     if runner is None and not shutil.which("bwrap"):
         problems.append("bwrap is required: every live opencode call runs in the masked bwrap sandbox")
+    home, binary = real_home(), shutil.which(opencode)
+    if home is None:
+        problems.append("no usable home in the passwd entry: the sandbox masks the whole user home")
+    elif binary is not None and under(os.path.realpath(binary), home):
+        problems.append("the opencode binary resolves under the user home, which the sandbox masks")
     try:
         ver = run([opencode, "--version"]).stdout.decode("utf-8", "replace").strip()
         report["version"] = ver[:80]
@@ -870,6 +894,12 @@ class OpenCodeFreeProvider:
         if bwrap is None and runner is None:
             raise OpenCodeUnsupported("bwrap is required: every live opencode call runs in the masked bwrap sandbox")
         self._bwrap = bwrap or "bwrap"           # an injected (test) runner never executes the prefix
+        self._home = real_home()
+        if self._home is None:
+            raise OpenCodeUnsupported("no usable home in the passwd entry: the sandbox masks the whole user home")
+        binary = shutil.which(opencode)
+        if binary is not None and under(os.path.realpath(binary), self._home):
+            raise OpenCodeUnsupported("the opencode binary resolves under the user home, which the sandbox masks")
         if preflight is None:
             preflight = check_cli_isolation(opencode, None if runner is None else (lambda a, e, c: runner(a, b"", e, c, 30)),
                                             environ, models=sorted(self._allowed))
@@ -980,7 +1010,7 @@ class OpenCodeFreeProvider:
         return config_text(model, out_name)
 
     def _sandbox(self, work) -> list[str]:
-        return sandbox_prefix(self._bwrap, work, sandbox_masks())
+        return sandbox_prefix(self._bwrap, work, sandbox_masks(), self._home)
 
     def _done(self, ck, t0, outcome, result, **fields):
         if self._ledger is not None:

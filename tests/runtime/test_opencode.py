@@ -141,8 +141,8 @@ class Settings(unittest.TestCase):
 
     def test_sandbox_prefix_masks_credentials_and_state_and_keeps_only_the_work_dir_writable(self):
         masks = [("dir", "/h/.aws"), ("dir", "/h/.config/opencode"), ("file", "/r/.env")]
-        pre = O.sandbox_prefix("/usr/bin/bwrap", "/w/rvw-opencode-x", masks)
-        self.assertEqual(pre, ["/usr/bin/bwrap", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev",
+        pre = O.sandbox_prefix("/usr/bin/bwrap", "/w/rvw-opencode-x", masks, "/h")
+        self.assertEqual(pre, ["/usr/bin/bwrap", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev", "--tmpfs", "/h",
                                "--tmpfs", "/h/.aws", "--tmpfs", "/h/.config/opencode", "--ro-bind", "/dev/null", "/r/.env",
                                "--bind", "/w/rvw-opencode-x", "/w/rvw-opencode-x", "--chdir", "/w/rvw-opencode-x/cwd", "--"])
         self.assertNotIn("--unshare-net", pre)                                     # the free endpoint needs the network
@@ -150,6 +150,27 @@ class Settings(unittest.TestCase):
         self.assertEqual(O.split_sandbox(argv), (pre, O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)))
         self.assertEqual(O.split_sandbox(["opencode", "--version"]), (None, ["opencode", "--version"]))
         self.assertTrue(O.is_review_call(argv) and O.is_review_call(argv[len(pre):]))
+        self.assertEqual(O.sandbox_identity()["sandbox"], "opencode-bwrap-masked@2")
+        self.assertTrue(O.under("/h/x/y", "/h") and O.under("/h", "/h") and not O.under("/hx/y", "/h"))
+
+    def test_the_whole_passwd_home_is_masked_and_a_binary_under_it_is_refused(self):
+        from unittest import mock
+        import pwd
+        self.assertEqual(O.real_home(), os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+        with mock.patch.dict(os.environ, {"HOME": "/nonexistent-home"}):
+            self.assertEqual(O.real_home(), os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))   # passwd, never $HOME
+        with tempfile.TemporaryDirectory() as h:
+            binp = Path(h, ".opencode", "bin", "opencode")
+            binp.parent.mkdir(parents=True)
+            binp.write_text("#!/bin/sh\n")
+            binp.chmod(0o755)
+            with mock.patch.object(O, "real_home", return_value=os.path.realpath(h)):
+                with self.assertRaisesRegex(O.OpenCodeUnsupported, "under the user home"):
+                    O.OpenCodeFreeProvider(enabled=True, preflight=GOOD, opencode=str(binp))
+                r = O.check_cli_isolation(str(binp), lambda a, e, c: O.RunResult(0, b"", b""), capture=False)
+                self.assertIn("the opencode binary resolves under the user home, which the sandbox masks", r["problems"])
+        with mock.patch.object(O, "real_home", return_value=None), self.assertRaisesRegex(O.OpenCodeUnsupported, "home"):
+            O.OpenCodeFreeProvider(enabled=True, preflight=GOOD)
 
     def test_sandbox_masks_cover_existing_home_dirs_and_env_files_only(self):
         from unittest import mock
@@ -188,7 +209,8 @@ class Calls(Base):
         s = self.runner.seen[0]
         work = os.path.dirname(s["cwd"])
         self.assertEqual(O.split_sandbox(s["argv"]),                                # every live call is sandboxed
-                         (O.sandbox_prefix(p._bwrap, work, O.sandbox_masks()), O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)))
+                         (O.sandbox_prefix(p._bwrap, work, O.sandbox_masks(), O.real_home()),
+                          O.build_argv("opencode", OPENCODE_DEFAULT_MODEL)))
         self.assertTrue(s["polled"])                                               # with the session-DB retry watch
         self.assertEqual(set(s["env"]) - ALLOWED_ENV, set())                       # no key, no proxy, no operator dirs
         self.assertTrue(s["env"]["HOME"].startswith(self.dir) and "/home/operator" not in json.dumps(s["env"]))
@@ -383,9 +405,10 @@ class Guard(Base):
             with self.subTest(want):
                 self.assertIn(want, ok(**over))
         self.assertIn("argv differs from the pinned review argv for this model", ok(model="opencode/glm-5.3-flash-free"))
-        unmasked = pre[:7] + pre[-6:]                                              # the masks dropped
-        if unmasked != pre:
-            self.assertIn("sandbox argv differs from the pinned bwrap sandbox for this call", ok(argv=unmasked + inner))
+        self.assertEqual(pre[7:9], ["--tmpfs", O.real_home()])                    # the whole home, right after the root
+        for drifted in (pre[:9] + pre[-6:], pre[:7] + pre[9:]):                   # the per-path masks or the home tmpfs dropped
+            if drifted != pre:
+                self.assertIn("sandbox argv differs from the pinned bwrap sandbox for this call", ok(argv=drifted + inner))
 
 
 class Audits(unittest.TestCase):
@@ -458,7 +481,7 @@ def capture_out(**over):
             "messages": [{"role": "system", "contentSha256": "s", "startsWithBase": True, "extraChars": 600, "markers": []},
                          {"role": "user", "contentSha256": "u", "isPrompt": True}]}
     out = {"mode": "answer", "model": OPENCODE_DEFAULT_MODEL, "posts": 1, "gets": [], "paths": ["/v1/chat/completions"],
-           "sandbox": {"bwrap": True, "roRoot": True, "masks": 6, "unshareNet": False},
+           "sandbox": {"bwrap": True, "roRoot": True, "homeTmpfs": True, "masks": 6, "unshareNet": False},
            "bodies": [body], "verdict": {"outcome": "processed", "status": "ok", "outputOk": True}, "disabled": None,
            "expectedResponseFormat": O.response_format("InvestigatorOutput")}
     for k, v in over.items():
@@ -549,7 +572,9 @@ class Preflight(unittest.TestCase):
         self.assertTrue(CAP.analyse(tc, OPENCODE_DEFAULT_MODEL, "toolcall")["supported"])
         tc["disabled"] = "tool-executed"
         self.assertFalse(CAP.analyse(tc, OPENCODE_DEFAULT_MODEL, "toolcall")["supported"])
-        for box in ({}, {"bwrap": True, "roRoot": False, "masks": 6}, {"bwrap": True, "roRoot": True, "unshareNet": True}):
+        for box in ({}, {"bwrap": True, "roRoot": False, "homeTmpfs": True, "masks": 6},
+                    {"bwrap": True, "roRoot": True, "homeTmpfs": False, "masks": 6},
+                    {"bwrap": True, "roRoot": True, "homeTmpfs": True, "unshareNet": True}):
             self.assertIn("the CLI did not run through the live bwrap sandbox",
                           CAP.analyse(capture_out(sandbox=box), OPENCODE_DEFAULT_MODEL, "answer")["problems"])
         v = {"reason": "cli-retry", "requestsSent": 1, "retryRequestSent": False, "httpStatus": 429, "wordsKept": True}
@@ -602,29 +627,37 @@ class Subprocess(Base):
         from unittest import mock
         binp, _ = F.write_fake_binary(self.dir, "sandbox-probe")
         home, cwd = os.path.join(self.dir, "realhome"), os.path.join(self.dir, "runner-cwd")
-        hidden = []
+        hidden, absent = [], []
         for rel in O.SANDBOX_HOME_MASKS:
             os.makedirs(os.path.join(home, rel))
             Path(home, rel, "auth.json").write_text("CANARY-SECRET")
             hidden.append(os.path.join(home, rel))
+        for rel in (".codex/auth.json", ".ssh/id_ed25519", ".claude/.credentials.json", ".config/gh/hosts.yml", "projects/x/.env"):
+            Path(home, rel).parent.mkdir(parents=True, exist_ok=True)
+            Path(home, rel).write_text("CANARY-SECRET")
+            absent += [os.path.join(home, rel), os.path.join(home, rel.split("/")[0])]
         os.mkdir(cwd)
         Path(cwd, ".env").write_text("OPENROUTER_KEY=CANARY-SECRET\n")
         hidden.append(os.path.join(cwd, ".env"))
         outside = os.path.join(self.dir, "outside-write")
-        spec = json.dumps({"hidden": hidden, "outside": outside})
+        spec = json.dumps({"hidden": hidden + absent, "outside": outside})
         old = os.getcwd()
         os.chdir(cwd)
         try:
-            with mock.patch.object(O, "_user_homes", return_value=[home]):
+            with mock.patch.object(O, "_user_homes", return_value=[home]), \
+                    mock.patch.object(O, "real_home", return_value=os.path.realpath(home)):
                 p = O.OpenCodeFreeProvider(enabled=True, opencode=binp, preflight=GOOD, workdir_parent=self.dir)
                 res = p.call(F.opencode_request(text=F.PROBE_MARK + spec + "\n"), KEY)
         finally:
             os.chdir(old)
         seen = json.loads(res.response["rawText"])
-        self.assertEqual({k: v for k, v in seen["hidden"].items() if k.endswith(".env")},
-                         {os.path.join(cwd, ".env"): {"error": "PermissionError"}})   # /dev/null, nodev: unreadable
+        self.assertEqual(seen["hidden"][os.path.join(cwd, ".env")], {"error": "PermissionError"})   # /dev/null, nodev: unreadable
         for rel in O.SANDBOX_HOME_MASKS:
             self.assertEqual(seen["hidden"][os.path.join(home, rel)], {"entries": 0}, rel)
+        for path in absent:                                                        # ~/.codex, ~/.ssh, ~/.claude, ~/.config/gh, ...
+            if not path.endswith("/.config"):                                      # ~/.config holds the masked ~/.config/opencode
+                self.assertEqual(seen["hidden"][path], {"absent": True}, path)
+        self.assertEqual(seen["hidden"][os.path.join(home, ".config/gh/hosts.yml")], {"absent": True})
         self.assertEqual((seen["outside"], seen["inside"]), ("OSError", "written"))   # read-only root, writable work dir
         self.assertFalse(os.path.exists(outside))
         self.assertNotIn("CANARY-SECRET", res.response["rawText"])
