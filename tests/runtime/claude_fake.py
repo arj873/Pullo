@@ -137,6 +137,9 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
         return [i, text(m, t), rate(), result(m, t)], 0, b"", 0
     if scenario == "over-cap":
         return [i, text(m, ans), rate(), result(m, ans, usage=dict(USAGE, output_tokens=90_000))], 0, b"", 0
+    if scenario in ("overage-tool", "overage-timeout"):   # R1: a non-clean call whose relayed response was extra usage
+        lines, rc, err, sleep = simulate("toolcall" if scenario == "overage-tool" else "timeout", argv, stdin, env, cwd, answer=answer)
+        return lines, rc, err, sleep
     if scenario == "toolcall":                # the CLI answers "No such tool available" and would stop at max turns
         return [i, assistant(m, [{"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "id"}}]),
                 ev("user", message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
@@ -232,8 +235,9 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
 SENT = {"not-logged-in": 0, "stderr-only": 0, "init-tools": 0, "init-mcp": 0, "init-plugin": 0, "wrong-model": 0, "unrelayed": 0}
 UPSTREAM_STATUS = {"retry401": 401, "usage-limit": 429, "throttle": 429, "overloaded": 529, "server500": 500, "model404": 404,
                    "refusal": 200}
-UPSTREAM_RATE = {"overage": {"anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-overage-status": "allowed",
-                             "anthropic-ratelimit-unified-overage-in-use": "true"},
+OVERAGE_HEADERS = {"anthropic-ratelimit-unified-status": "rejected", "anthropic-ratelimit-unified-overage-status": "allowed",
+                   "anthropic-ratelimit-unified-overage-in-use": "true"}
+UPSTREAM_RATE = {"overage": OVERAGE_HEADERS, "overage-tool": OVERAGE_HEADERS, "overage-timeout": OVERAGE_HEADERS,
                  "usage-limit": {"anthropic-ratelimit-unified-status": "rejected"}}
 
 
@@ -323,7 +327,8 @@ base = os.environ.get("ANTHROPIC_BASE_URL")
 if base and SCENARIO not in {no_send!r}:     # as the real CLI: ONE streamed POST through the host forwarder
     import urllib.request
     m = argv[argv.index("--model") + 1]
-    body = json.dumps({{"model": m, "stream": True, "tools": [], "messages": [{{"role": "user", "content": "x"}}]}}).encode()
+    body = json.dumps({{"model": m, "stream": True, "tools": [], "max_tokens": 128000,
+                        "messages": [{{"role": "user", "content": "x"}}]}}).encode()
     try:
         urllib.request.urlopen(urllib.request.Request(base + "/v1/messages?beta=true", body, {{"content-type": "application/json"}}),
                                timeout=10).read()

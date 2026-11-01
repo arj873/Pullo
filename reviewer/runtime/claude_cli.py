@@ -214,6 +214,9 @@ BASE_URL_RE = re.compile(r"\Ahttp://127\.0\.0\.1:[0-9]{1,5}/c/[A-Za-z0-9_-]{32,6
 # Request headers never relayed upstream (hop-by-hop, recomputed, or an encoding the relay would have to undo).
 _HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer",
                   "trailers", "transfer-encoding", "upgrade", "host", "content-length", "accept-encoding"})
+# The top-level request keys 2.1.309 sends for this argv/env (thinking off: no "thinking" / "context_management"); anything else
+# (mcp_servers, container, thinking, tool_choice, ...) is refused, and so is a duplicate key (strict JSON) (re-gate R3).
+FORWARD_KEYS = frozenset({"model", "messages", "system", "max_tokens", "metadata", "stream", "tools", "output_config"})
 # Upstream response headers relayed back (everything else is dropped).
 _RELAY = ("content-type", "request-id", "x-request-id", "retry-after", "x-should-retry")
 MANAGED_SETTINGS_DIR = "/etc/claude-code"
@@ -906,7 +909,8 @@ def _probe(argv, environ=None, runner=None, timeout=60) -> tuple[RunResult, bool
 # served from extra usage (latched, never $0) and the inject2 prompt (the CLI system message is exactly the Environment block).
 PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2")
 CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "404-then-ok", "inject2",
-                 "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings")
+                 "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings", "overage-tool",
+                 "overage-timeout")
 
 
 def capture_argv(bwrap: str) -> list[str]:
@@ -997,7 +1001,7 @@ class Slot:
 
     def facts(self) -> dict:
         return {"version": FORWARDER_VERSION, "requestsSent": self.forwarded, "requestsAttempted": len(self.attempts),
-                "refused": [a for a in self.attempts if a["verdict"] != "forwarded"][:8], "upstreamStatus": self.upstream_status,
+                "refused": [a for a in self.attempts if a["verdict"] != "forwarded"][:16], "upstreamStatus": self.upstream_status,
                 "requestBodyBytes": self.body_bytes, "requestBodySha256": self.body_sha256, "relayError": self.relay_error,
                 "upstreamError": self.upstream_error, "upstreamRequestId": self.request_id,
                 "rateLimitHeaders": dict(self.rate_headers) or None}
@@ -1010,8 +1014,9 @@ class _ForwardServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 class Forwarder:
     """The ONLY endpoint a live CLI talks to: ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/c/<per-call token>. It relays exactly ONE
-    `POST /v1/messages?beta=true` per call to UPSTREAM, and only a JSON body with "stream": true, the call's pinned model, no tools and
-    no tool_choice; every other request (any GET/HEAD - so no remote managed settings, policy limits or connectivity probe -, a
+    `POST /v1/messages?beta=true` per call to UPSTREAM, and only a strict-JSON body (no duplicate key) with "stream": true, the call's
+    pinned model, no tools, max_tokens = OUTPUT_TOKENS and no top-level key outside FORWARD_KEYS (so no tool_choice, mcp_servers,
+    container or thinking); every other request (any GET/HEAD - so no remote managed settings, policy limits or connectivity probe -, a
     second POST, a non-streaming re-send, another model, an unknown token) gets a 404 and is counted. A non-first-party base URL also
     switches 2.1.309's remote-settings and policy-limits fetches off (gate S1). The forwarder holds no credential: the CLI's own
     request headers (its Bearer token) are relayed unchanged, nothing but the upstream status, request id, error words and
@@ -1071,12 +1076,13 @@ class Forwarder:
                 if self._rest != FORWARD_PATH:
                     return self._refuse(slot, "method-or-path")
                 try:
-                    body = json.loads(raw)
-                except ValueError:
+                    body = loads_strict(raw)
+                except (ValueError, ContractInputError):
                     body = None
                 why = ("not-json" if not isinstance(body, dict) else "not-streaming" if body.get("stream") is not True
                        else "model" if body.get("model") != slot.model else "tools" if body.get("tools") not in (None, [])
-                       or "tool_choice" in body else None)
+                       or "tool_choice" in body else "keys" if set(body) - FORWARD_KEYS
+                       else "max-tokens" if body.get("max_tokens") != OUTPUT_TOKENS else None)
                 if why is not None:
                     return self._refuse(slot, why)
                 with fwd._lock:
@@ -1216,6 +1222,7 @@ class ClaudeCliProvider:
         self._ledger, self._environ, self._parent = ledger, environ, workdir_parent
         self._token_loader = token_loader or default_token_loader
         self._upstream, self._fwd = upstream or UPSTREAM, forwarder       # upstream: the loopback capture proof only
+        self._overage: set = set()                       # call keys whose relayed response was served from extra usage (R1)
         self.scope = make_scope(run_scope)
         self.calls = 0
         self.disabled_reason: str | None = None
@@ -1311,6 +1318,11 @@ class ClaudeCliProvider:
                 facts = fwd.close(slot)
             iso["forwarder"] = facts
             iso["requestsSent"] = facts["requestsSent"]              # EXACT, host-side
+            if facts["requestsSent"] == 1 and extra_usage(None, facts.get("rateLimitHeaders")):
+                self._overage.add(ck)                                # R1: whatever path follows books it as extra usage
+                self._latch("claude.extra-usage", "claude.extra-usage: the forwarder saw a response served from paid EXTRA "
+                                                  "USAGE (anthropic-ratelimit-unified-overage-*); it may have been billed (charge "
+                                                  "unknown, NOT $0); the run is latched")
             if crash is not None:
                 outcome = "not-sent" if facts["requestsSent"] == 0 else "unknown"
                 return self._done(ck, t0, outcome, self._err("provider-error", crash[0], outcome, reason=crash[1],
@@ -1354,6 +1366,13 @@ class ClaudeCliProvider:
         return n
 
     def _done(self, ck, t0, outcome, result, *, billing=BILLING_KIND, cost_basis=COST_BASIS, **fields):
+        if ck in self._overage and billing == BILLING_KIND:   # R1: ANY path of a call served from extra usage (tool attempt,
+            billing, cost_basis = "claude-extra-usage", "extra-usage-charge-unknown"   # timeout, retry, violation...): never $0
+            fields["note"] = ("claude.extra-usage: may have been billed as extra usage (charge unknown, not $0); "
+                              + str(fields.get("note") or fields.get("errorKind") or "processed"))[:480]
+            if isinstance(result.error, dict):
+                result.error["detail"] = {**(result.error.get("detail") or {}), "extraUsage": True,
+                                          "billing": "may have been billed as extra usage (charge unknown, not $0)"}
         if self._ledger is not None:
             self._ledger.finish(ck, kind=LEDGER_KIND, model=self._models[ck], outcome=outcome, billingKind=billing,
                                 costBasis=cost_basis, latencyMs=int((time.monotonic() - t0) * 1000), **fields)

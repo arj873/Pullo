@@ -243,7 +243,7 @@ class Auth(unittest.TestCase):
         t = C.load_token_file(p)
         self.assertEqual((t.secret.reveal(), t.expires_at_ms, t.source), (F.DUMMY_TOKEN, None, "operator-token-file"))
         with mock.patch.object(C, "TOKEN_FILE", p):
-            self.assertEqual(C.default_token_loader().source, "operator-token-file")
+            self.assertEqual(C.LIVE_DEFAULT_TOKEN_LOADER().source, "operator-token-file")   # the real loader (R2: tests use a stub)
         Path(p).write_text(F.DUMMY_TOKEN + "\n" + F.DUMMY_TOKEN)
         with self.assertRaisesRegex(C.ClaudeAuthUnavailable, "one OAuth token"):
             C.load_token_file(p)
@@ -332,6 +332,19 @@ class Calls(Base):
         self.assertTrue(C.extra_usage(None, {"anthropic-ratelimit-unified-overage-in-use": "true"}))      # host-side headers alone
         self.assertTrue(C.extra_usage({"status": "rejected", "overageStatus": "allowed"}, None))
         self.assertFalse(C.extra_usage({"status": "allowed", "isUsingOverage": False}, {"anthropic-ratelimit-unified-status": "allowed"}))
+
+    def test_extra_usage_on_a_non_clean_call_is_booked_and_latches_too(self):
+        for sc, reason in (("overage-tool", "isolation-violation"), ("overage-timeout", "timeout")):
+            with self.subTest(sc):
+                p = self.prov(sc, "ok", timeout_sec=5)
+                res = p.call(F.claude_request(params={"maxOutputTokens": 100, "timeoutSec": 5}), KEY)
+                d = res.error["detail"]
+                self.assertEqual((d["reason"], d["extraUsage"], p.latched["errorType"]), (reason, True, "claude.extra-usage"))
+                row = self.rows()[-1]
+                self.assertEqual((row["billingKind"], row["costBasis"]), ("claude-extra-usage", "extra-usage-charge-unknown"))
+                self.assertTrue(row["note"].startswith("claude.extra-usage: may have been billed"), row["note"])
+                again = p.call(F.claude_request(), (*KEY[:3], 1, 0))
+                self.assertEqual((again.outcome, again.error["detail"]["reason"]), ("not-sent", "limit-latched"))
 
     def test_a_404_model_unavailable_latches_with_the_upstream_status(self):
         p = self.prov("model404", "ok")
@@ -813,12 +826,12 @@ class ForwarderUnit(unittest.TestCase):
         self.fwd = C.Forwarder(self.url)
         self.addCleanup(self.fwd._srv.shutdown)
 
-    def req(self, base, method="POST", path=C.FORWARD_PATH, body=None, headers=None):
+    def req(self, base, method="POST", path=C.FORWARD_PATH, body=None, headers=None, raw=None):
         import http.client
         import urllib.parse
         u = urllib.parse.urlsplit(base)
         c = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
-        raw = json.dumps(body).encode() if body is not None else None
+        raw = raw if raw is not None else json.dumps(body).encode() if body is not None else None
         c.request(method, u.path + path, body=raw, headers={"content-type": "application/json", "authorization": "Bearer DUMMY",
                                                             **(headers or {})})
         r = c.getresponse()
@@ -830,22 +843,28 @@ class ForwarderUnit(unittest.TestCase):
         slot = self.fwd.open("claude-sonnet-5-5", 10)
         base = self.fwd.base_url(slot)
         self.assertRegex(base, C.BASE_URL_RE)
-        good = {"model": "claude-sonnet-5-5", "stream": True, "tools": [], "messages": [{"role": "user", "content": "x"}]}
+        good = {"model": "claude-sonnet-5-5", "stream": True, "tools": [], "max_tokens": C.OUTPUT_TOKENS,
+                "messages": [{"role": "user", "content": "x"}]}
         self.assertEqual(self.req(base, "GET", "/api/claude_code/settings")[0], 404)       # remote settings: never relayed
         self.assertEqual(self.req(base, "HEAD", "/api/hello")[0], 404)
         for bad, why in ((dict(good, stream=False), "not-streaming"), (dict(good, model="claude-haiku-5-5"), "model"),
-                         (dict(good, tools=[{"name": "Bash"}]), "tools"), (dict(good, tool_choice={"type": "any"}), "tools")):
+                         (dict(good, tools=[{"name": "Bash"}]), "tools"), (dict(good, tool_choice={"type": "any"}), "tools"),
+                         (dict(good, mcp_servers=[{"type": "url", "url": "https://x"}]), "keys"), (dict(good, container="c"), "keys"),
+                         (dict(good, thinking={"type": "enabled", "budget_tokens": 1024}), "keys"),
+                         (dict(good, max_tokens=64000), "max-tokens")):
             self.assertEqual(self.req(base, body=bad)[0], 404, why)
+        dup = json.dumps(good).replace('"tools": []', '"tools": [{"name": "Bash"}], "tools": []').encode()   # last-wins would pass
+        self.assertEqual(self.req(base, raw=dup)[0], 404)
         self.assertEqual(self.req(base, path="/v1/messages/count_tokens?beta=true", body=good)[0], 404)
         status, body = self.req(base, body=good)
         self.assertEqual((status, body), (200, b"event: message_stop\ndata: {}\n\n"))
         self.assertEqual(self.req(base, body=good)[0], 404)                                  # a second request: refused
         self.assertEqual(self.req("http://127.0.0.1:%d/c/%s" % (self.fwd.port, "x" * 40), body=good)[0], 404)   # unknown token
         facts = self.fwd.close(slot)
-        self.assertEqual((facts["requestsSent"], facts["requestsAttempted"], facts["upstreamStatus"]), (1, 9, 200))
+        self.assertEqual((facts["requestsSent"], facts["requestsAttempted"], facts["upstreamStatus"]), (1, 14, 200))
         self.assertEqual([a["verdict"] for a in facts["refused"]],
-                         ["method-or-path", "method-or-path", "not-streaming", "model", "tools", "tools", "method-or-path",
-                          "second-request"])
+                         ["method-or-path", "method-or-path", "not-streaming", "model", "tools", "tools", "keys", "keys", "keys",
+                          "max-tokens", "not-json", "method-or-path", "second-request"])
         self.assertEqual(facts["rateLimitHeaders"], {"anthropic-ratelimit-unified-status": "allowed",
                                                      "anthropic-ratelimit-unified-overage-in-use": "false"})
         self.assertEqual(self.fwd.stray, 1)
@@ -860,10 +879,35 @@ class ForwarderUnit(unittest.TestCase):
         fwd = C.Forwarder(url)
         self.addCleanup(fwd._srv.shutdown)
         slot = fwd.open("claude-opus-5-5", 10)
-        status, body = self.req(fwd.base_url(slot), body={"model": "claude-opus-5-5", "stream": True, "messages": []})
+        status, body = self.req(fwd.base_url(slot), body={"model": "claude-opus-5-5", "stream": True, "max_tokens": C.OUTPUT_TOKENS,
+                                                          "messages": []})
         f = fwd.close(slot)
         self.assertEqual((status, f["upstreamStatus"], f["requestsSent"], f["rateLimitHeaders"]),
                          (429, 429, 1, {"anthropic-ratelimit-unified-status": "rejected"}))
         self.assertIn('"message":"up"', f["upstreamError"])
         with self.assertRaises(ValueError):
             C.Forwarder("ftp://x")
+
+
+class FailClosedUnderTests(unittest.TestCase):
+    """Re-gate R2: the production defaults are disabled for the whole test package (tests/__init__.py)."""
+
+    def test_defaults_point_nowhere_and_read_no_credential(self):
+        import tests
+        self.assertEqual(C.UPSTREAM, tests.CLOSED_UPSTREAM)
+        with self.assertRaisesRegex(C.ClaudeAuthUnavailable, "disabled"):
+            C.default_token_loader()
+        with tempfile.TemporaryDirectory() as d:                                   # an adapter built with every default
+            runner = F.ScriptedRunner("ok")
+            p = C.ClaudeCliProvider(enabled=True, preflight=GOOD, runner=runner, workdir_parent=d)
+            self.assertEqual(p._upstream, tests.CLOSED_UPSTREAM)
+            res = p.call(F.claude_request(), KEY)
+            self.assertEqual((res.outcome, res.error["detail"]["reason"]), ("not-sent", "auth-unavailable"))
+            self.assertEqual(runner.seen, [])                                        # nothing was spawned
+            f = C.Forwarder(C.UPSTREAM)                                              # a relay can only fail, on-host
+            self.addCleanup(f._srv.shutdown)
+            self.assertEqual(urllib_parse(f._up), ("127.0.0.1", 9))
+
+
+def urllib_parse(u):
+    return (u.hostname, u.port)

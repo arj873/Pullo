@@ -25,8 +25,10 @@ import hashlib
 import http.server
 import json
 import os
+import shutil
 import socketserver
 import sys
+import tempfile
 import threading
 import time
 
@@ -142,7 +144,8 @@ class _Fake(http.server.BaseHTTPRequestHandler):
             self._send(code, err, extra=extra)
             return
         model = body.get("model", "?") if isinstance(body, dict) else "?"
-        if mode == "toolcall":
+        overage = mode in ("overage", "overage-tool", "overage-timeout")
+        if mode == "toolcall" or mode == "overage-tool":
             blocks, stop = [{"type": "tool_use", "id": "toolu_capture", "name": "Bash",
                              "input": {"command": f"touch {MARK}-tool"}}], "tool_use"
         elif mode == "max_tokens":
@@ -152,7 +155,7 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("request-id", f"req_capture_{len(self.log)}")
-        if mode == "overage":                            # the plan window is exhausted; paid extra usage serves the answer
+        if overage:                                      # the plan window is exhausted; paid extra usage serves the answer
             for k, v in (("anthropic-ratelimit-unified-status", "rejected"), ("anthropic-ratelimit-unified-reset", str(int(time.time()) + 7200)),
                          ("anthropic-ratelimit-unified-representative-claim", "five_hour"),
                          ("anthropic-ratelimit-unified-overage-status", "allowed"), ("anthropic-ratelimit-unified-overage-in-use", "true")):
@@ -168,6 +171,10 @@ class _Fake(http.server.BaseHTTPRequestHandler):
             "stop_reason": None, "stop_sequence": None,
             "usage": {"input_tokens": 1200, "output_tokens": 1, "cache_creation_input_tokens": 0,
                       "cache_read_input_tokens": 0}}})
+        if mode == "overage-timeout":                    # the answer stalls past the adapter's deadline (re-gate R1)
+            time.sleep(15)
+            self.close_connection = True
+            return
         for i, b in enumerate(blocks):
             if b["type"] == "text":
                 ev("content_block_start", {"type": "content_block_start", "index": i,
@@ -309,8 +316,12 @@ def main() -> int:
     first_log: list = []
     try:
         token = C.AccessToken(Secret(DUMMY_TOKEN), None, "capture-dummy")
-        prov = _CaptureProvider(enabled=True, preflight={"supported": True}, claude=spec.get("claude", "claude"),
-                                timeout_sec=int(spec.get("timeout", 45)), models=[model], token_loader=lambda: token,
+        from .receipts import RuntimeLedger
+        led_dir = tempfile.mkdtemp(prefix="rvw-claude-capture-ledger-")
+        ledger = RuntimeLedger(os.path.join(led_dir, "led.jsonl"), 50_000_000)
+        prov = _CaptureProvider(enabled=True, preflight={"supported": True}, claude=spec.get("claude", "claude"), ledger=ledger,
+                                timeout_sec=6 if mode == "overage-timeout" else int(spec.get("timeout", 45)), models=[model],
+                                token_loader=lambda: token,
                                 upstream=f"http://127.0.0.1:{srv.server_address[1]}")   # the ONLY difference from a live call
         prov.planted = mode in ("inject", "inject2")
         prov.wrap_runner()
@@ -318,15 +329,19 @@ def main() -> int:
         prompt = C._prompt(req)
         res = prov.call(req, ("INVESTIGATE", "investigator", "capture", 0, 0))
         ran = list(prov.ran)
+        rows = [json.loads(x) for x in open(ledger.path).read().splitlines() if x.strip()]
+        first_row = next(({k: r.get(k) for k in ("outcome", "billingKind", "costBasis", "errorKind", "note")}
+                          for r in rows if r.get("type") == "result"), None)
         time.sleep(0.6)
         first_log = list(_Fake.log)                      # the proof is about the first call; the second only checks latching                                  # a retry the kill did not stop would arrive in this window
-        if mode in ("usage-limit", "overage", "404-then-ok") or mode.startswith("status:"):   # a latch refuses a 2nd call unsent
+        if mode in ("usage-limit", "overage", "overage-tool", "overage-timeout", "404-then-ok") or mode.startswith("status:"):
             n = len(_Fake.log)
             r2 = prov.call(req, ("INVESTIGATE", "investigator", "capture", 1, 0))
             second = {"outcome": r2.outcome, "reason": ((r2.error or {}).get("detail") or {}).get("reason"),
                       "newRequests": len(_Fake.log) - n}
     finally:
         srv.shutdown()
+        shutil.rmtree(led_dir, ignore_errors=True)
     verdict = {"outcome": res.outcome}
     if res.response is not None:
         verdict.update(status=res.response.get("status"), outputOk=res.response.get("output") == ANSWER)
@@ -356,6 +371,7 @@ def main() -> int:
                       "betas": [x["beta"] for x in posts][:1], "verdict": verdict, "disabled": prov.disabled_reason,
                       "latched": (prov.latched or {}).get("errorType"), "second": second, "executed": ran,
                       "forwarder": {k: fwd.get(k) for k in ("version", "requestsSent", "requestsAttempted", "refused", "upstreamStatus")},
+                      "firstRow": first_row,
                       "baseUrlIsForwarder": bool(prov.seen_base_url and C.BASE_URL_RE.fullmatch(prov.seen_base_url)),
                       "leaks": {"hostname": bool(host) and host in raw, "osRelease": "VERSION_ID" in raw or "PRETTY_NAME" in raw,
                                 "tokenInBody": DUMMY_TOKEN in raw},
@@ -441,6 +457,17 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("the hidden max_tokens continuation was not killed at its turn")
         if out.get("posts") != 1:
             problems.append("the max_tokens continuation reached upstream")
+    elif mode in ("overage-tool", "overage-timeout"):          # re-gate R1: the path's own reason, booked as extra usage
+        sec, row = out.get("second") or {}, out.get("firstRow") or {}
+        want = ("isolation-violation", "tool-attempt") if mode == "overage-tool" else ("timeout", None)
+        if (v.get("reason"), v.get("itemType")) != want:
+            problems.append(f"the {mode} call did not keep its own reason: {v.get('reason')}/{v.get('itemType')}")
+        if (row.get("billingKind"), row.get("costBasis")) != ("claude-extra-usage", "extra-usage-charge-unknown") \
+                or "may have been billed" not in (row.get("note") or ""):
+            problems.append(f"a non-clean call served from extra usage was booked as {row.get('billingKind')}/{row.get('costBasis')}")
+        if out.get("posts") != 1 or out.get("latched") != "claude.extra-usage" or sec.get("reason") != "limit-latched" \
+                or sec.get("newRequests") != 0:
+            problems.append("extra usage on a non-clean call did not latch the adapter")
     elif mode == "overage":
         sec = out.get("second") or {}
         if v.get("errorType") != "claude.extra-usage" or v.get("reason") != "extra-usage" or v.get("status") == "ok":
