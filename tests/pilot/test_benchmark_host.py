@@ -27,6 +27,7 @@ from reviewer.repoimport.fsio import force_remove
 from reviewer.repoimport.remote import local_fixture_remote
 from reviewer.runtime import Secret
 from reviewer.runtime.openrouter import HttpResponse
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import AUTH, FAKE_KEY
 from tests.pilot.test_repository import BASE_FILES, BASELINE, GITLINK, HEAD_FILES, Model, World as RepoWorld
 from tests.repoimport.helpers import git
@@ -464,7 +465,7 @@ class LiveTests(Base):
     def test_live_refusals_happen_before_the_key_and_leave_state_untouched(self):
         cases = [("missing confirm", dict(confirm_live=False), {}), ("wrong baseline", dict(baseline_micros=BASELINE + 1), {}),
                  ("book mismatch", dict(), dict(book_committed=BASELINE - 5)), ("in-flight", dict(), dict(inflight=500)),
-                 ("cannot cover ceiling", dict(baseline_micros=47_000_000), dict(committed=47_000_000))]
+                 ("cannot cover ceiling", dict(baseline_micros=TRIAL_TOTAL_USD_MICROS - 3_000_000), dict(committed=TRIAL_TOTAL_USD_MICROS - 3_000_000))]
         for name, over, seed in cases:
             with self.subTest(name):
                 w = BWorld(self.tmp / ("w-" + name.replace(" ", "-")))

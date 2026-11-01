@@ -25,6 +25,7 @@ from reviewer.repoimport.fsio import force_remove
 from reviewer.repoimport.remote import local_fixture_remote
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.openrouter import HttpResponse
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.historical_review.test_historical_review import bridge_violations
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pilot.test_repository import AT, BASE_FILES, BASELINE, GITLINK, HEAD_FILES, Model
@@ -384,9 +385,9 @@ class LiveTests(Base):
 
     def test_ceiling_is_the_inherited_four_dollars_and_the_aggregate_fifty(self):
         w = World(self.tmp / "full")
-        w.seed(committed=47_000_000)
+        w.seed(committed=TRIAL_TOTAL_USD_MICROS - 3_000_000)
         with self.assertRaises(R.RepositoryError):
-            O.run_ordinary(w.live_options(baseline_micros=47_000_000), transport=self.model(), key_loader=self.boom)
+            O.run_ordinary(w.live_options(baseline_micros=TRIAL_TOTAL_USD_MICROS - 3_000_000), transport=self.model(), key_loader=self.boom)
         self.assertFalse(w.out.exists())
 
     def test_a_provider_failure_stops_after_one_attempt_without_retry(self):

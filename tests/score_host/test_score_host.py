@@ -15,6 +15,7 @@ from reviewer.benchmark.model import Golden, RawComment, ScorerCase, ToolReview
 from reviewer.contracts.budget import authorization_digest
 from reviewer.gateway import SpendBook, trusted_authorization
 from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from reviewer import score_host as S
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.catalog import ALLOWED_ROUTER_MODELS, worst_case_router_micros
@@ -57,7 +58,7 @@ class Env(unittest.TestCase):
         return trusted_authorization(p)
 
     def host(self, *, tools=("zeta-tool", "alpha-tool"), transport=None, auth=None, case=None, declared=None, baseline=None,
-             cfg=CFG, evr=EVR, ledger_cap=50_000_000, run_ceiling=4_000_000, **case_kw):
+             cfg=CFG, evr=EVR, ledger_cap=TRIAL_TOTAL_USD_MICROS, run_ceiling=4_000_000, **case_kw):
         case = case or make_case(tools, **case_kw)
         units = [S.ScoreUnit(case, t, f"u001-t{n:02d}") for n, t in enumerate(tools, 1)]
         self.ledger = RuntimeLedger(self.ledger_path, ledger_cap)
@@ -137,7 +138,7 @@ class Composition(Env):
 
     def test_complete_set_does_not_fit_sends_zero_pairs(self):
         # known scoring spend = cap - 0.3M: extraction+dedup fit, the exact worst-case 12-pair set exceeds the scoring sub-cap
-        L = RuntimeLedger(self.ledger_path, 50_000_000)
+        L = RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS)
         self.assertIsNone(L.admit("old", 1, model=OPUS, **SCOPE))
         L.finish("old", outcome="processed", routerCostUsdMicros=SCORING_CATEGORY_CAP_MAX - 300_000, tokenPricedUsdMicros=SCORING_CATEGORY_CAP_MAX - 300_000,
                  upstreamInferenceCostUsdMicros=None, isByok=None)
@@ -150,7 +151,7 @@ class Composition(Env):
         self.assertEqual({u["status"] for u in rep["attemptSet"]["units"] if u["phase"] == "pair"}, {"unsent"})
 
     def test_aggregate_ceiling_blocks_with_prior_review_spend(self):
-        L = RuntimeLedger(self.ledger_path, 50_000_000)
+        L = RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS)
         self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
         L.finish("rev", outcome="processed", routerCostUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 50_000, tokenPricedUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 50_000,
                  upstreamInferenceCostUsdMicros=None, isByok=None)
@@ -282,7 +283,7 @@ class Refusals(Env):
         self.refused(h, "ledger-state-drift")
 
     def test_prior_unresolved_scoring_exposure_holds_and_is_retained(self):
-        L = RuntimeLedger(self.ledger_path, 50_000_000)
+        L = RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS)
         self.assertIsNone(L.admit("orphan", 5000, model=OPUS, **SCOPE))                           # intent with no result
         h = self.host()
         with self.assertRaises(S.ScoreHostError) as cm:

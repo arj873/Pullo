@@ -91,7 +91,7 @@ def policy_digest() -> str:
     return hashlib.sha256(canonical({"model": "anthropic/claude-opus-5.5", "sampling": "omit", "perRun": PER_RUN_MAX,
                                      "maxOutput": dict(MAX_OUTPUT), "profile": PROFILE_REF,
                                      "scoring": SCORING_CATEGORY_CAP_MAX, "aggregate": SCORING_AGGREGATE_CEILING_MAX,
-                                     "total": 50_000_000, "retries": 0, "fallbacks": 0})).hexdigest()
+                                     "total": 150_000_000, "retries": 0, "fallbacks": 0})).hexdigest()
 
 
 # Preregistered canary: ONE fixed invented case, one tool, one reference; the three role probes are extract, dedup, pair.

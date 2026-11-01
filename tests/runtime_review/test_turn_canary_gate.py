@@ -14,6 +14,7 @@ from unittest import mock
 from reviewer.gateway import SpendBook, trusted_authorization
 from reviewer.runtime import RuntimeLedger, turn_canary as tc
 from reviewer.runtime.openrouter import CHAT_PATH, HttpResponse, TransportTimeout
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.runtime.common import FAKE_KEY, SONNET, FakeTransport, completion
 from tests.runtime.test_turn_canary import (BASELINE, ENTRY_REQ, FINAL_VERIFY, USAGE, TurnCanary as Author, keyinfo)
 
@@ -224,10 +225,12 @@ class Gate(Author):
         self.assertEqual((rc, rep2["verdict"]), (2, "refused"))
 
     def test_runtime_cap_refusal_sends_nothing_and_charges_nothing(self):
-        self.seed(committed=49_990_000)
+        doc = json.loads(self.auth.read_text()); doc["maxUsdMicrosTotal"] = TRIAL_TOTAL_USD_MICROS
+        self.auth.write_text(json.dumps(doc)); os.chmod(self.auth, 0o600)              # book limit = the trial total: the runtime cap refuses
+        self.seed(committed=TRIAL_TOTAL_USD_MICROS - 10_000)
         before = self.read_state()
         tr = self.live_ok(ENTRY_REQ)
-        rc, rep, _ = self.launch(transport=tr, baseline=49_990_000)
+        rc, rep, _ = self.launch(transport=tr, baseline=TRIAL_TOTAL_USD_MICROS - 10_000)
         self.assertEqual(posts(tr), [])
         self.assertEqual(rc, 1)
         self.assertEqual(rep["ledger"]["delta"]["committedUsdMicros"], 0)

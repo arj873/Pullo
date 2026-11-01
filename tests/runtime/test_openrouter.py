@@ -8,6 +8,7 @@ from reviewer.gateway.errors import AuthorizationError
 from reviewer.runtime import OpenRouterProvider, RuntimeLedger, Secret
 from reviewer.runtime import openrouter as orm
 from reviewer.runtime.catalog import worst_case_router_micros
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from reviewer.runtime.openrouter import HttpResponse, TransportError, TransportTimeout
 from tests.runtime.common import (FAKE_KEY, HAIKU, OK_INV, OPUS, PROFILE, RT, SONNET, FakeTransport, completion, req)
 
@@ -26,14 +27,14 @@ class Construction(RT):
         OpenRouterProvider(enabled=True, book=SpendBook(h, self.book_path), **kw)
 
     def test_total_over_fifty_dollars_refused(self):
-        h = self.auth(maxUsdMicrosTotal=50_000_001)
+        h = self.auth(maxUsdMicrosTotal=TRIAL_TOTAL_USD_MICROS + 1)
         with self.assertRaises(AuthorizationError):
             OpenRouterProvider(enabled=True, key=Secret(FAKE_KEY), authorization=h, book=SpendBook(h, self.book_path),
-                               ledger=RuntimeLedger(self.ledger_path, 50_000_000), transport=FakeTransport())
+                               ledger=RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS), transport=FakeTransport())
         with self.assertRaises(AuthorizationError):
             h = self.auth()
             OpenRouterProvider(enabled=True, key=Secret(FAKE_KEY), authorization=h, book=SpendBook(h, self.book_path),
-                               ledger=RuntimeLedger(self.ledger_path, 60_000_000), transport=FakeTransport())
+                               ledger=RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS + 1), transport=FakeTransport())
 
     def test_key_must_be_secret(self):
         h = self.auth()
