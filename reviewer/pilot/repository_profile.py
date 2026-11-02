@@ -48,7 +48,7 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
 from reviewer.pipeline.sweeps import plan_specialists as v4_plan_specialists
 
-from .profile import (CLAUDE_CLI_REPAIRS, LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile, model_fields,
+from .profile import (LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile, model_fields,
                       with_repair_reason)
 
 PROFILE_ID = "pilot-repository"
@@ -150,9 +150,12 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
                                "[review.investigator_alt] in the review config (refused; "
                                + ("v7 never runs as the v5 lanes alone)" if impact_version == 7
                                   else "v10 never runs as the v3 specialists alone)"))
+        cli = (profile["roles"]["investigator"]["provider"] == "claude-cli", models.provider("investigator_alt") == "claude-cli")
+        if cli[0] != cli[1]:          # REPAIR1 (gate L1): the alternate is pinned to the investigator's caps (maxRepairs)
+            raise ProfileError("a claude-cli investigator needs a claude-cli alternate (gateway repairs must match)" if cli[0]
+                               else "a claude-cli alternate needs a claude-cli investigator (gateway repairs must match)")
         spec = copy.deepcopy(profile["roles"]["investigator"])
         spec.update(model_fields(models.provider("investigator_alt"), alt))
-        spec["caps"]["maxRepairs"] = CLAUDE_CLI_REPAIRS if spec["provider"] == "claude-cli" else 0   # its own provider's
         profile["alternates"] = {"investigator": spec}
         problem = lanes.alternate_problem(profile)
         if problem is not None:

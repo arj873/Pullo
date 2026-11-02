@@ -17,7 +17,7 @@ from reviewer.contracts.canonical import digest
 from reviewer.pilot import benchmark as B
 from reviewer.pilot import providers as P
 from reviewer.pilot import repository as R
-from reviewer.pilot.profile import REPAIR_REASON, live_plan, live_profile, profile_repairs
+from reviewer.pilot.profile import REPAIR_REASON, ProfileError, live_plan, live_profile, profile_repairs
 from reviewer.pilot.repository_profile import ALT_IMPACT_VERSIONS, IMPACT_VERSIONS, repository_plan, repository_profile
 from reviewer.pipeline import prompts
 from reviewer.pilot.providers import TERRA_LEDGER_NAME
@@ -155,11 +155,22 @@ class Repair1(unittest.TestCase):
             self.assertNotIn(REPAIR_REASON, live_plan(prof)["reasons"])
         self.assertEqual({s["caps"]["maxRepairs"] for s in live_profile()["roles"].values()}, {0})
 
-    def test_an_alternate_investigator_gets_its_own_providers_repairs(self):
-        m = ReviewModels(MODEL, MODEL, MODEL, investigator_alt="anthropic/claude-haiku-5.5")
-        p = repository_profile(True, m, impact_version=7)
-        self.assertEqual((p["roles"]["investigator"]["caps"]["maxRepairs"], p["alternates"]["investigator"]["provider"],
-                          p["alternates"]["investigator"]["caps"]["maxRepairs"]), (1, "anthropic", 0))
+    def test_a_mixed_provider_alternate_is_refused_and_same_provider_pairs_keep_alternate_pinning(self):
+        haiku, terra = "anthropic/claude-haiku-5.5", ROOT / "pullo-terra.toml"
+        for v in (7, 10):                                                       # gate L1: refused up front, both ways
+            with self.subTest(v=v, mix="claude-cli + other"), self.assertRaises(ProfileError) as c:
+                repository_profile(True, ReviewModels(MODEL, MODEL, MODEL, investigator_alt=haiku), impact_version=v)
+            self.assertEqual(str(c.exception), "a claude-cli investigator needs a claude-cli alternate (gateway repairs must match)")
+            with self.subTest(v=v, mix="other + claude-cli"), self.assertRaises(ProfileError) as c:
+                repository_profile(True, ReviewModels(haiku, haiku, haiku, investigator_alt=MODEL), impact_version=v)
+            self.assertEqual(str(c.exception), "a claude-cli alternate needs a claude-cli investigator (gateway repairs must match)")
+            for models, repairs in ((ReviewModels(MODEL, MODEL, MODEL, investigator_alt=OPUS), 1),
+                                    (resolve_config(terra).models, 0)):
+                p = repository_profile(True, models, impact_version=v)
+                self.assertEqual(validate("ModelProfile", p), [], models)       # alternate-pinning holds (not relaxed)
+                self.assertEqual({k: x for k, x in p["alternates"]["investigator"].items() if k not in ("provider", "model", "family", "price")},
+                                 {k: x for k, x in p["roles"]["investigator"].items() if k not in ("provider", "model", "family", "price")})
+                self.assertEqual(p["alternates"]["investigator"]["caps"]["maxRepairs"], repairs)
 
     def test_local_schema_issues_name_the_exact_failure(self):
         cases = {'{"hypotheses": [{"bogus": 1}]}': ["$.hypotheses[0].claim: required: missing"],
