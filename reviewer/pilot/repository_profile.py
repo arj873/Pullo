@@ -112,8 +112,12 @@ V10_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 240}     # 6 x the legacy 40 s p
 # per-candidate verifier sessions. The $4 ceiling and the 30% verify reserve are unchanged (deepcov keeps INVESTIGATE <=
 # 65%, so VERIFY + JUDGE keep >= 35%).
 V12_MAX_TOOL_CALLS = 400
-V12_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 900, "VERIFY": 540, "JUDGE": 200}
-V12_LIVE_WALL_CLOCK_SEC, V12_LIVE_SOFT_DEADLINE_SEC = 2_000, 1_700
+# DEADLINE time successor (2026-11-02, as cand12cd): the V12 seconds were sized on Haiku/Terra hops; a Sonnet 5.5 investigator
+# takes about twice the turns at the same per-call latency (orso3 cal22532: 11 vs 6), so every live stage ceiling x2 (lens
+# slices 240 s, unit slices 270 s) and the run deadlines keep v12's margins x2 (sum 3280 + 720; soft 600 s before hard).
+# Per-call timeouts and every money/count cap unchanged.
+V12_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 1800, "VERIFY": 1080, "JUDGE": 400}
+V12_LIVE_WALL_CLOCK_SEC, V12_LIVE_SOFT_DEADLINE_SEC = 4_000, 3_400
 V12_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 280}     # 3 x 40 s lens lanes + 4 x 40 s units
 
 

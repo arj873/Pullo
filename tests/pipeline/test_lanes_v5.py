@@ -82,8 +82,9 @@ V4_PINS = {
  }
 }
 # repository_profile / plan / plan with live stage timing / policy digests of impact@v4, pre-change
+# legacy plan re-pinned for the DEADLINE time successor (2026-11-02, as v6cd): run deadlines 3000/2400
 V4_REPO = ("sha256:2cc9cc678304bfa6ff56d70fc9ef4d82d2f1ca06cd2b0f317ec549265e39faaf",
-           "sha256:fd9cda7e7053f74eb5019de49785a63020a50a621a04b8d135f5dd722e315836",
+           "sha256:912d0c2e446f0f343883104b3f23fa9c0d2de158cf5907470aa68bb56378573e",
            "sha256:19cc8495db25df43942addafce7ffffca7a37855774b93dfb68bcba775a705ee",
            "sha256:d9e5643ee15334d5fbc4a99e9c2be125376133154e7a10d63d87f4afc23bdc6f")
 

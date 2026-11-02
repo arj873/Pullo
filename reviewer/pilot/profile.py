@@ -21,10 +21,13 @@ RUN_CEILING_USD_MICROS = 4_000_000
 OUTPUT_CAPS = {"investigator": 16_000, "verifier": 6_000, "judge": 8_000}
 TIMEOUTS = {"investigator": 300, "verifier": 150, "judge": 200}
 MAX_OUTPUT_CAP = 100_000
-WALL_CLOCK_SEC, SOFT_DEADLINE_SEC = 1_200, 900     # live latency: the synthetic 360/240 would cut real runs short
+WALL_CLOCK_SEC, SOFT_DEADLINE_SEC = 3_000, 2_400   # live latency: the synthetic 360/240 would cut real runs short
 # Explicit live stage ceilings (seconds) for repository live reviews: headroom over the role-call caps (investigator
 # 300, verifier 150, judge 200) for multi-hop retrieval. Not derived from findings or gold; other stages stay legacy.
-LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200}
+# DEADLINE time successor (2026-11-02, as v6cd): 300/300/200 and 1200/900 were sized on Haiku; a Sonnet 5.5 investigator
+# takes about twice the turns (orso3 cal22532: 11 vs 6, cut at the 100 s first time slice), so INVESTIGATE x3 (time
+# slices 300/600/900 s), VERIFY x2, JUDGE x2 and the run deadlines to fit. Per-call timeouts and every money/count cap unchanged.
+LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 900, "VERIFY": 600, "JUDGE": 400}
 _OUT = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput", "judge": "JudgeOutput"}
 _PV = {"investigator": "investigator.generalist@v1", "verifier": "verifier.refute@v1", "judge": "judge.wording@v1"}
 CLAUDE_CLI_REPAIRS = 1                  # CLAUDE-CLI-REPAIR1: gateway repairs per claude-cli call (every other provider: 0)

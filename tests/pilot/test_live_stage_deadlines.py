@@ -6,7 +6,7 @@ import unittest
 
 from reviewer.contracts.budget import HOST_STOP_RECORDING
 from reviewer.pilot import live_plan, live_profile
-from reviewer.pilot.profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError
+from reviewer.pilot.profile import LIVE_STAGE_CEILINGS_SEC, MODEL, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, ProfileError
 from reviewer.pilot.repository_profile import repository_plan, repository_profile
 
 
@@ -18,7 +18,7 @@ class LivePlan(unittest.TestCase):
         b = live_plan(self.profile)["budget"]
         self.assertNotIn("stageCeilingsSec", b)
         self.assertNotIn("hostStopRecording", b)
-        self.assertEqual((b["wallClockSec"], b["softDeadlineSec"], b["maxUsdMicros"]), (1200, 900, 4_000_000))
+        self.assertEqual((b["wallClockSec"], b["softDeadlineSec"], b["maxUsdMicros"]), (3000, 2400, 4_000_000))   # v6cd time successor
 
     def test_explicit_options_are_validated_and_leave_money_models_and_deadlines_alone(self):
         base = live_plan(self.profile)
@@ -28,7 +28,7 @@ class LivePlan(unittest.TestCase):
         for k in ("maxUsdMicros", "wallClockSec", "softDeadlineSec", "maxRetriesPerCall", "verifyReserveBp"):
             self.assertEqual(p["budget"][k], base["budget"][k])
         self.assertEqual(p["modelProfile"], base["modelProfile"])
-        for bad in ({}, {"LEARN": 5}, {"VERIFY": 1201}, {"VERIFY": True}):
+        for bad in ({}, {"LEARN": 5}, {"VERIFY": WALL_CLOCK_SEC + 1}, {"VERIFY": True}):
             with self.assertRaises(ProfileError):
                 live_plan(self.profile, stage_ceilings_sec=bad)
 
@@ -38,9 +38,10 @@ class LivePlan(unittest.TestCase):
         self.assertEqual(legacy, repository_plan(prof, live_stage_timing=False))
         self.assertNotIn("stageCeilingsSec", legacy["budget"])
         live = repository_plan(prof, live_stage_timing=True)
-        self.assertEqual(live["budget"]["stageCeilingsSec"], {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200})
+        self.assertEqual(live["budget"]["stageCeilingsSec"], {"INVESTIGATE": 900, "VERIFY": 600, "JUDGE": 400})
         self.assertEqual(live["budget"]["stageCeilingsSec"], LIVE_STAGE_CEILINGS_SEC)
         self.assertEqual(live["budget"]["hostStopRecording"], HOST_STOP_RECORDING)
         self.assertEqual({k: v for k, v in live["budget"].items() if k not in ("stageCeilingsSec", "hostStopRecording")},
                          legacy["budget"])
-        self.assertEqual((live["budget"]["wallClockSec"], live["budget"]["softDeadlineSec"]), (1200, 900))
+        self.assertEqual((live["budget"]["wallClockSec"], live["budget"]["softDeadlineSec"]), (3000, 2400))
+        self.assertEqual((WALL_CLOCK_SEC, SOFT_DEADLINE_SEC), (3000, 2400))

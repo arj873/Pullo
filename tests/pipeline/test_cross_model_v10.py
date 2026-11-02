@@ -50,7 +50,8 @@ V10_PLAN["budget"].update(maxToolCalls=220, stageCeilingsSec={"INVESTIGATE": 240
 # impact@v7 recording and repository identity from the pre-change source (e0118001, the gated v7 head):
 # CrossRig.e2e on the 9-path case (eval id a...), and digest([profile, Plan, live Plan, policy, impact templates]) of
 # repository_profile(impact_version=7) under pullo-terra.toml.
-V7_PINS = json.loads("""{"v7_e2e": {"INVESTIGATE": "sha256:9d13d0f02425d5b08fa6d311fea9715341cbf2b1cb8a6cabab6018a4c77619c5", "PUBLISH": "sha256:6be145b79c2542de0cd7a9044fb94511c750f2bf8a1219e663d2046240568861", "VERIFY": "sha256:fdb654b889fe3b0cf8b2511782e9680e84c7994a161d7dd632b27e63693336da", "cfg": "sha256:5a57bd0cec90eede96808ebde12a6df9d0dbbf789982661c4718b4b2e0470ac2", "requests": ["sha256:59630fd815416f501e3fda3a8f6f3847dafa2cce8a3f0f6d3ee513ebe5aec216", "sha256:171138bf227bfcea547598cf0590b8ec160cb91c70e587d44a4c194b623cc878", "sha256:88f5d57ce7f80a018cde73d70236b043640ed17b89b2dc67ce40933bcb3d65be", "sha256:4e1702fdfe7dba1bff25e92d4b300f76a2e1dedca6a84a3baf6f94f0abdfaf48", "sha256:8a7563fd3c45ade67019839a25a6ecd0783ef1bb6581bc7dfa5888e1aeb1e42f", "sha256:e0f0933f1fa5b28cb9e75ceeb85f27f83f4c060fccf1508d503fa8c7cc6efb0b", "sha256:fac4848ab94404b7b10438fcd65d91c9ba0af1710600e450693b6d9435ad14c9", "sha256:7652614e677b10b1aa567d2cfdc7c27497ee4c11d2af0c74d3c8744737cd60fb", "sha256:278d00286b6aca36d18d660c69eae52b10271b13720d30ac34851d88a3d0b5ee", "sha256:d53b4f9e813be4d52ab8498803645362fff29aca14397c46d2cc2cd2d1d6b8b8", "sha256:07178753dc9218ea9f1e0330eebb10c343f084940abfad3284c6e0697efbe239", "sha256:7cbd9d40f00deb69173a5e7780bd702cd05d8cab8eaac92b7b93bde297e0a842", "sha256:304ec5369b45cf796a2e7bcb7120c068f1f102fb8274446fcff3d4af0343025d", "sha256:fbce68fb09757c8360f3c41d34f98f12f06ea6a2f8b1cfb5e9047676bc7cfa47", "sha256:cd8a24722eab09da0bb0922a4bda2185189b4d2e703a4f9e3247ec8edbf53a41", "sha256:f2899ce0b250fe52fd7aca3b67977eda0d406aa69449e5e6ea32bcfc005d04b1", "sha256:984e996f6bbe4fbf919faa55b794a5bb61331ef004e603a7a750a8c6398abf24", "sha256:a742f7ff0a8e7525ced31d285adede847b130c476171536bbc0b717ab6f15136", "sha256:1cf20e36998b0c4010720a2a8817da18e9d5f14d0486a0484ad0c1fe145c0bc8", "sha256:f7b4f0d29c58c0d05c7edef8a2e762cec911e5f9a343dfd9647ca8ed1b9e32d6", "sha256:b09abdb9016229c01dce583cc0db8af792a117b838fdbf31cb0d481540a95e40"], "trace": "sha256:127ce47a52e2e3eefa10d4f27eda28af36e661d346680dea6a4985236903a89f"}, "v7_repo_pullo-terra.toml": "sha256:c04fc69abc3bb0a8f00d943653de461881d8d82976f69b819493701f0e84a541"}""")
+# v7_repo_* re-pinned for the DEADLINE time successor (2026-11-02, as v6cd): its legacy Plan run deadlines 3000/2400
+V7_PINS = json.loads("""{"v7_e2e": {"INVESTIGATE": "sha256:9d13d0f02425d5b08fa6d311fea9715341cbf2b1cb8a6cabab6018a4c77619c5", "PUBLISH": "sha256:6be145b79c2542de0cd7a9044fb94511c750f2bf8a1219e663d2046240568861", "VERIFY": "sha256:fdb654b889fe3b0cf8b2511782e9680e84c7994a161d7dd632b27e63693336da", "cfg": "sha256:5a57bd0cec90eede96808ebde12a6df9d0dbbf789982661c4718b4b2e0470ac2", "requests": ["sha256:59630fd815416f501e3fda3a8f6f3847dafa2cce8a3f0f6d3ee513ebe5aec216", "sha256:171138bf227bfcea547598cf0590b8ec160cb91c70e587d44a4c194b623cc878", "sha256:88f5d57ce7f80a018cde73d70236b043640ed17b89b2dc67ce40933bcb3d65be", "sha256:4e1702fdfe7dba1bff25e92d4b300f76a2e1dedca6a84a3baf6f94f0abdfaf48", "sha256:8a7563fd3c45ade67019839a25a6ecd0783ef1bb6581bc7dfa5888e1aeb1e42f", "sha256:e0f0933f1fa5b28cb9e75ceeb85f27f83f4c060fccf1508d503fa8c7cc6efb0b", "sha256:fac4848ab94404b7b10438fcd65d91c9ba0af1710600e450693b6d9435ad14c9", "sha256:7652614e677b10b1aa567d2cfdc7c27497ee4c11d2af0c74d3c8744737cd60fb", "sha256:278d00286b6aca36d18d660c69eae52b10271b13720d30ac34851d88a3d0b5ee", "sha256:d53b4f9e813be4d52ab8498803645362fff29aca14397c46d2cc2cd2d1d6b8b8", "sha256:07178753dc9218ea9f1e0330eebb10c343f084940abfad3284c6e0697efbe239", "sha256:7cbd9d40f00deb69173a5e7780bd702cd05d8cab8eaac92b7b93bde297e0a842", "sha256:304ec5369b45cf796a2e7bcb7120c068f1f102fb8274446fcff3d4af0343025d", "sha256:fbce68fb09757c8360f3c41d34f98f12f06ea6a2f8b1cfb5e9047676bc7cfa47", "sha256:cd8a24722eab09da0bb0922a4bda2185189b4d2e703a4f9e3247ec8edbf53a41", "sha256:f2899ce0b250fe52fd7aca3b67977eda0d406aa69449e5e6ea32bcfc005d04b1", "sha256:984e996f6bbe4fbf919faa55b794a5bb61331ef004e603a7a750a8c6398abf24", "sha256:a742f7ff0a8e7525ced31d285adede847b130c476171536bbc0b717ab6f15136", "sha256:1cf20e36998b0c4010720a2a8817da18e9d5f14d0486a0484ad0c1fe145c0bc8", "sha256:f7b4f0d29c58c0d05c7edef8a2e762cec911e5f9a343dfd9647ca8ed1b9e32d6", "sha256:b09abdb9016229c01dce583cc0db8af792a117b838fdbf31cb0d481540a95e40"], "trace": "sha256:127ce47a52e2e3eefa10d4f27eda28af36e661d346680dea6a4985236903a89f"}, "v7_repo_pullo-terra.toml": "sha256:89f9b0db8a37cefcaaab67debc0d7584fdd46fbb98ca693ea9ebaa6e14efcec6"}""")
 
 
 def pin_of(res):
@@ -127,7 +128,7 @@ class Resolution(unittest.TestCase):
         self.assertEqual({k: v for k, v in alt.items() if k not in ("model", "price")},
                          {k: v for k, v in inv.items() if k not in ("model", "price")})
         for live, stages, clock in ((True, {"INVESTIGATE": 600, "VERIFY": 450, "JUDGE": 200}, (1_650, 1_350)),
-                                    (False, {"INVESTIGATE": 240}, (1_200, 900))):
+                                    (False, {"INVESTIGATE": 240}, (3_000, 2_400))):   # legacy: the v6cd run deadlines
             plan = RP.repository_plan(p, live_stage_timing=live)
             self.assertEqual(validate("Plan", plan), [])
             self.assertEqual(plan["specialists"], list(ALL))
@@ -205,22 +206,23 @@ class V3LaneSpecs(unittest.TestCase):
                 for k in ("maxUsdMicros", "verifyReserveBp", "maxToolCallsPerAgent", "maxToolOutputTokensPerAgent",
                           "maxRetriesPerCall"):
                     self.assertEqual(b3[k], b10[k], k)
-                self.assertEqual(stage_ceiling("JUDGE", b3), stage_ceiling("JUDGE", b10))     # JUDGE keeps v3's
-                # VERIFY: v3's 300 s plus 150 s live for the alternate candidates (legacy: no override, the table's);
-                # the live deadlines move by the same 150 s on top of INVESTIGATE's 300 s; v3's numbers are unchanged
+                # DEADLINE time successor (2026-11-02, as v6cd): v3's live table and the run deadlines moved (900/600/400,
+                # 3000/2400); v10's own V10_* table is unchanged (no claude-cli arm runs v10), so it no longer tracks v3's
+                # numbers and is pinned absolutely: VERIFY 450, JUDGE 200, deadlines 1650/1350 live (legacy: the tables')
+                self.assertEqual((stage_ceiling("JUDGE", b3), stage_ceiling("JUDGE", b10)),
+                                 (400, 200) if live else (stage_ceiling("JUDGE", b10),) * 2)
                 self.assertEqual((stage_ceiling("VERIFY", b3), stage_ceiling("VERIFY", b10)),
-                                 (300, 450) if live else (45, 45))
-                self.assertEqual((b3["wallClockSec"], b3["softDeadlineSec"]), (1_200, 900))
-                self.assertEqual((b10["wallClockSec"] - b3["wallClockSec"], b10["softDeadlineSec"] - b3["softDeadlineSec"]),
-                                 (450, 450) if live else (0, 0))
+                                 (600, 450) if live else (45, 45))
+                self.assertEqual((b3["wallClockSec"], b3["softDeadlineSec"]), (3_000, 2_400))
+                self.assertEqual((b10["wallClockSec"], b10["softDeadlineSec"]), (1_650, 1_350) if live else (3_000, 2_400))
                 if live:
-                    self.assertEqual(b3["stageCeilingsSec"], {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200})
+                    self.assertEqual(b3["stageCeilingsSec"], {"INVESTIGATE": 900, "VERIFY": 600, "JUDGE": 400})
                 host = 60
                 self.assertEqual(lanes.v10_tool_cumulative(pol10, b10, host)[:3],
                                  specialists.cumulative(specialists.tool_pool(pol3, b3, host)))
                 self.assertEqual(lanes.v10_primary_spend_cumulative(b10), specialists.cumulative(investigation_limit(b3)))
-                self.assertEqual(lanes.v10_time_slices(stage_ceiling("INVESTIGATE", b10))[:3],
-                                 specialists.time_slices(stage_ceiling("INVESTIGATE", b3)))
+                self.assertEqual(lanes.v10_time_slices(stage_ceiling("INVESTIGATE", b10))[:3],      # live: v3's pre-successor 300 s
+                                 specialists.time_slices(300 if live else stage_ceiling("INVESTIGATE", b3)))
                 # all of INVESTIGATE stays within v3's own share: VERIFY + JUDGE keep at least what v3 reserves
                 self.assertEqual(lanes.v10_spend_top(b10), investigation_limit(b3))
                 for host in (7, 13, 60):           # any host tool limit: the v3 lanes keep the v3 pool split
