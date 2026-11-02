@@ -12,7 +12,8 @@ Modes: answer | toolcall (the fake asks for `Bash`; nothing may run) | status:<4
 retry and a 404's non-streaming re-send never reach upstream; 401/404/429/529 latch) | 404-then-ok (the fake would answer the
 non-streaming re-send: it is refused by the forwarder, so it never gets the chance) | usage-limit (a subscription 429 with the
 unified rate-limit headers; the CLI's words are kept, the adapter latches and refuses a second call unsent) | overage (an answer
-served from paid extra usage: latched, never $0) | max_tokens (the CLI's hidden continuation never reaches upstream) | inject /
+served from paid extra usage: latched, never $0) | max_tokens / max_tokens-thinking (TIMEOUT-FIX: the request carries the probe's own max_tokens; a max_tokens stop is a
+cut answer - invalid-output, note max-output-tokens - and the CLI's hidden continuation never reaches upstream) | inject /
 inject2 (`@path` mentions, `@agent-...`, `ultrathink`, decorators, a slash line, and planted AGENTS.md/CLAUDE.md/settings
 hooks/.mcp.json next to the cwd must not reach the request or run; the CLI system message must be EXACTLY the Environment
 block) | thinking (A5: adaptive thinking - a thinking block whose text is a DECOY answer, a redacted_thinking block and a
@@ -47,6 +48,7 @@ from .envfile import Secret
 
 ANSWER = {"hypotheses": []}
 SCHEMA = "InvestigatorOutput"
+PROBE_CAP = 1000                 # the probe request's maxOutputTokens: the CLI must send exactly this max_tokens (TIMEOUT-FIX)
 THINK_MARK = "PULLO-CAPTURE-THINKING-TEXT"      # thinking text: must never be parsed as the answer or kept anywhere (A5)
 THINK_DECOY = THINK_MARK + ' decoy answer: {"hypotheses": [{"claim": "PULLO-DECOY"}]}'
 SIGNATURE = "EqQBCkYIBRgCKkBPULLOCAPTURESIGNATURE" + "A" * 64
@@ -82,7 +84,7 @@ def probe_request(model: str, mode: str = "answer") -> dict:
     user = C.PROBE + {"inject": "\n" + INJECT, "inject2": "\n" + INJECT2}.get(mode, "")
     return {"provider": C.PROVIDER, "model": model, "profile": "claude-capture@1", "role": "investigator",
             "promptVersion": "investigator.generalist@v1", "outputSchema": SCHEMA, "tools": [],
-            "params": {"maxOutputTokens": 1000},
+            "params": {"maxOutputTokens": PROBE_CAP},
             "messages": [{"role": "system", "content": "PULLO-CAPTURE-SYSTEM"}, {"role": "user", "content": user}]}
 
 
@@ -174,6 +176,8 @@ class _Fake(http.server.BaseHTTPRequestHandler):
             blocks, stop = [{"type": "text", "text": PROSE[mode]}], "end_turn"
         elif mode == "max_tokens":
             blocks, stop = [{"type": "text", "text": "{\"hypotheses\": [{\"truncat"}], "max_tokens"
+        elif mode == "max_tokens-thinking":            # cut while still thinking: no text at all
+            blocks, stop = [{"type": "thinking", "thinking": THINK_DECOY}], "max_tokens"
         else:
             blocks, stop = [{"type": "text", "text": json.dumps(ANSWER)}], "end_turn"
         self.send_response(200)
@@ -223,7 +227,7 @@ class _Fake(http.server.BaseHTTPRequestHandler):
                     "type": "input_json_delta", "partial_json": json.dumps(b["input"])}})
             ev("content_block_stop", {"type": "content_block_stop", "index": i})
         ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
-                             "usage": {"output_tokens": 20}})
+                             "usage": {"output_tokens": PROBE_CAP if stop == "max_tokens" else 20}})
         ev("message_stop", {"type": "message_stop"})
         self.close_connection = True
 
@@ -445,8 +449,8 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append("the request named a different model")
         if b.get("thinking") not in (None, {"type": "disabled"}):
             problems.append("a request enabled thinking")
-        if b.get("max_tokens") != C.OUTPUT_TOKENS:
-            problems.append("the request max_tokens is not the pinned value")
+        if b.get("max_tokens") != PROBE_CAP:
+            problems.append("the request max_tokens is not the call's output cap")
     if not all(out.get("bearerIsDummy") or [False]) or any(out.get("apiKeyHeader") or []):
         problems.append("the request did not authenticate with the fd-passed OAuth token only")
     if out.get("betas") and "oauth-2025-04-20" not in out["betas"][0]:
@@ -524,11 +528,18 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append(f"the CLI sent more than the one request around a tool call: {out.get('posts')}")
         if out.get("disabled"):
             problems.append(f"the tool call disabled the adapter ({out['disabled']})")
-    elif mode == "max_tokens":
-        if v.get("reason") != "isolation-violation" or v.get("itemType") != "extra-turn":
-            problems.append("the hidden max_tokens continuation was not killed at its turn")
-        if out.get("posts") != 1:
+    elif mode in ("max_tokens", "max_tokens-thinking"):           # TIMEOUT-FIX: a cut answer, its continuation killed unsent
+        row = out.get("firstRow") or {}
+        if (v.get("outcome"), v.get("status")) != ("processed", "invalid-output"):
+            problems.append(f"a max_tokens stop was not a cut answer (invalid-output): {v}")
+        if "max-output-tokens" not in str(row.get("note")) or (row.get("parse") or {}).get("failure") != "max-output-tokens":
+            problems.append("the cut answer's row does not say max-output-tokens")
+        if row.get("outputTokens") != PROBE_CAP:
+            problems.append("the cut answer's output tokens are not the forwarder's count")
+        if out.get("posts") != 1 or out.get("postsAll") != 1:
             problems.append("the max_tokens continuation reached upstream")
+        if out.get("thinkLeak"):
+            problems.append("thinking text was kept for a cut answer")
     elif mode in ("overage-tool", "overage-timeout"):          # re-gate R1: the path's own reason, booked as extra usage
         sec, row = out.get("second") or {}, out.get("firstRow") or {}
         want = ("isolation-violation", "tool-attempt") if mode == "overage-tool" else ("timeout", None)

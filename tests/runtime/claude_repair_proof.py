@@ -1,7 +1,8 @@
 """Offline REAL-CLI proof of the claude-cli gateway repair (CLAUDE-CLI-REPAIR1; tests only, never part of a live run).
 
 Run as `python3 -I -c "...claude_repair_proof import main..."` INSIDE `bwrap --unshare-net` (argv()) with a JSON spec on stdin
-{"claude", "model", "answers": [text, ...], "expect": [text, ...]}. A loopback fake Anthropic Messages endpoint streams answers[k] as the text of
+{"claude", "model", "answers": [text | {"cut": text}, ...], "expect": [text, ...]} ({"cut": ...}: that POST stops at its own
+max_tokens, TIMEOUT-FIX). A loopback fake Anthropic Messages endpoint streams answers[k] as the text of
 the k-th POST. The REAL `claude -p` runs through the live adapter (its bwrap sandbox and its host forwarder, a DUMMY OAuth token
 on the live fd path; the forwarder's UPSTREAM is the loopback fake - the only difference from a live call) under Pullo's real
 Gateway with the pilot profile (claude-cli roles: maxRepairs 1) and the engine's claude-cli repair builder
@@ -57,7 +58,9 @@ class _Scripted(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
         k = sum(1 for p in self.posts if p == "POST")
         self.posts.append("POST")
-        text = self.answers[k] if k < len(self.answers) else VALID
+        a = self.answers[k] if k < len(self.answers) else VALID
+        cut = isinstance(a, dict)                    # {"cut": text}: stopped at the request's own max_tokens (TIMEOUT-FIX)
+        text = a["cut"] if cut else a
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("request-id", f"req_repair_proof_{k}")
@@ -74,8 +77,8 @@ class _Scripted(http.server.BaseHTTPRequestHandler):
         ev("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
         ev("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}})
         ev("content_block_stop", {"type": "content_block_stop", "index": 0})
-        ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                             "usage": {"output_tokens": 20}})
+        ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "max_tokens" if cut else "end_turn", "stop_sequence": None},
+                             "usage": {"output_tokens": body.get("max_tokens") if cut else 20}})
         ev("message_stop", {"type": "message_stop"})
         self.close_connection = True
 

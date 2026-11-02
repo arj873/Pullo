@@ -1,7 +1,7 @@
 """provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`) on the user's
 Claude subscription, with NO tools - runtime only (CLAUDE-CLI-PROVIDER).
 
-Isolation `claude-cli-isolated@3` (Claude Code 2.1.309 exactly; behaviour read from the CLI's bundled source and proved
+Isolation `claude-cli-isolated@4` (Claude Code 2.1.309 exactly; behaviour read from the CLI's bundled source and proved
 offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 gate fixes S1-S4, N1-N4; @3 = phase A5:
 ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
   * ONE ENDPOINT - the host loopback FORWARDER (`claude-loopback-forwarder@1`, class Forwarder, one per adapter = per run, run by
@@ -52,10 +52,12 @@ ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
     fallback request, NO ATTACHMENTS (S4: without it, PR text such as `@Override`, `@agent-general-purpose` or "ultrathink"
     makes the CLI add its own system-role notes - "read them with your file tools", "Please invoke the agent", "requesting
     deeper reasoning" - and a <total_tokens> line), no non-essential traffic/telemetry/error reporting/feature flags/updates,
-    and max_tokens pinned to the
-    model maximum (OUTPUT_TOKENS): a `max_tokens` stop makes 2.1.309 send up to 3 hidden "Output token limit hit. Resume"
-    continuation requests, so Pullo's maxOutputTokens is an admission/pacing bound only (overruns are noted, as for opencode)
-    and the role timeout ends a runaway long before the model maximum.
+    and (TIMEOUT-FIX, @4) max_tokens = the request's maxOutputTokens, the role cap, set PER CALL (OUTPUT_CAP_ENV; the
+    forwarder relays only that max_tokens), as on the OpenRouter arm. A `max_tokens` stop makes 2.1.309 begin up to 3 hidden
+    "Output token limit hit. Resume" continuation turns (fixed in the CLI: no switch turns them off); the first is killed at
+    its user event and never relayed (one request per call), and the text so far is a CUT answer: invalid-output, so Pullo's
+    gateway may repair it once. Before @4 max_tokens was the model maximum, and a runaway answer ran into the role timeout
+    (re-pilot cal7232: ~35k tokens of text in 300 s, then provider-timeout).
   * HIDDEN REQUESTS ARE REFUSED BY THE FORWARDER (exact `requestsSent`) and also KILLED in the stream (the stream's own count is
     `requestsSeen`, a lower bound kept for comparison). The run is audited live line by line (stream-json) and its whole
     process group is killed on: a `system/api_retry`
@@ -172,7 +174,9 @@ COST_BASIS = "claude-subscription-zero"
 LEDGER_KIND = "claude-cli"
 SCHEMA_FLAVOR = "anthropic"
 EFFORT = "high"                  # pinned (the API default when no effort is sent, as on the OpenRouter arm)
-OUTPUT_TOKENS = 128_000          # the models' maximum (see the module docstring: avoids the hidden max_tokens continuation)
+OUTPUT_TOKENS = 128_000          # the models' maximum: the largest per-call output cap a request may carry
+OUTPUT_CAP_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"   # TIMEOUT-FIX: set PER CALL to the request's maxOutputTokens (the role cap)
+CONTINUATION_PREFIX = "Output token limit hit"     # 2.1.309's own hidden max_tokens continuation turns all start with this
 REQUIRED_HELP_FLAGS = ("--print", "--output-format", "--input-format", "--verbose", "--model", "--tools",
                        "--strict-mcp-config", "--setting-sources", "--disable-slash-commands", "--no-session-persistence",
                        "--system-prompt", "--effort")
@@ -188,7 +192,7 @@ FORBIDDEN_FLAGS = frozenset({
 ENV_FLAGS = (("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"), ("DISABLE_TELEMETRY", "1"), ("DISABLE_ERROR_REPORTING", "1"),
              ("DISABLE_AUTOUPDATER", "1"), ("DISABLE_UPDATES", "1"), ("DISABLE_INSTALLATION_CHECKS", "1"),
              ("DISABLE_GROWTHBOOK", "1"), ("CLAUDE_CODE_MAX_RETRIES", "0"), ("CLAUDE_CODE_MAX_TURNS", "1"),
-             ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", str(OUTPUT_TOKENS)), ("CLAUDE_CODE_DISABLE_THINKING", "1"),
+             ("CLAUDE_CODE_DISABLE_THINKING", "1"),
              ("CLAUDE_CODE_DISABLE_FILE_MENTIONS", "1"), ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
              ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"), ("CLAUDE_CODE_DISABLE_REFUSAL_RETRY", "1"),
              ("CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK", "1"), ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1"),
@@ -238,7 +242,7 @@ RETRY_POLICY = ("CLAUDE_CODE_MAX_RETRIES=0;forwarder-relays-one-request-per-call
                 "requestsSeen-lower-bound")
 _TOKEN = re.compile(r"sk-ant-oat01-[A-Za-z0-9_\-]{16,512}")
 SANDBOX_VERSION = "claude-bwrap-masked@2"       # @2 (phase A3): user-owned mounts, /mnt, /media, /run/media hidden too
-FORWARDER_VERSION = "claude-loopback-forwarder@2"     # @2 (A5): tallies the upstream SSE content blocks (cross-check)
+FORWARDER_VERSION = "claude-loopback-forwarder@3"     # @3 (TIMEOUT-FIX): relays only the call's own max_tokens (the role cap); @2: SSE tally
 UPSTREAM = "https://api.anthropic.com"          # the one host the forwarder relays to (tests/capture: a loopback fake)
 FORWARD_PATH = "/v1/messages?beta=true"
 MAX_FORWARD_BODY = 8 << 20
@@ -358,6 +362,10 @@ class StreamAudit:
     unknown: list = field(default_factory=list)
     bad: int = 0
     thinking: dict = field(default_factory=lambda: {"thinking": 0, "redacted_thinking": 0, "events": 0, "estimatedTokens": 0})
+    texts: list = field(default_factory=list)          # TIMEOUT-FIX: the assistant TEXT blocks (the answer so far; bounded)
+    first_usage: dict | None = None                    # the first assistant message's usage (input/cache buckets)
+    continuation: bool = False                         # a user turn that is 2.1.309's own max_tokens continuation prompt
+    MAX_TEXT = 1_000_000
 
     def _abort(self, why):
         self.reason = self.reason or why
@@ -397,8 +405,12 @@ class StreamAudit:
                 self.requests.append(rid)
             if len(self.requests) > 1:
                 self._abort("extra-request")
+            if self.first_usage is None and isinstance(msg.get("usage"), dict):
+                self.first_usage = dict(msg["usage"])
             for c in msg.get("content") or []:
                 ct = c.get("type") if isinstance(c, dict) else None
+                if ct == "text" and isinstance(c.get("text"), str) and sum(map(len, self.texts)) < self.MAX_TEXT:
+                    self.texts.append(c["text"][:self.MAX_TEXT])
                 if ct in ("tool_use", "server_tool_use") or (isinstance(ct, str) and ct.endswith("tool_use")):
                     self._abort("tool-attempt")
                 elif ct in THINKING_BLOCK_KEYS:                  # A5: counted; the text/data is never read or kept
@@ -412,6 +424,11 @@ class StreamAudit:
             content = ((ev.get("message") or {}).get("content") if isinstance(ev.get("message"), dict) else None) or []
             tool = any(isinstance(c, dict) and c.get("type") == "tool_result" for c in content) \
                 if isinstance(content, list) else False
+            texts = [c.get("text") for c in content if isinstance(c, dict) and c.get("type") == "text"] \
+                if isinstance(content, list) else [content] if isinstance(content, str) else []
+            if not tool and self.reason is None and len(texts) == 1 and isinstance(texts[0], str) \
+                    and texts[0].startswith(CONTINUATION_PREFIX):
+                self.continuation = True                 # still killed here (extra-turn); _interpret decides what it means
             self._abort("tool-attempt" if tool else "extra-turn")
         elif t == "rate_limit_event":
             info = ev.get("rate_limit_info")
@@ -600,6 +617,7 @@ def isolated_home(work: str, environ=None) -> dict:
 
 def env_digest() -> str:
     return _sha(json.dumps({"pass": sorted([*ENV_PASS, *ENV_HOME_KEYS]), "flags": dict(ENV_FLAGS),
+                            "perCall": {OUTPUT_CAP_ENV: f"<the request's maxOutputTokens (the role cap), 1..{OUTPUT_TOKENS}>"},
                             "tokenFd": TOKEN_FD_ENV + "=<inherited pipe fd: the OAuth access token>"}, sort_keys=True))
 
 
@@ -738,8 +756,10 @@ def isolation_identity(model: str) -> dict:
             "argvSha256": argv_digest(build_argv("claude", model)), "instructionsSha256": _sha(BASE_INSTRUCTIONS),
             "envSha256": env_digest(),
             "structuredMode": "prompt-schema+strict-parse (whole JSON | one whole fence | prose around objects that are all "
-                              "valid and identical; no --json-schema tool, no repair)",
-            "schemaFlavor": SCHEMA_FLAVOR, "thinking": THINKING_POLICY, "effort": EFFORT, "maxTokensSent": OUTPUT_TOKENS,
+                              "valid and identical; no --json-schema tool, no repair); a max_tokens stop is a CUT answer "
+                              "(invalid-output), its hidden CLI continuation killed and never relayed",
+            "schemaFlavor": SCHEMA_FLAVOR, "thinking": THINKING_POLICY, "effort": EFFORT,
+            "maxTokensSent": f"the request's maxOutputTokens (the role cap; 1..{OUTPUT_TOKENS}) via {OUTPUT_CAP_ENV}",
             "auth": "oauth-access-token-via-inherited-fd (no ~/.claude path in the sandbox)",
             "endpoint": f"{FORWARDER_VERSION}: ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/c/<per-call token> relays ONE "
                         f"POST {FORWARD_PATH} (stream true, the pinned model, no tools) to {UPSTREAM}; everything else 404",
@@ -791,11 +811,11 @@ def is_review_call(argv) -> bool:
     return len(inner) > 4 and inner[1:5] == ["-p", "--output-format", "stream-json", "--verbose"]
 
 
-def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None = None) -> list[str]:
+def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None = None, max_tokens: int | None = None) -> list[str]:
     """Check a host guard wrapping run_bounded_stream can apply before a review call runs: the pinned bwrap sandbox for
     this call, the exact pinned argv for `model`, a per-call `rvw-claude-*/cwd`, a scratch-built env with exactly the
     pinned flags, no key names and ANTHROPIC_BASE_URL = a loopback forwarder slot (the token fd is added by the runner, never the
-    caller), and - for the first
+    caller), the per-call output cap OUTPUT_CAP_ENV (= `max_tokens`, the role cap, when given; else any 1..OUTPUT_TOKENS), and - for the first
     call, `first` = the plan's firstRequest facts - the planned stdin bytes. [] = allowed."""
     problems = []
     prefix, inner = split_sandbox(argv)
@@ -809,9 +829,12 @@ def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None =
         problems.append("argv differs from the pinned review argv for this model")
     if not (os.path.basename(cwd) == "cwd" and os.path.basename(work).startswith("rvw-claude-")):
         problems.append("cwd is not a per-call rvw-claude-*/cwd")
-    allowed = {*ENV_PASS, *ENV_HOME_KEYS, *dict(ENV_FLAGS), "ANTHROPIC_BASE_URL"}
+    allowed = {*ENV_PASS, *ENV_HOME_KEYS, *dict(ENV_FLAGS), "ANTHROPIC_BASE_URL", OUTPUT_CAP_ENV}
     if set(env) - allowed or any(dict(ENV_FLAGS)[k] != env.get(k) for k in dict(ENV_FLAGS)):
         problems.append("child environment is not the scratch-built allowlist")
+    cap = str(env.get(OUTPUT_CAP_ENV, ""))
+    if not (cap.isdigit() and 1 <= int(cap) <= OUTPUT_TOKENS) or (max_tokens is not None and cap != str(max_tokens)):
+        problems.append(f"{OUTPUT_CAP_ENV} is not the call's output cap")
     if not BASE_URL_RE.fullmatch(str(env.get("ANTHROPIC_BASE_URL", ""))):
         problems.append("ANTHROPIC_BASE_URL is not the adapter's loopback forwarder")
     if any(not str(env.get(h, "")).startswith(work + os.sep) for h in ENV_HOME_KEYS):
@@ -1025,10 +1048,12 @@ def _probe(argv, environ=None, runner=None, timeout=60) -> tuple[RunResult, bool
 # Loopback proofs in every live preflight (through the live sandbox AND the live forwarder): a scripted answer, a scripted tool call,
 # a 401 and a 404 (their re-sends never reach upstream; both latch), a subscription usage limit (the CLI's words kept), an answer
 # served from extra usage (latched, never $0) and the inject2 prompt (the CLI system message is exactly the Environment block).
-PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2", "thinking")
+PREFLIGHT_CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "inject2", "thinking",
+                           "max_tokens")      # TIMEOUT-FIX: every run re-proves the cut answer and its unsent continuation
 CAPTURE_MODES = ("answer", "toolcall", "status:401", "usage-limit", "overage", "status:404", "404-then-ok", "inject2",
                  "status:429", "status:529", "status:500", "max_tokens", "inject", "remote-settings", "overage-tool",
-                 "overage-timeout", "thinking", "thinking-tool", "prose-json", "prose-two-json", "prose-instead")
+                 "overage-timeout", "thinking", "thinking-tool", "prose-json", "prose-two-json", "prose-instead",
+                 "max_tokens-thinking")
 
 
 def capture_argv(bwrap: str) -> list[str]:
@@ -1107,6 +1132,7 @@ class Slot:
     token: str
     model: str
     timeout: float
+    max_tokens: int = OUTPUT_TOKENS  # TIMEOUT-FIX: the call's output cap; the only max_tokens this slot relays
     attempts: list = field(default_factory=list)      # [{method, path (token stripped), verdict}] in arrival order
     forwarded: int = 0
     upstream_status: int | None = None
@@ -1178,7 +1204,7 @@ class _ForwardServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 class Forwarder:
     """The ONLY endpoint a live CLI talks to: ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/c/<per-call token>. It relays exactly ONE
     `POST /v1/messages?beta=true` per call to UPSTREAM, and only a strict-JSON body (no duplicate key) with "stream": true, the call's
-    pinned model, no tools, max_tokens = OUTPUT_TOKENS and no top-level key outside FORWARD_KEYS (so no tool_choice, mcp_servers,
+    pinned model, no tools, max_tokens = the call's output cap and no top-level key outside FORWARD_KEYS (so no tool_choice, mcp_servers,
     container or thinking); every other request (any GET/HEAD - so no remote managed settings, policy limits or connectivity probe -, a
     second POST, a non-streaming re-send, another model, an unknown token) gets a 404 and is counted. A non-first-party base URL also
     switches 2.1.309's remote-settings and policy-limits fetches off (gate S1). The forwarder holds no credential: the CLI's own
@@ -1245,7 +1271,7 @@ class Forwarder:
                 why = ("not-json" if not isinstance(body, dict) else "not-streaming" if body.get("stream") is not True
                        else "model" if body.get("model") != slot.model else "tools" if body.get("tools") not in (None, [])
                        or "tool_choice" in body else "keys" if set(body) - FORWARD_KEYS
-                       else "max-tokens" if body.get("max_tokens") != OUTPUT_TOKENS else None)
+                       else "max-tokens" if body.get("max_tokens") != slot.max_tokens else None)
                 if why is not None:
                     return self._refuse(slot, why)
                 with fwd._lock:
@@ -1262,8 +1288,8 @@ class Forwarder:
         self.port = self._srv.server_address[1]
         threading.Thread(target=self._srv.serve_forever, name="pullo-claude-forwarder", daemon=True).start()
 
-    def open(self, model_cli: str, timeout: float) -> Slot:
-        slot = Slot(secrets.token_urlsafe(32), model_cli, timeout)
+    def open(self, model_cli: str, timeout: float, max_tokens: int = OUTPUT_TOKENS) -> Slot:
+        slot = Slot(secrets.token_urlsafe(32), model_cli, timeout, max_tokens)
         with self._lock:
             self._slots[slot.token] = slot
         return slot
@@ -1434,6 +1460,9 @@ class ClaudeCliProvider:
             return "messages must be a non-empty list of string-content objects"
         if any(m.get("role") not in ("system", "user", "assistant") for m in msgs):
             return "only system/user/assistant messages are supported (no tool-role messages)"
+        cap = (request.get("params") or {}).get("maxOutputTokens") if isinstance(request.get("params"), dict) else None
+        if type(cap) is not int or not 1 <= cap <= OUTPUT_TOKENS:
+            return f"params.maxOutputTokens must be an integer in 1..{OUTPUT_TOKENS} (the call's output cap, sent as max_tokens)"
         return None
 
     def call(self, request: dict, key: tuple) -> ProviderResult:
@@ -1485,9 +1514,9 @@ class ClaudeCliProvider:
             except OSError as e:
                 return self._done(ck, t0, "not-sent", self._err("provider-error", "isolated home could not be built",
                                                                "not-sent", reason="isolation-setup", why=str(e)[:200]))
-            env = self._env(made["env"])
+            env = self._env({**made["env"], OUTPUT_CAP_ENV: str(cap)})   # TIMEOUT-FIX: max_tokens = the role cap
             fwd = self._forwarder()
-            slot = fwd.open(cli_model(model), float(timeout))
+            slot = fwd.open(cli_model(model), float(timeout), cap)
             env["ANTHROPIC_BASE_URL"] = fwd.base_url(slot)         # the ONLY endpoint the CLI may use (S1)
             argv = build_argv(self._claude, model)
             box = self._sandbox(work)
@@ -1658,6 +1687,10 @@ class ClaudeCliProvider:
                 "discarded; the run was killed at the tool_use block", lost, reason="isolation-violation",
                 itemType="tool-attempt", requestsSent=sent, maxRequestsPerCall=MAX_REQUESTS_PER_CALL),
                 errorKind="isolation-violation", isolation=iso, note="tool-attempt")
+        if (res.aborted == "extra-turn" and audit.continuation and sent == 1 and isinstance(sse, dict)
+                and sse.get("stopReason") == "max_tokens" and audit.init is not None and not audit.unknown and not audit.bad
+                and len([r for r in audit.requests if r]) <= 1 and not set(sse.get("blocks") or {}) - SSE_BLOCK_TYPES):
+            return self._cut(ck, t0, audit, iso, model, sse, think)     # TIMEOUT-FIX: a cut answer, not an isolation event
         if res.aborted in ("init-surface", "extra-request", "extra-turn"):
             item = res.aborted if res.aborted != "init-surface" else \
                 "init-surface:" + ",".join(init_problems(audit.init or {}, model))[:80]
@@ -1735,6 +1768,38 @@ class ClaudeCliProvider:
                           apiEquivalentEstimateUsdMicros=est, priceVersion=CLAUDE_CLI_PRICE_VERSION,
                           estimateBasis=ESTIMATE_BASIS, isolation=iso, generationId=str(rid)[:200] if rid else None,
                           finishReason=str(stop)[:40] if stop is not None else None, note=",".join(notes) or None)
+
+    def _cut(self, ck, t0, audit: StreamAudit, iso, model, sse, think) -> ProviderResult:
+        """TIMEOUT-FIX: the answer reached the call's output cap - upstream stop_reason max_tokens, seen host-side by the forwarder -
+        and 2.1.309 began its own hidden continuation turn ("Output token limit hit..."), killed right there (it is never relayed:
+        one request per call). The text so far is a CUT answer: invalid-output, never parsed into an output, so Pullo's gateway may
+        repair it once (prompts.repair_issues_builder then says the answer was cut at the limit). Output tokens: the forwarder's
+        count; input buckets: the stream's first usage."""
+        first = audit.first_usage or {}
+        u = {"input_tokens": first.get("input_tokens"), "cache_read_input_tokens": first.get("cache_read_input_tokens", 0),
+             "cache_creation_input_tokens": first.get("cache_creation_input_tokens", 0), "output_tokens": sse.get("outputTokens")}
+        if extra_usage(audit.rate[-1] if audit.rate else None, (iso.get("forwarder") or {}).get("rateLimitHeaders")):
+            return self._extra_usage(ck, t0, audit, iso, self._usage(model, u, think["estimatedTokens"])[0])
+        iso["toolItems"] = 0
+        usage, est = self._usage(model, u, think["estimatedTokens"])
+        iso["parse"] = {"note": None, "failure": "max-output-tokens", "candidates": None}
+        response = {"status": "invalid-output", "resolvedModel": model, "output": None,
+                    "rawText": redact("".join(audit.texts)[:1_000_000])[0], "usage": usage}
+        rid = next((x for x in audit.requests if x), None)
+        if rid:
+            response["providerRequestId"] = str(rid)[:200]
+        notes = ["invalid-output", "max-output-tokens", "finish-max_tokens"] + [n for n in (
+            "adaptive-thinking" if think["blocks"] or think["redactedBlocks"] else None,
+            "thinking-count-mismatch" if think["crossCheck"] == "mismatch" else None) if n]
+        if audit.rate:
+            iso["rateLimit"] = {k: audit.rate[-1].get(k) for k in ("status", "rateLimitType", "resetsAt", "utilization",
+                                                                   "isUsingOverage", "overageInUse", "overageStatus")
+                                if audit.rate[-1].get(k) is not None}
+        return self._done(ck, t0, "processed", ProviderResult(response, None, "processed"), usage=usage,
+                          resolvedModel=model, resolvedModelSource="claude-cli-stream",
+                          apiEquivalentEstimateUsdMicros=est, priceVersion=CLAUDE_CLI_PRICE_VERSION,
+                          estimateBasis=ESTIMATE_BASIS, isolation=iso, generationId=str(rid)[:200] if rid else None,
+                          finishReason="max_tokens", note=",".join(notes))
 
     @staticmethod
     def _usage(model, u, reasoning: int = 0) -> tuple[dict, int | None]:

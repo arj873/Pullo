@@ -196,6 +196,13 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
         return [i, text(m, "{\"hypotheses\": [{\"trunc"),
                 ev("user", message={"role": "user", "content": [{"type": "text", "text": "Output token limit hit. Resume"}]}),
                 text(m, "ated\"}]}", rid="req_fake_2", mid="msg_fake_2"), result(m, "x", turns=2)], 0, b"", 0
+    if scenario in CUT:                       # TIMEOUT-FIX: a max_tokens stop at the call's cap; the CLI's continuation turn
+        cont = CONTINUATION_THINKING if scenario == "max-tokens-cut-thinking" else \
+            "Please go on." if scenario == "max-tokens-other-turn" else CONTINUATION
+        first = assistant(m, [{"type": "thinking", "thinking": THINK_DECOY, "signature": "sig"}]) \
+            if scenario == "max-tokens-cut-thinking" else text(m, CUT_TEXT)
+        return [i, first, rate(), ev("user", message={"role": "user", "content": [{"type": "text", "text": cont}]}),
+                text(m, "ated\"}]}", rid="req_fake_2", mid="msg_fake_2"), result(m, "x", turns=2)], 0, b"", 0
     if scenario == "two-requests":
         return [i, text(m, ans), text(m, ans, rid="req_fake_2", mid="msg_fake_2"), result(m, ans)], 0, b"", 0
     if scenario == "extra-model":
@@ -264,6 +271,12 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
 
 
 # What the host forwarder relays per scenario (the real CLI's requests): 0 = the CLI stopped before any request.
+CUT = frozenset({"max-tokens-cut", "max-tokens-cut-thinking", "max-tokens-other-turn"})
+CUT_TEXT = '{"hypotheses": [{"claim": "the answer was cut her'
+CONTINUATION = ("Output token limit hit. Resume directly \u2014 no apology, no recap of what you were doing. Pick up mid-thought "
+                "if that is where the cut happened. Break remaining work into smaller pieces.")      # 2.1.309's own words
+CONTINUATION_THINKING = ("Output token limit hit while you were still reasoning, before this response produced any text or tool "
+                         "call. That reasoning was not kept and is not part of this conversation, so there is nothing to resume.")
 SENT = {"not-logged-in": 0, "stderr-only": 0, "init-tools": 0, "init-mcp": 0, "init-plugin": 0, "wrong-model": 0, "unrelayed": 0}
 UPSTREAM_STATUS = {"retry401": 401, "usage-limit": 429, "throttle": 429, "overloaded": 529, "server500": 500, "model404": 404,
                    "refusal": 200}
@@ -272,7 +285,8 @@ OVERAGE_HEADERS = {"anthropic-ratelimit-unified-status": "rejected", "anthropic-
 # The upstream SSE content blocks the host forwarder tallies per scenario (A5 cross-check); default one text block.
 UPSTREAM_BLOCKS = {"thinking": {"thinking": 2, "redacted_thinking": 1, "text": 1}, "thinking-heavy": {"thinking": 1, "text": 1},
                    "thinking-mismatch": {"thinking": 2, "text": 1}, "sse-tool": {"text": 1, "tool_use": 1},
-                   "thinking-tool": {"thinking": 1, "tool_use": 1}, "toolcall": {"tool_use": 1}, "overage-tool": {"tool_use": 1}}
+                   "thinking-tool": {"thinking": 1, "tool_use": 1}, "toolcall": {"tool_use": 1}, "overage-tool": {"tool_use": 1},
+                   "max-tokens-cut-thinking": {"thinking": 1}}
 UPSTREAM_RATE = {"overage": OVERAGE_HEADERS, "overage-tool": OVERAGE_HEADERS, "overage-timeout": OVERAGE_HEADERS,
                  "usage-limit": {"anthropic-ratelimit-unified-status": "rejected"}}
 
@@ -284,8 +298,8 @@ class FakeForwarder:
     def __init__(self):
         self.slots, self.closed = {}, []
 
-    def open(self, model_cli, timeout):
-        slot = C.Slot(secrets.token_urlsafe(32), model_cli, timeout)
+    def open(self, model_cli, timeout, max_tokens=C.OUTPUT_TOKENS):
+        slot = C.Slot(secrets.token_urlsafe(32), model_cli, timeout, max_tokens)
         self.slots[slot.token] = slot
         return slot
 
@@ -311,7 +325,9 @@ class FakeForwarder:
             if slot.upstream_status != 200:
                 slot.upstream_error = '{"type":"error","error":{"message":"fake upstream ' + str(slot.upstream_status) + '"}}'
             else:
-                slot.sse = {"blocks": dict(UPSTREAM_BLOCKS.get(scenario, {"text": 1})), "outputTokens": None, "stopReason": None,
+                cut = scenario in CUT                  # TIMEOUT-FIX: upstream stopped at the call's own max_tokens
+                slot.sse = {"blocks": dict(UPSTREAM_BLOCKS.get(scenario, {"text": 1})),
+                            "outputTokens": slot.max_tokens if cut else None, "stopReason": "max_tokens" if cut else None,
                             "unparsed": 0}
 
 
@@ -377,7 +393,7 @@ base = os.environ.get("ANTHROPIC_BASE_URL")
 if base and SCENARIO not in {no_send!r}:     # as the real CLI: ONE streamed POST through the host forwarder
     import urllib.request
     m = argv[argv.index("--model") + 1]
-    body = json.dumps({{"model": m, "stream": True, "tools": [], "max_tokens": 128000,
+    body = json.dumps({{"model": m, "stream": True, "tools": [], "max_tokens": int(os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]),
                         "messages": [{{"role": "user", "content": "x"}}]}}).encode()
     try:
         urllib.request.urlopen(urllib.request.Request(base + "/v1/messages?beta=true", body, {{"content-type": "application/json"}}),

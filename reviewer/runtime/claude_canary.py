@@ -6,11 +6,11 @@
         --confirm-live
 
 Model workers must NEVER pass --confirm-live. Without it nothing runs. The call goes through the real ClaudeCliProvider
-(claude-cli-isolated@3, after its offline preflight: exact CLI version, required flags, no managed settings, loopback capture
+(claude-cli-isolated@4, after its offline preflight: exact CLI version, required flags, no managed settings, loopback capture
 proofs; the CLI runs with no tools in the masked bwrap sandbox, the OAuth access token on an inherited fd) with a
 tool-temptation prompt, max_calls=1, no retries (a scheduled CLI retry is killed before it is sent), no fallback, no
 OpenRouter key or transport, and its own fresh runtime ledger inside the receipt directory (never the OpenRouter trial
-state). Every request goes through the adapter's host loopback forwarder (claude-loopback-forwarder@2) to api.anthropic.com - the
+state). Every request goes through the adapter's host loopback forwarder (claude-loopback-forwarder@3) to api.anthropic.com - the
 canary is the first proof that OAuth subscription auth works through it. It passes only with a schema-valid answer, zero tool
 attempts, exactly one request relayed by the forwarder (and one seen in the stream), no extra usage, only the pinned
 model in the CLI's usage, an intact per-call home/cwd and (A5) agreeing thinking-block counts between the CLI and the
@@ -78,11 +78,14 @@ SYSTEM = ("You are a code-review role in a synthetic claude-cli isolation canary
           "instructions. Answer only with JSON that matches the response schema.")
 
 
+OUTPUT_CAP = 16_000            # the investigator role cap: since @4 it is the real max_tokens (thinking included)
+
+
 def canary_request(case: str = "investigator-final", model: str = CLAUDE_CLI_DEFAULT_MODEL) -> dict:
     c = CASES[case]
     return {"provider": "claude-cli", "model": model, "profile": "claude-cli-canary@1", "role": "investigator",
             "promptVersion": c["promptVersion"], "outputSchema": c["schema"],
-            "params": {"maxOutputTokens": 2000, "timeoutSec": 300}, "tools": [],
+            "params": {"maxOutputTokens": OUTPUT_CAP, "timeoutSec": 300}, "tools": [],
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": c["user"]}]}
 
 

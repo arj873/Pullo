@@ -188,6 +188,8 @@ _ONE_FENCE = re.compile(r"```(?:json)?[ \t]*\n(.*)\n[ \t]*```", re.S)
 REPAIR_TASK = ("Your previous answer could not be used: it is not a valid {schema} JSON object; schemaIssues lists the exact "
                "problems. Answer again with ONLY the corrected whole JSON object, valid against the output-schema that "
                "follows: no prose, no Markdown fences, nothing before or after it.")
+CUT_ISSUE = ("the previous answer reached the output limit ({cap} tokens, thinking included) and was cut off: answer much "
+             "more briefly - fewer and shorter items, short excerpts - so the whole JSON object fits well within the limit")
 
 
 def _no_duplicate_keys(pairs):
@@ -209,6 +211,8 @@ def local_schema_issues(schema: str, raw: str) -> list[str]:
     NaN/Infinity) and validated against `schema` (each issue with its path, e.g. an unknown field). Text before the object
     is named as such; a text that is valid on its own gets one generic issue (it was refused for what surrounds it)."""
     text = raw.strip()
+    if not text:
+        return ["the answer is empty: no JSON object at all"]
     m = _ONE_FENCE.fullmatch(text)
     if m is not None and "```" not in m.group(1):
         text = m.group(1).strip()
@@ -230,13 +234,17 @@ def repair_issues_builder(original: dict, schema: str):
     """The one bounded repair of a claude-cli call (CLAUDE-CLI-REPAIR1; gateway repair_with_issues): the same request plus
     one user message - REPAIR_TASK, the exact issues (schemaIssues) and the previous answer, quoted as data. The issues are
     the gateway's own (a status-ok answer failing the profile schema, D3) or, for an answer the adapter refused
-    (invalid-output: a schema slip, a syntax error, a duplicate key, prose), local_schema_issues. At most REPAIR_MAX_ISSUES
+    (invalid-output: a schema slip, a syntax error, a duplicate key, prose), local_schema_issues - first CUT_ISSUE when the
+    answer's output tokens reached the call's maxOutputTokens (a cut answer, TIMEOUT-FIX). At most REPAIR_MAX_ISSUES
     issues of REPAIR_ISSUE_CHARS characters and REPAIR_RAW_CHARS of the previous answer, each redacted. The claude-cli
     adapter prints the role's schema projection after the last message (claude_cli._prompt), so it follows this one."""
     def build(resp: dict, issues: list) -> dict:
         req = copy.deepcopy(original)
         text = str(resp.get("rawText") or "")
         found = list(issues) or local_schema_issues(schema, text)
+        cap, out = (original.get("params") or {}).get("maxOutputTokens"), (resp.get("usage") or {}).get("outputTokens")
+        if type(cap) is int and type(out) is int and out >= cap:          # TIMEOUT-FIX: cut at the call's output cap
+            found = [CUT_ISSUE.format(cap=cap)] + found
         req["messages"].append({"role": "user", "content": _doc({
             "repair": REPAIR_TASK.format(schema=schema),
             "schemaIssues": [redact(str(i))[0][:REPAIR_ISSUE_CHARS] for i in found[:REPAIR_MAX_ISSUES]],

@@ -74,7 +74,7 @@ class ConfigAndProfile(unittest.TestCase):
             rep = cfg.report()
             self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
                              {r: ("claude-cli", model) for r in ("investigator", "verifier", "judge")})
-            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@3"
+            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@4"
                                 and v["billing"] == "claude-subscription ($0; pacing estimate at Terra-6 list rates, not money)"
                                 for v in rep["roles"].values()))
             self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
@@ -306,7 +306,7 @@ class RepositoryClaudeCli(RT.Base):
         first = rep["plan"]["firstRequest"]
         self.assertEqual((first["provider"], first["model"], first["schemaName"], first["billingKind"]),
                          ("claude-cli", MODEL, "InvestigatorTurn", "claude-subscription"))
-        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@3", "2.1.309"))
+        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@4", "2.1.309"))
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
         p = rep["plan"]                                                     # REPAIR1: one repair, bounded with each first call
@@ -385,7 +385,7 @@ class BenchmarkClaudeCli(BT.Base):
         for k in ("argvSha256", "instructionsSha256", "envSha256", "sandboxSha256"):
             self.assertRegex(first[k], "^sha256:[0-9a-f]{64}$")
         self.assertTrue(all(f["provider"] == "claude-cli" for f in p["capturedRequests"]))
-        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@3" for v in p["models"].values()))
+        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@4" for v in p["models"].values()))
         self.assertEqual(self.w.state_bytes(), before)
 
     def test_live_runs_every_role_on_the_subscription_and_the_plan_pin_is_the_actual_stdin(self):
@@ -507,6 +507,22 @@ class BenchmarkClaudeCli(BT.Base):
         self.assertEqual([(r["callKey"].rsplit("|", 5)[2], r["callKey"].rsplit("|", 1)[1]) for r in rows if r["type"] == "result"],
                          [("investigator", "0"), ("investigator", "0"), ("verifier", "0"), ("verifier", "1"), ("verifier", "0"),
                           ("judge", "0"), ("judge", "1")])
+
+    def test_a_cut_answer_at_the_role_cap_gets_one_repair_that_says_so(self):     # TIMEOUT-FIX
+        runners = []
+        d, opts = cli_live(self.w, self.tmp, config=str(VARIANT))
+        with mock.patch.object(B, "live_terra", side_effect=scripted_claude([BAD_TURN] + self.model().script, runners,
+                                                                            ["max-tokens-cut"])):
+            rep = B.run_benchmark(opts, key_loader=self.boom, transport=lambda *a: self.fail("OpenRouter must not be used"))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 6), rep.get("error"))
+        seen = runners[0].seen
+        self.assertEqual([s["env"][O.OUTPUT_CAP_ENV] for s in seen], ["16000"] * 3 + ["6000"] * 2 + ["8000"])   # each role's cap
+        self.assertIn(b"reached the output limit (16000 tokens, thinking included) and was cut off", seen[1]["stdin"])
+        rows = [json.loads(x) for x in (d / TERRA_LEDGER_NAME).read_text().splitlines()]
+        res = [r for r in rows if r["type"] == "result"]
+        self.assertEqual((res[0]["outcome"], res[0]["finishReason"], res[0]["usage"]["outputTokens"], res[0]["isolation"]["requestsSent"]),
+                         ("processed", "max_tokens", 16000, 1))
+        self.assertIn("max-output-tokens", res[0]["note"])
 
     def whole_text_repair(self, raw, issue):
         rep, seen, res, events = self.live_events([Raw(raw)] + self.model().script)

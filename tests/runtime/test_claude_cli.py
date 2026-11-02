@@ -32,7 +32,8 @@ HOSTILE_ENV = {"PATH": os.environ["PATH"], "HOME": "/home/operator", "OPENROUTER
                "ANTHROPIC_API_KEY": "sk-ant-api03-x", "ANTHROPIC_BASE_URL": "http://evil", "CLAUDE_CODE_OAUTH_TOKEN": "t",
                "CLAUDE_CONFIG_DIR": "/home/operator/.claude", "HTTPS_PROXY": "http://proxy", "LANG": "C.UTF-8",
                "CLAUDE_CODE_USE_BEDROCK": "1", "XDG_CONFIG_HOME": "/home/operator/.config"}
-ALLOWED_ENV = {*C.ENV_PASS, *C.ENV_HOME_KEYS, *dict(C.ENV_FLAGS), "ANTHROPIC_BASE_URL"}   # the base URL: the forwarder slot only
+ALLOWED_ENV = {*C.ENV_PASS, *C.ENV_HOME_KEYS, *dict(C.ENV_FLAGS), "ANTHROPIC_BASE_URL",   # the base URL: the forwarder slot only
+               C.OUTPUT_CAP_ENV}                                                          # TIMEOUT-FIX: the per-call output cap
 
 
 def _bwrap_works() -> bool:
@@ -95,7 +96,7 @@ class Settings(unittest.TestCase):
     def test_env_is_built_from_scratch_with_the_pinned_switches_and_no_credential(self):
         with tempfile.TemporaryDirectory() as d:
             env = C.isolated_home(d, HOSTILE_ENV)["env"]
-        self.assertEqual(set(env), ALLOWED_ENV - {"LC_ALL", "ANTHROPIC_BASE_URL"})   # the adapter adds the forwarder slot per call
+        self.assertEqual(set(env), ALLOWED_ENV - {"LC_ALL", "ANTHROPIC_BASE_URL", C.OUTPUT_CAP_ENV})   # both added per call
         for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "OPENROUTER_API_KEY", "HTTPS_PROXY",
                   "CLAUDE_CODE_USE_BEDROCK", C.TOKEN_FD_ENV):
             self.assertNotIn(k, env)
@@ -103,8 +104,8 @@ class Settings(unittest.TestCase):
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], os.path.join(d, "home", ".claude"))
         f = dict(C.ENV_FLAGS)
         self.assertEqual((f["CLAUDE_CODE_MAX_RETRIES"], f["CLAUDE_CODE_MAX_TURNS"], f["CLAUDE_CODE_DISABLE_FILE_MENTIONS"],
-                          f["CLAUDE_CODE_DISABLE_THINKING"], f["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]),
-                         ("0", "1", "1", "1", str(C.OUTPUT_TOKENS)))
+                          f["CLAUDE_CODE_DISABLE_THINKING"]), ("0", "1", "1", "1"))
+        self.assertNotIn(C.OUTPUT_CAP_ENV, f)                                   # TIMEOUT-FIX: set per call to the role cap
 
     def test_prompt_wraps_messages_and_quotes_the_anthropic_projection(self):
         r = F.claude_request("verifier", text="a <b> & c")
@@ -125,7 +126,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(a, C.isolation_identity(F.MODEL))
         self.assertEqual({k for k in a if a[k] != b[k]}, {"argvSha256"})
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
-                         ("claude-cli-isolated@3", "2.1.309", "claude-bwrap-masked@2"))
+                         ("claude-cli-isolated@4", "2.1.309", "claude-bwrap-masked@2"))
 
     def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
         oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
@@ -281,7 +282,7 @@ class Calls(Base):
                                             "cacheWriteInputTokens": 300, "outputTokens": 40, "reasoningTokens": 0})
         self.assertEqual((res_row["generationId"], res_row["isolation"]["requestsSeen"], res_row["isolation"]["toolItems"],
                           res_row["isolation"]["requestsSent"], res_row["isolation"]["forwarder"]["version"]),
-                         ("req_fake_1", 1, 0, 1, "claude-loopback-forwarder@2"))
+                         ("req_fake_1", 1, 0, 1, "claude-loopback-forwarder@3"))
         self.assertEqual(self.led.totals()["committedUsdMicros"], 0)
         self.assertNotIn(F.DUMMY_TOKEN, Path(self.dir, "led.jsonl").read_text())
         self.assertEqual(self.leftovers(), [])
@@ -372,10 +373,47 @@ class Calls(Base):
         self.assertNotIn("opaque-redacted", kept)
         self.assertNotIn("sig-1", kept)
 
+    def test_a_max_tokens_stop_is_a_cut_answer_its_continuation_killed_and_never_relayed(self):
+        req = F.claude_request()
+        cap = req["params"]["maxOutputTokens"]
+        for sc, raw in (("max-tokens-cut", F.CUT_TEXT), ("max-tokens-cut-thinking", "")):
+            with self.subTest(sc):
+                p = self.prov(sc)
+                res = p.call(req, KEY)
+                self.assertEqual((res.outcome, res.error), ("processed", None))
+                r = res.response
+                self.assertEqual((r["status"], r["output"], r["rawText"], r["usage"]["outputTokens"]), ("invalid-output", None, raw, cap))
+                row = [x for x in self.rows() if x["type"] == "result"][-1]
+                self.assertEqual((row["outcome"], row["finishReason"], row["isolation"]["requestsSent"],
+                                  row["isolation"]["parse"]["failure"]), ("processed", "max_tokens", 1, "max-output-tokens"))
+                self.assertTrue({"invalid-output", "max-output-tokens", "finish-max_tokens"} <= set(row["note"].split(",")), row["note"])
+                self.assertNotIn("PULLO-DECOY", json.dumps(self.rows()) + json.dumps(r))
+                self.assertEqual(self.runner.seen[0]["env"][C.OUTPUT_CAP_ENV], str(cap))   # max_tokens = the role cap, per call
+
+    def test_the_output_cap_is_per_call_required_and_bound_on_both_sides(self):
+        p = self.prov("ok")
+        req = F.claude_request()
+        p.call(req, KEY)
+        s = self.runner.seen[0]
+        self.assertEqual(s["env"][C.OUTPUT_CAP_ENV], str(req["params"]["maxOutputTokens"]))
+        self.assertEqual(self.runner.forwarder.closed[-1]["requestsSent"], 1)
+        prob = lambda env, mt: C.review_call_problems(s["argv"], s["stdin"], env, s["cwd"], F.MODEL, max_tokens=mt)  # noqa: E731
+        self.assertFalse([x for x in prob(s["env"], req["params"]["maxOutputTokens"]) if "output cap" in x])
+        self.assertTrue([x for x in prob(s["env"], 16000) if "output cap" in x])           # another role's cap
+        self.assertTrue([x for x in prob(dict(s["env"], **{C.OUTPUT_CAP_ENV: "128001"}), None) if "output cap" in x])
+        self.assertTrue([x for x in prob({k: v for k, v in s["env"].items() if k != C.OUTPUT_CAP_ENV}, None) if "output cap" in x])
+        for bad in (None, 0, C.OUTPUT_TOKENS + 1, "4000", True):
+            with self.subTest(bad=bad):
+                r = dict(req, params={k: v for k, v in req["params"].items() if k != "maxOutputTokens"}
+                         | ({} if bad is None else {"maxOutputTokens": bad}))
+                res = self.prov("ok").call(r, KEY)
+                self.assertEqual((res.outcome, res.error["detail"]["reason"]), ("not-sent", "request-refused"))
+
     def test_isolation_audit_failures_discard_output(self):
         for sc, item in (("init-tools", "init-surface:init-tools"), ("init-mcp", "init-surface:init-mcp_servers"),
                          ("init-plugin", "init-surface:init-plugins"), ("wrong-model", "init-surface:init-model"),
                          ("two-requests", "extra-request"), ("max_tokens", "extra-turn"),
+                         ("max-tokens-other-turn", "extra-turn"),            # max_tokens upstream, but not the CLI's own turn
                          ("extra-model", "extra-model:claude-haiku-5-5"), ("unknown-event", "unknown-event:system/hook_response"),
                          ("thinking-badshape", "unknown-event:content/thinking-shape"),
                          ("thinking-event-badshape", "unknown-event:system/thinking_tokens-shape"),
@@ -657,7 +695,7 @@ class Audits(unittest.TestCase):
 
 def capture_out(**over):
     m = F.MODEL
-    body = {"model": "claude-sonnet-5-5", "max_tokens": C.OUTPUT_TOKENS, "stream": True, "tools": [],
+    body = {"model": "claude-sonnet-5-5", "max_tokens": CAP.PROBE_CAP, "stream": True, "tools": [],
             "metadataKeys": ["user_id"],
             "system": [{"kind": "billing"}, {"kind": "identity"}, {"kind": "base"}],
             "messages": [{"role": "user", "isPrompt": True, "markers": []},
@@ -924,6 +962,16 @@ class RealCliRepairProof(unittest.TestCase):
                 self.assertEqual([(c["model"], c["repairMessage"]) for c in out["cli"]], [(cli, False), (cli, True)])
                 self.assertEqual((out["posts"], len(out["rows"])), (2, 2))               # no third attempt
 
+    def test_an_answer_cut_at_the_role_cap_is_repaired_once_and_told_why(self):   # TIMEOUT-FIX
+        for model in sorted(CLAUDE_CLI_MODELS):
+            with self.subTest(model=model):
+                out = self.proof(model, [{"cut": '{"hypotheses": [{"claim": "cut her'}, RP.VALID],
+                                 expect=["reached the output limit (16000 tokens, thinking included) and was cut off"])
+                self.assertEqual((out["result"]["ok"], [a["outcome"] for a in out["attempts"]], out["posts"], out["others"]),
+                                 (True, ["invalid-output", "ok"], 2, []), out)        # the CLI's continuation never reached upstream
+                self.assertEqual(["max-output-tokens" in (r["note"] or "") for r in out["rows"]], [True, False])
+                self.assertEqual((out["cli"][1]["repairMessage"], out["cli"][1]["expectShown"]), (True, [True]), out)
+
     def test_whole_text_failures_are_repaired_once_and_shown_exactly(self):
         model = sorted(CLAUDE_CLI_MODELS)[0]
         for name, (bad, issue) in RP.WHOLE_TEXT.items():                          # pilot data 2026-11-02: verifier slips
@@ -1056,6 +1104,17 @@ class ForwarderUnit(unittest.TestCase):
                          [("POST", C.FORWARD_PATH, "Bearer DUMMY", "identity")])             # exactly one, headers relayed
         self.assertNotIn("DUMMY", json.dumps(facts))                                         # no header value is recorded
         self.assertEqual(self.req(base, body=good)[0], 404)                                  # a closed slot relays nothing
+
+    def test_a_slot_relays_only_its_own_output_cap(self):                    # TIMEOUT-FIX: max_tokens = the call's role cap
+        slot = self.fwd.open("claude-sonnet-5-5", 10, 16000)
+        base = self.fwd.base_url(slot)
+        good = {"model": "claude-sonnet-5-5", "stream": True, "tools": [], "max_tokens": 16000,
+                "messages": [{"role": "user", "content": "x"}]}
+        for mt in (C.OUTPUT_TOKENS, 15999, 16001):
+            self.assertEqual(self.req(base, body=dict(good, max_tokens=mt))[0], 404, mt)
+        self.assertEqual(self.req(base, body=good)[0], 200)
+        facts = self.fwd.close(slot)
+        self.assertEqual((facts["requestsSent"], [a["verdict"] for a in facts["refused"]]), (1, ["max-tokens"] * 3))
 
     def test_the_relay_tallies_the_upstream_sse_blocks(self):
         evs = [{"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},

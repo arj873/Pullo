@@ -7,7 +7,7 @@ Each role's provider comes from its ModelProfile entry (pullo.toml model -> prov
                OPENCODE-FREE-PROVIDER). It is a CLI arm like Terra: live_arm() calls it "terra" (its own operator-created
                CLI-arm state dir, never the OpenRouter trial state, never the key) and live_terra() returns CliProviders.
   claude-cli -> ClaudeCliProvider (Claude Opus/Sonnet 5.5 through the installed Claude Code CLI on the user's subscription,
-               no tools, claude-cli-isolated@3; CLAUDE-CLI-PROVIDER). A CLI arm like opencode: "terra" state layout,
+               no tools, claude-cli-isolated@4; CLAUDE-CLI-PROVIDER). A CLI arm like opencode: "terra" state layout,
                CliProviders(..., claude=adapter).
 A provider no role uses is a DisabledProvider, so an arm that needs no OpenRouter role never loads the key, and an
 arm with no Terra role never runs the Codex CLI preflight. Plan mode captures both kinds in call order without
