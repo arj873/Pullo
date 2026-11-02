@@ -1,9 +1,11 @@
 """Live review profile and Plan for the pilot: Sonnet 5.5 through OpenRouter, no hidden model loops.
 
-Retries and repairs are 0 until gateway D3 (schema check before settle) and D4 (deadline before every attempt)
-land: with them off, every billable call is one admitted, traced attempt. Output caps are positive and large
-enough for real hypotheses, verifications and comments; they are admission bounds, not prompts. Comment cap and
-tool limits are NOT set here: the pipeline defaults apply."""
+Retries are 0, and so are repairs, except on claude-cli roles (CLAUDE-CLI-REPAIR1): with gateway D3 (schema check
+before settle) and D4 (host guard before every attempt) in place, a claude-cli role gets maxRepairs 1 - Pullo's OWN
+gateway repair (repair_with_issues: a new, separately admitted, traced and counted CLI call that shows the local schema
+issues), never a CLI-side repair. Every other provider keeps 0, so its profile and Plan bytes are unchanged. Output caps
+are positive and large enough for real hypotheses, verifications and comments; they are admission bounds, not prompts.
+Comment cap and tool limits are NOT set here: the pipeline defaults apply."""
 
 from __future__ import annotations
 
@@ -25,6 +27,9 @@ WALL_CLOCK_SEC, SOFT_DEADLINE_SEC = 1_200, 900     # live latency: the synthetic
 LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 300, "VERIFY": 300, "JUDGE": 200}
 _OUT = {"investigator": "InvestigatorOutput", "verifier": "VerifierOutput", "judge": "JudgeOutput"}
 _PV = {"investigator": "investigator.generalist@v1", "verifier": "verifier.refute@v1", "judge": "judge.wording@v1"}
+CLAUDE_CLI_REPAIRS = 1                  # CLAUDE-CLI-REPAIR1: gateway repairs per claude-cli call (every other provider: 0)
+REPAIR_REASON = ("claude-cli roles: one gateway repair per call (repair_with_issues: a separately admitted, traced CLI "
+                 "call showing the local schema issues)")
 
 
 class ProfileError(ValueError):
@@ -67,7 +72,8 @@ def live_profile(model: str | None = None, output_caps: dict | None = None, time
         m = models.model(r)
         return {**model_fields(models.provider(r), m), "resolved": True,
                 "promptVersion": _PV[r], "outputSchema": _OUT[r], "params": {"maxOutputTokens": caps[r]},
-                "caps": {"maxOutputTokens": caps[r], "timeoutSec": tmo[r], "maxRetries": 0, "maxRepairs": 0},
+                "caps": {"maxOutputTokens": caps[r], "timeoutSec": tmo[r], "maxRetries": 0,
+                         "maxRepairs": CLAUDE_CLI_REPAIRS if models.provider(r) == "claude-cli" else 0},
                 "fallbacks": []}
     return {"id": PROFILE_ID, "version": 1, "tier": "standard", "triage": "fixed-rule@1",
             "roles": {r: role(r) for r in _OUT}}
@@ -87,6 +93,21 @@ def live_plan(profile: dict, *, wall_clock_sec: int = WALL_CLOCK_SEC, soft_deadl
         issues = validate("Budget", budget)
         if issues:
             raise ProfileError(f"invalid stage timing: {issues[0]}")
-    return {"version": 1, "tier": "standard", "specialists": ["generalist"], "budget": budget,
-            "modelProfile": f"{profile['id']}@{profile['version']}", "triage": "fixed-rule@1",
-            "reasons": ["pilot: fixed standard Plan, retries/repairs off pending gateway D3/D4"]}
+    return with_repair_reason({"version": 1, "tier": "standard", "specialists": ["generalist"], "budget": budget,
+                               "modelProfile": f"{profile['id']}@{profile['version']}", "triage": "fixed-rule@1",
+                               "reasons": ["pilot: fixed standard Plan, retries/repairs off pending gateway D3/D4"]},
+                              profile)
+
+
+def profile_repairs(profile: dict) -> int:
+    """The most gateway repairs any role of `profile` may use per call (gateway.effective_retry_limits: at most 1)."""
+    return max(min(1, s["caps"]["maxRepairs"]) for s in profile["roles"].values())
+
+
+def with_repair_reason(plan: dict, profile: dict) -> dict:
+    """A Plan whose profile repairs (claude-cli roles) says so: its "retries/repairs off" reasons read "retries off" and
+    REPAIR_REASON is added once. Any other Plan is returned unchanged (same bytes)."""
+    if profile_repairs(profile) and REPAIR_REASON not in plan["reasons"]:
+        plan["reasons"] = [r.replace("retries/repairs off pending gateway D3/D4", "retries off")
+                           .replace("retries/repairs off", "retries off") for r in plan["reasons"]] + [REPAIR_REASON]
+    return plan

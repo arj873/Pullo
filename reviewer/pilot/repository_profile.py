@@ -48,7 +48,8 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
 from reviewer.pipeline.retrieval import INVESTIGATOR_PROMPT, VERIFIER_PROMPT
 from reviewer.pipeline.sweeps import plan_specialists as v4_plan_specialists
 
-from .profile import LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile, model_fields
+from .profile import (CLAUDE_CLI_REPAIRS, LIVE_STAGE_CEILINGS_SEC, MODEL, ProfileError, live_plan, live_profile, model_fields,
+                      with_repair_reason)
 
 PROFILE_ID = "pilot-repository"
 MAX_TOOL_CALLS = 160            # run-wide tool calls (matches RetrievalPolicy.run_tool_calls)
@@ -147,6 +148,7 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
                                   else "v10 never runs as the v3 specialists alone)"))
         spec = copy.deepcopy(profile["roles"]["investigator"])
         spec.update(model_fields(models.provider("investigator_alt"), alt))
+        spec["caps"]["maxRepairs"] = CLAUDE_CLI_REPAIRS if spec["provider"] == "claude-cli" else 0   # its own provider's
         profile["alternates"] = {"investigator": spec}
         problem = lanes.alternate_problem(profile)
         if problem is not None:
@@ -155,6 +157,12 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
 
 
 def repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
+    """_repository_plan; a profile with claude-cli repairs says so in the Plan reasons (profile.with_repair_reason; every
+    other Plan keeps its bytes)."""
+    return with_repair_reason(_repository_plan(profile, live_stage_timing=live_stage_timing), profile)
+
+
+def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     """`live_stage_timing` (explicit, default off = the legacy Plan) sets the versioned live stage ceilings and
     host-stop recording together; no repository data selects either. An investigator.impact@v3 profile gets the
     specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep

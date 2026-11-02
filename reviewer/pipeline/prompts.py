@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 
+from reviewer.contracts import validate
 from reviewer.contracts.redaction import contains_protected, redact
 
 SYSTEM_RULES = (
@@ -176,6 +177,70 @@ def repair_builder(original: dict, schema: str):
         req["messages"].append({"role": "user", "content": _doc({
             "repair": f"The previous answer was not valid {schema} JSON. Answer again with exactly one JSON "
                       "object that matches the answerFormat.", "previousAnswerUntrusted": raw})})
+        return req
+    return build
+
+
+# CLAUDE-CLI-REPAIR1: the one gateway repair of a claude-cli call shows the exact local failures (bounded, redacted). The
+# previous answer is quoted up to REPAIR_RAW_CHARS (above the largest answer the role output caps allow, so it is whole).
+REPAIR_RAW_CHARS, REPAIR_MAX_ISSUES, REPAIR_ISSUE_CHARS = 64_000, 8, 300
+_ONE_FENCE = re.compile(r"```(?:json)?[ \t]*\n(.*)\n[ \t]*```", re.S)
+REPAIR_TASK = ("Your previous answer could not be used: it is not a valid {schema} JSON object; schemaIssues lists the exact "
+               "problems. Answer again with ONLY the corrected whole JSON object, valid against the output-schema that "
+               "follows: no prose, no Markdown fences, nothing before or after it.")
+
+
+def _no_duplicate_keys(pairs):
+    seen = set()
+    for k, _ in pairs:
+        if k in seen:
+            raise ValueError(f"duplicate key {k!r} (each key may appear once per object)")
+        seen.add(k)
+    return dict(pairs)
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not JSON")
+
+
+def local_schema_issues(schema: str, raw: str) -> list[str]:
+    """Pullo's own check of an answer the provider could not take (invalid-output), naming the exact failure: the whole
+    text, or its one whole ```json fence, parsed strictly (a JSON syntax error with its position, a duplicate key by name,
+    NaN/Infinity) and validated against `schema` (each issue with its path, e.g. an unknown field). Text before the object
+    is named as such; a text that is valid on its own gets one generic issue (it was refused for what surrounds it)."""
+    text = raw.strip()
+    m = _ONE_FENCE.fullmatch(text)
+    if m is not None and "```" not in m.group(1):
+        text = m.group(1).strip()
+    lead = [] if text.startswith("{") else ["the answer is not the JSON object alone: it starts with text, not with \"{\""]
+    try:
+        val = json.loads(text, object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant)
+    except json.JSONDecodeError as e:
+        after = " (text after the JSON object)" if e.msg == "Extra data" else ""
+        return lead + [f"invalid JSON{after}: {e}"]
+    except RecursionError:
+        return lead + ["invalid JSON: nested too deeply"]
+    except ValueError as e:
+        return lead + [f"invalid JSON: {str(e)[:200]}"]
+    found = [str(i) for i in validate(schema, val)]
+    return lead + found or ["the answer must be exactly one JSON object and nothing else"]
+
+
+def repair_issues_builder(original: dict, schema: str):
+    """The one bounded repair of a claude-cli call (CLAUDE-CLI-REPAIR1; gateway repair_with_issues): the same request plus
+    one user message - REPAIR_TASK, the exact issues (schemaIssues) and the previous answer, quoted as data. The issues are
+    the gateway's own (a status-ok answer failing the profile schema, D3) or, for an answer the adapter refused
+    (invalid-output: a schema slip, a syntax error, a duplicate key, prose), local_schema_issues. At most REPAIR_MAX_ISSUES
+    issues of REPAIR_ISSUE_CHARS characters and REPAIR_RAW_CHARS of the previous answer, each redacted. The claude-cli
+    adapter prints the role's schema projection after the last message (claude_cli._prompt), so it follows this one."""
+    def build(resp: dict, issues: list) -> dict:
+        req = copy.deepcopy(original)
+        text = str(resp.get("rawText") or "")
+        found = list(issues) or local_schema_issues(schema, text)
+        req["messages"].append({"role": "user", "content": _doc({
+            "repair": REPAIR_TASK.format(schema=schema),
+            "schemaIssues": [redact(str(i))[0][:REPAIR_ISSUE_CHARS] for i in found[:REPAIR_MAX_ISSUES]],
+            "previousAnswerUntrusted": redact(text)[0][:REPAIR_RAW_CHARS]})})
         return req
     return build
 

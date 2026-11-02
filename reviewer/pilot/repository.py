@@ -41,8 +41,8 @@ from reviewer.runtime.turn_canary import Refused, open_state
 from .launcher import QUALITY, REPO, gateway_costs, ledger_costs, load_baseline, utc_now
 from .launcher import PilotError, _Unused, _force_cleanup
 from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
-                        open_terra_state, plan_providers, scrub_of, worst_case)
-from .profile import RUN_CEILING_USD_MICROS
+                        open_terra_state, plan_providers, repair_bound, scrub_of, worst_case)
+from .profile import RUN_CEILING_USD_MICROS, profile_repairs
 from .repository_profile import repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
@@ -386,6 +386,10 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
     if worst is not None and worst > ceiling:
         planned = False
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
+    repair, gate = repair_bound(profile, first, worst, ceiling)        # CLAUDE-CLI-REPAIR1 ({} / None without repairs)
+    if gate is not None:
+        planned = False
+        unmet.insert(0, gate)
     if not first:
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
     rep = {**disclosure_header(ing), "schema": REPORT_SCHEMA, "mode": "plan",
@@ -395,7 +399,7 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
                     if problem is None or problem["code"] != "config" else "NOT covered: " + problem["message"],
                     "capturedRequests": first, "capturedCount": len(first),
                     "firstRequest": first[0] if first else None, "worstCaseAdmissionUsdMicros": worst,
-                    "runCeilingUsdMicros": ceiling, "retries": 0, "repairs": 0,
+                    "runCeilingUsdMicros": ceiling, "retries": 0, "repairs": profile_repairs(profile), **repair,
                     "outputCaps": {r: s["caps"]["maxOutputTokens"] for r, s in profile["roles"].items()},
                     "providerCalls": 0, "networkCalls": 0, "keyRead": False, "scratchOnly": True,
                     "pipeline": problem if problem else {"status": result.status if result else None,

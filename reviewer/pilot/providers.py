@@ -23,14 +23,17 @@ from pathlib import Path
 from reviewer.gateway import DisabledProvider, SpendBook
 from reviewer.gateway.errors import typed_error
 from reviewer.gateway.providers import ProviderResult
+from reviewer.pipeline import prompts
 from reviewer.pipeline.errors import PipelineError
-from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS, claude_cli_worst_case_micros
 from reviewer.runtime.claude_cli import ClaudeCliProvider, ClaudeCliUnsupported
 from reviewer.runtime.claude_cli import request_facts as claude_request_facts
 from reviewer.runtime.codex_cli import CodexTerraProvider, CodexUnsupported, request_facts
 from reviewer.runtime.opencode_cli import OpenCodeFreeProvider, OpenCodeUnsupported
 from reviewer.runtime.opencode_cli import request_facts as opencode_request_facts
 from reviewer.runtime.receipts import RuntimeLedger
+
+from .profile import profile_repairs
 
 # A Terra arm's live state is its OWN operator-created directory (gate S1): the subscription ledger and an (unused,
 # never-written) spend book bound to the Terra authorization. It may never be, or hold, the OpenRouter trial state.
@@ -254,6 +257,44 @@ def plan_providers(profile, transport, router_factory) -> tuple[ReviewProviders,
     if needs(profile, "opencode"):                # OPENCODE-FREE-PROVIDER: same order capture, opencode request facts
         return ReviewProviders(router, CliProviders(terra, OpenCodePlanProvider(capture))), capture
     return ReviewProviders(router, terra), capture
+
+
+def claude_repair_extra_bytes(schema: str) -> int:
+    """CLAUDE-CLI-REPAIR1: the most bytes the ONE gateway repair adds to a claude-cli prompt (claude_cli._prompt joins one more
+    message block): prompts.repair_issues_builder's message at its largest - the most issues and previous-answer characters it
+    shows, each at its largest JSON-escaped size (a control character: 6 bytes)."""
+    worst = "\x01" * (prompts.REPAIR_RAW_CHARS + 1)
+    issues = ["\x01" * (prompts.REPAIR_ISSUE_CHARS + 1)] * (prompts.REPAIR_MAX_ISSUES + 1)
+    m = prompts.repair_issues_builder({"messages": []}, schema)({"status": "invalid-output", "output": None, "rawText": worst},
+                                                               issues)["messages"][-1]
+    return len(f"\n<{m['role']}>\n{m['content']}\n</{m['role']}>".encode("utf-8"))
+
+
+def claude_repair_worst_case(facts: dict) -> int | None:
+    """The admission bound (PACING micros) of the one repair of the claude-cli call whose plan facts are `facts`
+    (claude_cli.request_facts: model, bodyBytes, maxTokens, schemaName)."""
+    if type(facts.get("maxTokens")) is not int:
+        return None
+    return claude_cli_worst_case_micros(facts["model"], facts["bodyBytes"] + claude_repair_extra_bytes(facts["schemaName"]),
+                                        facts["maxTokens"])
+
+
+def repair_bound(profile: dict, first: list[dict], worst: int | None, ceiling: int) -> tuple[dict, str | None]:
+    """(Plan fields, unmet gate or None) of a profile with gateway repairs (CLAUDE-CLI-REPAIR1): over every captured
+    claude-cli first request, the largest repair bound and the largest logical call (that request + its one repair),
+    against the run ceiling. A profile without repairs -> ({}, None), so its Plan report keeps its bytes."""
+    if not profile_repairs(profile):
+        return {}, None
+    pairs = [(f.get("worstCaseApiEquivalentUsdMicros"), claude_repair_worst_case(f)) for f in first if f.get("provider") == "claude-cli"]
+    ok = bool(pairs) and worst is not None and all(type(w) is int and type(r) is int for w, r in pairs)
+    rep = max(r for _, r in pairs) if ok else None
+    call = max(w + r for w, r in pairs) if ok else None
+    fields = {"worstCaseRepairAdmissionUsdMicros": rep, "worstCaseCallUsdMicros": call}
+    if call is None:
+        return fields, "the first requests' gateway repairs could not be bounded (no bounded claude-cli first request captured)"
+    if call > ceiling:
+        return fields, f"worst-case call (first request + its one repair) {call} micros exceeds the {ceiling} run ceiling"
+    return fields, None
 
 
 def worst_case(facts: list[dict]) -> int | None:

@@ -24,6 +24,7 @@ from reviewer.runtime.catalog import (CLAUDE_CLI_MODELS, CLAUDE_CLI_PRICE_VERSIO
                                       claude_cli_gateway_price, claude_cli_pacing_micros, opencode_gateway_price)
 from reviewer.runtime.envfile import Secret
 from tests.runtime import claude_fake as F
+from tests.runtime import claude_repair_proof as RP
 
 KEY = ("INVESTIGATE", "investigator", "generalist", 0, 0)
 GOOD = {"supported": True, "problems": []}
@@ -886,6 +887,53 @@ class RealCliCaptureProof(unittest.TestCase):
                 cap = C.check_request_isolation("claude", F.MODEL, mode=mode)
                 self.assertTrue(cap["supported"], cap)
                 self.assertEqual(cap["posts"], 1)                                   # exact: the forwarder relays at most one
+
+
+@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.309 and bwrap")
+class RealCliRepairProof(unittest.TestCase):
+    """CLAUDE-CLI-REPAIR1 on the REAL claude binary, offline (tests/runtime/claude_repair_proof: private network namespace,
+    loopback fake Anthropic endpoint, dummy token, the live sandbox and forwarder) under Pullo's real Gateway: a schema-invalid
+    first answer gets exactly ONE repair call - admitted, traced (repairOf) and booked on its own, on the same model, its stdin
+    quoting the local schema issue - and a still-invalid repair fails the call (repair-exhausted) with nothing sent after it."""
+
+    def proof(self, model, answers, expect=()):
+        r = subprocess.run(RP.argv(shutil.which("bwrap"), str(Path(__file__).resolve().parents[2])),
+                           input=json.dumps({"model": model, "answers": answers, "expect": list(expect)}).encode(),
+                           capture_output=True, timeout=300,
+                           env={k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL", "TMPDIR")})
+        return json.loads(r.stdout)
+
+    def test_one_repair_call_fixes_a_schema_invalid_answer_and_a_still_invalid_one_fails(self):
+        for model in sorted(CLAUDE_CLI_MODELS):
+            cli = CLAUDE_CLI_MODELS[model]["cliModel"]
+            with self.subTest(model=model, case="invalid-then-valid"):
+                out = self.proof(model, [RP.INVALID, RP.VALID])
+                self.assertEqual((out["maxRepairs"], out["result"]), (1, {"ok": True, "status": "ok", "error": None,
+                                                                         "repairsUsed": None}), out)
+                self.assertEqual(out["attempts"], [{"attempt": 0, "outcome": "invalid-output"}, {"attempt": 1, "outcome": "ok"}])
+                self.assertEqual([(c["model"], c["repairMessage"], c["issueShown"]) for c in out["cli"]],
+                                 [(cli, False, False), (cli, True, True)])
+                self.assertEqual((out["posts"], out["others"]), (2, []))                  # exactly two requests, nothing else
+                self.assertEqual([(r["attempt"], r["outcome"], r["note"], r["requestsSent"]) for r in out["rows"]],
+                                 [(0, "processed", "invalid-output", 1), (1, "processed", None, 1)])
+                self.assertEqual(out["trace"][1]["repairOf"], out["trace"][0]["callId"])
+            with self.subTest(model=model, case="invalid-twice"):
+                out = self.proof(model, [RP.INVALID, RP.INVALID])
+                self.assertEqual(out["result"], {"ok": False, "status": None, "error": "repair-exhausted", "repairsUsed": 1}, out)
+                self.assertEqual([a["outcome"] for a in out["attempts"]], ["invalid-output", "invalid-output"])
+                self.assertEqual([(c["model"], c["repairMessage"]) for c in out["cli"]], [(cli, False), (cli, True)])
+                self.assertEqual((out["posts"], len(out["rows"])), (2, 2))               # no third attempt
+
+    def test_whole_text_failures_are_repaired_once_and_shown_exactly(self):
+        model = sorted(CLAUDE_CLI_MODELS)[0]
+        for name, (bad, issue) in RP.WHOLE_TEXT.items():                          # pilot data 2026-11-02: verifier slips
+            with self.subTest(name):
+                out = self.proof(model, [bad, RP.VALID], expect=[issue])
+                self.assertEqual((out["result"]["ok"], [a["outcome"] for a in out["attempts"]], out["posts"]),
+                                 (True, ["invalid-output", "ok"], 2), out)
+                first, fix = out["cli"]
+                self.assertEqual((first["repairMessage"], fix["repairMessage"], fix["expectShown"], fix["schemaAfterRepair"]),
+                                 (False, True, [True], True), out)
 
 
 class Canary(Base):

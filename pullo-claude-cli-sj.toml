@@ -11,13 +11,15 @@
 # NO tools (--tools "", --strict-mcp-config, no settings sources, no slash commands, file mentions off) in a fresh per-call home
 # (claude-cli-isolated@3) inside a bwrap sandbox that hides the whole user home (no ~/.claude path is exposed: the OAuth access token
 # arrives on an inherited pipe fd); audited stream-json; no retries, one agent turn, adaptive thinking (effort high; passive,
-# counted), no repairs or fallbacks; the role schema is quoted in the prompt and the answer is parsed strictly. A usage limit,
+# counted), one gateway repair, no fallbacks; the role schema is quoted in the prompt and the answer is parsed strictly. A usage limit,
 # rate limit, overload or auth failure latches the run. The engine paces the run with a PACING price - the same Terra-6 list rates
 # as the opencode arm, for both models - not money.
 #
 # Before the first live use, root runs the one-call canary for EACH model (python3 -m reviewer.runtime.claude_canary --confirm-live
 # --model ...; see the claude-cli runbook). The spend authorization named by --auth must list provider "claude-cli" and both models;
 # its dollar fields bound PACING estimates (the arm costs $0). This file selects models only and authorizes nothing.
+# CLAUDE-CLI-REPAIR1: the repair is Pullo's own (maxRepairs 1 on every claude-cli role): a new, separately admitted,
+# guarded and traced CLI call on the same role's model, quoting the local schema issues; never a CLI-side repair.
 
 schema = "pullo-config@1"
 

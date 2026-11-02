@@ -470,7 +470,10 @@ class Engine:
                 self.recorder.append("error", error=err)
                 return None, err, []
         try:
-            res = self.gw.call(stage, role, agent, ordinal, request, repair=prompts.repair_builder(request, schema))
+            # CLAUDE-CLI-REPAIR1: a claude-cli call's one repair shows the local schema issues; every other provider's as before
+            fix = ({"repair_with_issues": prompts.repair_issues_builder(request, schema)}
+                   if request.get("provider") == "claude-cli" else {"repair": prompts.repair_builder(request, schema)})
+            res = self.gw.call(stage, role, agent, ordinal, request, **fix)
         except SettlementError as e:
             self.needs_reconciliation = True
             err = typed_error("internal", "spend book failed after provider contact; operator reconciliation required",

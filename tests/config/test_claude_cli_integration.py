@@ -13,10 +13,13 @@ from unittest import mock
 
 from reviewer.config import ConfigError, ReviewModels, parse, resolve_config
 from reviewer.contracts import validate
+from reviewer.contracts.canonical import digest
 from reviewer.pilot import benchmark as B
 from reviewer.pilot import providers as P
 from reviewer.pilot import repository as R
-from reviewer.pilot.profile import live_profile
+from reviewer.pilot.profile import REPAIR_REASON, live_plan, live_profile, profile_repairs
+from reviewer.pilot.repository_profile import ALT_IMPACT_VERSIONS, IMPACT_VERSIONS, repository_plan, repository_profile
+from reviewer.pipeline import prompts
 from reviewer.pilot.providers import TERRA_LEDGER_NAME
 from reviewer.runtime import claude_cli as O
 from reviewer.runtime.catalog import (CLAUDE_CLI_DEFAULT_MODEL, CLAUDE_CLI_PRICE_VERSION, OPENCODE_DEFAULT_MODEL,
@@ -24,7 +27,7 @@ from reviewer.runtime.catalog import (CLAUDE_CLI_DEFAULT_MODEL, CLAUDE_CLI_PRICE
 from tests.pilot import helpers as H
 from tests.pilot import test_benchmark_host as BT
 from tests.pilot import test_repository as RT
-from tests.runtime.claude_fake import DUMMY_TOKEN, OPUS, ScriptedRunner, dummy_token
+from tests.runtime.claude_fake import DUMMY_TOKEN, OPUS, Raw, ScriptedRunner, dummy_token
 
 VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli.toml"
 OPUS_VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli-opus.toml"
@@ -32,6 +35,8 @@ SJ_VARIANT = Path(__file__).resolve().parents[2] / "pullo-claude-cli-sj.toml"   
 SJ_ROLES = {"investigator": CLAUDE_CLI_DEFAULT_MODEL, "verifier": CLAUDE_CLI_DEFAULT_MODEL, "judge": OPUS}
 MODEL = CLAUDE_CLI_DEFAULT_MODEL
 SUB_ONLY = dict(H.AUTH, id="claude-cli-test", providers=["claude-cli"], models=[MODEL])
+ROOT = Path(__file__).resolve().parents[2]
+BAD_TURN = {"contextRequests": [], "output": {"hypotheses": [{"bogus": 1}]}}     # valid JSON, schema-invalid (REPAIR1)
 
 
 def scripted_claude(answers, runners, scenarios=()):
@@ -127,6 +132,87 @@ class ConfigAndProfile(unittest.TestCase):
                               for n, r in p["roles"].items()}, {True})               # the same pacing as Terra-6 and opencode
 
 
+class Repair1(unittest.TestCase):
+    """CLAUDE-CLI-REPAIR1: claude-cli roles get maxRepairs 1 (Pullo's own gateway repair); nothing else changes."""
+
+    def test_claude_cli_roles_get_one_gateway_repair_and_every_other_provider_none(self):
+        for path in (VARIANT, OPUS_VARIANT, SJ_VARIANT):
+            prof = live_profile(models=resolve_config(path).models)
+            self.assertEqual(validate("ModelProfile", prof), [])
+            self.assertEqual({r: s["caps"]["maxRepairs"] for r, s in prof["roles"].items()},
+                             {"investigator": 1, "verifier": 1, "judge": 1}, path.name)
+            self.assertEqual({s["caps"]["maxRetries"] for s in prof["roles"].values()}, {0})
+            self.assertEqual(profile_repairs(prof), 1)
+            for v in sorted(set(IMPACT_VERSIONS) - set(ALT_IMPACT_VERSIONS)):       # v7/v10 need an alternate
+                rp = repository_profile(True, resolve_config(path).models, impact_version=v)
+                for plan in (live_plan(rp), repository_plan(rp), repository_plan(rp, live_stage_timing=True)):
+                    self.assertEqual(plan["reasons"].count(REPAIR_REASON), 1, (path.name, v))
+                    self.assertFalse(any("repairs off" in r for r in plan["reasons"]), plan["reasons"])
+        for name in ("pullo.toml", "pullo-terra.toml", "pullo-opencode.toml"):
+            prof = live_profile(models=resolve_config(ROOT / name).models)
+            self.assertEqual({s["caps"]["maxRepairs"] for s in prof["roles"].values()}, {0}, name)
+            self.assertEqual(profile_repairs(prof), 0)
+            self.assertNotIn(REPAIR_REASON, live_plan(prof)["reasons"])
+        self.assertEqual({s["caps"]["maxRepairs"] for s in live_profile()["roles"].values()}, {0})
+
+    def test_an_alternate_investigator_gets_its_own_providers_repairs(self):
+        m = ReviewModels(MODEL, MODEL, MODEL, investigator_alt="anthropic/claude-haiku-5.5")
+        p = repository_profile(True, m, impact_version=7)
+        self.assertEqual((p["roles"]["investigator"]["caps"]["maxRepairs"], p["alternates"]["investigator"]["provider"],
+                          p["alternates"]["investigator"]["caps"]["maxRepairs"]), (1, "anthropic", 0))
+
+    def test_local_schema_issues_name_the_exact_failure(self):
+        cases = {'{"hypotheses": [{"bogus": 1}]}': ["$.hypotheses[0].claim: required: missing"],
+                 "```json\n{\"hypotheses\": [{\"bogus\": 1}]}\n```": ["$.hypotheses[0].claim: required: missing"],
+                 '{"hypotheses": [], "note": 1}': ["$.note: unknown-field: not allowed"],             # pilot: unknown field
+                 '{"hypotheses": [], "hypotheses": []}': ["invalid JSON: duplicate key 'hypotheses'"],  # pilot: duplicate key
+                 '{"hypotheses": [{"claim": "x}]}': ["invalid JSON: Unterminated string starting at: line 1 column 27 (char 26)"],
+                 '{"hypotheses": []} trailing': ["invalid JSON (text after the JSON object): Extra data: line 1 column 20"],
+                 '{"hypotheses": NaN}': ["invalid JSON: NaN is not JSON"],
+                 'I found no issues.': ['the answer is not the JSON object alone: it starts with text, not with "{"',
+                                        "invalid JSON: Expecting value: line 1 column 1 (char 0)"],
+                 '{"hypotheses": []}': ["the answer must be exactly one JSON object and nothing else"]}
+        for raw, want in cases.items():
+            got = prompts.local_schema_issues("InvestigatorOutput", raw)
+            self.assertTrue(len(got) >= len(want) and all(g.startswith(w) for g, w in zip(got, want)), (raw, got))
+
+    def test_the_repair_request_quotes_bounded_redacted_issues_and_the_previous_answer(self):
+        prof = live_profile(models=resolve_config(VARIANT).models)
+        req = prompts._request(prof, "pilot-live@1", "investigator", {"task": "t", "answerFormat": prompts.INVESTIGATOR_FORMAT})
+        build = prompts.repair_issues_builder(req, "InvestigatorOutput")
+        raw = 'api_key = "abcd1234efgh5678ijkl" ' + "x" * 70000
+        rep = build({"status": "invalid-output", "output": None, "rawText": raw}, [])           # adapter refusal: local issues
+        self.assertEqual(rep["messages"][:-1], req["messages"])
+        self.assertEqual({k: rep[k] for k in rep if k != "messages"}, {k: req[k] for k in req if k != "messages"})
+        doc = json.loads(rep["messages"][-1]["content"])
+        self.assertEqual((rep["messages"][-1]["role"], sorted(doc)), ("user", ["previousAnswerUntrusted", "repair", "schemaIssues"]))
+        self.assertEqual(doc["repair"], prompts.REPAIR_TASK.format(schema="InvestigatorOutput"))
+        self.assertIn("ONLY the corrected whole JSON object", doc["repair"])
+        self.assertEqual(len(doc["previousAnswerUntrusted"]), prompts.REPAIR_RAW_CHARS)
+        self.assertIn("[REDACTED:assigned-secret]", doc["previousAnswerUntrusted"])
+        self.assertIn("starts with text", doc["schemaIssues"][0])
+        gw = ["$.a: " + "y" * 900] * 20                                                        # the gateway's own (D3) issues win
+        doc = json.loads(build({"status": "ok", "output": {}, "rawText": "{}"}, gw)["messages"][-1]["content"])
+        self.assertEqual((len(doc["schemaIssues"]), {len(i) for i in doc["schemaIssues"]}),
+                         (prompts.REPAIR_MAX_ISSUES, {prompts.REPAIR_ISSUE_CHARS}))
+
+    def test_the_plan_bound_covers_every_repair_the_builder_can_send(self):
+        prof = live_profile(models=resolve_config(OPUS_VARIANT).models)
+        req = prompts._request(prof, "pilot-live@1", "investigator", {"task": "t", "answerFormat": prompts.INVESTIGATOR_FORMAT})
+        facts = O.request_facts(req)
+        bound = P.claude_repair_worst_case(facts)
+        build = prompts.repair_issues_builder(req, "InvestigatorOutput")
+        extra = P.claude_repair_extra_bytes("InvestigatorOutput")
+        for ch in ("\x00", '"', "\\", "\u2028", "\U0001F600", "a"):
+            rep = build({"status": "invalid-output", "output": None, "rawText": ch * 70000}, [ch * 999] * 30)
+            f = O.request_facts(rep)
+            self.assertLessEqual(f["bodyBytes"], facts["bodyBytes"] + extra, repr(ch))
+            self.assertLessEqual(f["worstCaseApiEquivalentUsdMicros"], bound, repr(ch))
+        worst = build({"status": "invalid-output", "output": None, "rawText": "\x01" * 70000}, ["\x01" * 999] * 30)
+        self.assertEqual(O.request_facts(worst)["bodyBytes"], facts["bodyBytes"] + extra)      # exact at the worst message
+        self.assertGreater(bound, facts["worstCaseApiEquivalentUsdMicros"])
+
+
 class Routing(unittest.TestCase):
     def profile(self, **over):
         return live_profile(models=ReviewModels(**{"investigator": MODEL, "verifier": MODEL, "judge": MODEL, **over}))
@@ -212,6 +298,11 @@ class RepositoryClaudeCli(RT.Base):
         self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@3", "2.1.309"))
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
+        p = rep["plan"]                                                     # REPAIR1: one repair, bounded with each first call
+        pairs = [(x["worstCaseApiEquivalentUsdMicros"], P.claude_repair_worst_case(x)) for x in p["capturedRequests"]]
+        self.assertEqual((p["retries"], p["repairs"], p["worstCaseRepairAdmissionUsdMicros"], p["worstCaseCallUsdMicros"]),
+                         (0, 1, max(r for _, r in pairs), max(w + r for w, r in pairs)))
+        self.assertLessEqual(p["worstCaseCallUsdMicros"], p["runCeilingUsdMicros"])
         self.assertEqual(self.w.state_bytes(), before)
         self.assertFalse(self.w.out.exists())
 
@@ -345,6 +436,94 @@ class BenchmarkClaudeCli(BT.Base):
         self.assertIn("hit your limit", res[0]["note"])
         trace = Path(rep["paths"]["trace"]).read_text() if rep.get("paths", {}).get("trace") else ""
         self.assertIn("claude.usage-limit", trace)
+
+    # ------------------------------------------------------------------ CLAUDE-CLI-REPAIR1
+    def test_plan_digests_the_repairing_profile_and_its_first_call_fits_with_its_repair(self):
+        o = self.w.options(config=str(VARIANT))
+        with mock.patch.object(O, "run_bounded_stream", side_effect=no_cli):
+            rep = B.run_benchmark(o, key_loader=self.boom)
+        self.assertEqual((rep["status"], rep["ok"]), ("planned", True), rep.get("plan"))
+        p = rep["plan"]                                       # benchmark.py is GATED: its "repairs": 0 is fixed text, unchanged
+        prof = repository_profile(o.retrieval, resolve_config(VARIANT).models, o.experiment,
+                                  impact_version=B.selected_impact_version(o))
+        self.assertEqual(digest(prof), p["profileDigest"])                  # the profile the plan binds has the repair
+        self.assertEqual(profile_repairs(prof), 1)
+        calls = [x["worstCaseApiEquivalentUsdMicros"] + P.claude_repair_worst_case(x) for x in p["capturedRequests"]]
+        self.assertLessEqual(max(calls), p["runCeilingUsdMicros"])
+
+    def live_events(self, answers):
+        runners = []
+        d, opts = cli_live(self.w, self.tmp, config=str(VARIANT))
+        with mock.patch.object(B, "live_terra", side_effect=scripted_claude(answers, runners)):
+            rep = B.run_benchmark(opts, key_loader=self.boom, transport=lambda *a: self.fail("OpenRouter must not be used"))
+        rows = [json.loads(x) for x in (d / TERRA_LEDGER_NAME).read_text().splitlines()]
+        events = [json.loads(x) for x in Path(rep["paths"]["trace"]).read_text().splitlines()]
+        return rep, runners[0].seen, [r for r in rows if r["type"] == "result"], events
+
+    def test_a_schema_invalid_answer_gets_exactly_one_visible_repair_call_and_the_run_completes(self):
+        rep, seen, res, events = self.live_events([BAD_TURN] + self.model().script)
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 6), rep.get("error"))
+        tail = seen[0]["stdin"].index(b'<output-schema name="')
+        self.assertTrue(seen[1]["stdin"].startswith(seen[0]["stdin"][:tail]))          # the same request + one repair message
+        self.assertEqual(seen[1]["stdin"][-len(seen[0]["stdin"]) + tail:], seen[0]["stdin"][tail:])
+        self.assertNotIn(b'"schemaIssues"', seen[0]["stdin"])
+        self.assertIn(b'"schemaIssues":["$.output.hypotheses[0].claim: required: missing"', seen[1]["stdin"])
+        self.assertEqual({s["argv"][s["argv"].index("--model") + 1] for s in seen[:2]}, {"claude-sonnet-5-5"})
+        keys = [r["callKey"].rsplit("|", 1) for r in res[:2]]
+        self.assertEqual((keys[0][0] == keys[1][0], keys[0][1], keys[1][1]), (True, "0", "1"))   # one logical call, attempt 0 + 1
+        self.assertEqual(res[0]["note"], "invalid-output")
+        calls = [e for e in events if e.get("type") == "model.call"]
+        self.assertEqual((calls[1]["attempt"], calls[1]["repairOf"]), (1, calls[0]["callId"]))
+        self.assertEqual(len([e for e in events if e.get("type") == "cost"]), 6)          # each attempt admitted and charged apart
+
+    def test_verifier_and_judge_repairs_run_on_their_own_roles_model_in_the_primary_arm(self):
+        self.w.auth.write_text(json.dumps(dict(SUB_ONLY, models=sorted(set(SJ_ROLES.values())))))
+        base = dict(self.w.baseline_doc, reviewConfigDigest=resolve_config(SJ_VARIANT).models.digest,
+                    authorizationSha256="sha256:" + hashlib.sha256(self.w.auth.read_bytes()).hexdigest())
+        self.w.write_roots(baseline=base)
+        s = self.model().script
+        bad_ver, bad_judge = {"contextRequests": [], "output": {"verdict": "maybe"}}, {"comments": [{"bogus": 1}]}
+        runners = []
+        d, opts = cli_live(self.w, self.tmp, config=str(SJ_VARIANT))
+        with mock.patch.object(B, "live_terra", side_effect=scripted_claude(s[:2] + [bad_ver] + s[2:4] + [bad_judge] + s[4:], runners)):
+            rep = B.run_benchmark(opts, key_loader=self.boom, transport=lambda *a: self.fail("OpenRouter must not be used"))
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 7), rep.get("error"))
+        seen = runners[0].seen
+        self.assertEqual([x["argv"][x["argv"].index("--model") + 1] for x in seen],
+                         ["claude-sonnet-5-5"] * 5 + ["claude-opus-5-5"] * 2)            # each repair on its role's model
+        self.assertEqual([b'"schemaIssues"' in x["stdin"] for x in seen], [False, False, False, True, False, False, True])
+        rows = [json.loads(x) for x in (d / TERRA_LEDGER_NAME).read_text().splitlines() if '"result"' in x]
+        self.assertEqual([(r["callKey"].rsplit("|", 5)[2], r["callKey"].rsplit("|", 1)[1]) for r in rows if r["type"] == "result"],
+                         [("investigator", "0"), ("investigator", "0"), ("verifier", "0"), ("verifier", "1"), ("verifier", "0"),
+                          ("judge", "0"), ("judge", "1")])
+
+    def whole_text_repair(self, raw, issue):
+        rep, seen, res, events = self.live_events([Raw(raw)] + self.model().script)
+        self.assertEqual((rep["status"], rep["ok"], rep["providerCalls"]), ("completed", True, 6), rep.get("error"))
+        self.assertEqual((res[0]["note"], [r["callKey"].rsplit("|", 1)[1] for r in res[:2]]), ("invalid-output", ["0", "1"]))
+        fix = seen[1]["stdin"]
+        self.assertIn(json.dumps(issue)[1:-1].encode(), fix)                      # the exact failure, as the model will read it
+        self.assertLess(fix.rindex(b'"schemaIssues"'), fix.rindex(b'<output-schema name="InvestigatorTurn">'))   # schema again
+        self.assertIn(b"ONLY the corrected whole JSON object", fix)
+
+    def test_a_prose_answer_is_repaired_once(self):
+        self.whole_text_repair("I looked at the diff and found nothing.", 'it starts with text, not with \"{\"')
+
+    def test_a_duplicate_key_answer_is_repaired_once_naming_the_key(self):
+        self.whole_text_repair('{"contextRequests": [], "output": {"hypotheses": []}, "output": null}', "duplicate key 'output'")
+
+    def test_an_unterminated_string_is_repaired_once(self):
+        self.whole_text_repair('{"contextRequests": [], "output": {"hypotheses": [{"claim": "x}]}}',
+                               "invalid JSON: Unterminated string starting at")
+
+    def test_a_still_invalid_repair_fails_the_call_without_a_third_attempt(self):
+        rep, seen, res, events = self.live_events([BAD_TURN, BAD_TURN] + self.model().script)
+        self.assertNotEqual(rep["status"], "completed")
+        first = res[0]["callKey"].rsplit("|", 1)[0]
+        self.assertEqual([r["callKey"].rsplit("|", 1)[1] for r in res if r["callKey"].startswith(first + "|")], ["0", "1"])
+        self.assertIn(b'"schemaIssues"', seen[1]["stdin"])
+        errs = [e["error"] for e in events if e.get("type") == "error" and e["error"]["code"] == "repair-exhausted"]
+        self.assertEqual([(e["detail"]["repairsUsed"], e["detail"].get("localValidation")) for e in errs], [(1, None)])
 
 
 if __name__ == "__main__":

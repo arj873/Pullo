@@ -29,7 +29,7 @@ from reviewer.runtime.catalog import worst_case_router_micros
 from reviewer.runtime.openrouter import OpenRouterProvider
 
 from .providers import ReviewProviders, live_terra, needs, planned_request, scrub_of
-from .profile import (MODEL, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, live_plan, live_profile)
+from .profile import (MODEL, SOFT_DEADLINE_SEC, WALL_CLOCK_SEC, live_plan, live_profile, profile_repairs)
 
 REPO = Path(__file__).resolve().parents[2]
 BOOK_NAME, LEDGER_NAME = "spend-book.jsonl", "runtime-ledger.jsonl"
@@ -512,7 +512,7 @@ def _plan_case(o, paths, record, bridge, profile, plan, handle, book, runs, cfg)
             "plan": {"model": cfg.models.summary(), "models": cfg.report()["roles"], "authorization": "covers the profile and run ceiling",
                      "firstRequests": reqs, "providerCalls": 0, "networkCalls": 0, "keyRead": False,
                      "scratchPipelineRun": dry, "wouldWriteUnder": str(_real(o.out_dir)),
-                     "runCeilingUsdMicros": plan["budget"]["maxUsdMicros"], "retries": 0, "repairs": 0,
+                     "runCeilingUsdMicros": plan["budget"]["maxUsdMicros"], "retries": 0, "repairs": profile_repairs(profile),
                      "outputCaps": {r: s["caps"]["maxOutputTokens"] for r, s in profile["roles"].items()}}}
 
 

@@ -89,7 +89,10 @@ ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
     (other-object-invalid) or a second, different one (several-objects:N) refuses too, so an object quoted from the PR can never
     stand in for the model's own invalid or truncated answer; zero objects or an incomplete scan -> invalid-output as well.
     Thinking text is never a candidate (it is not part of the result text). The parse facts (note, failure reason, candidate
-    count) are kept in isolation.parse. No repair call, no retry, no fallback.
+    count) are kept in isolation.parse. The adapter never repairs, retries or falls back. CLAUDE-CLI-REPAIR1: Pullo's own gateway
+    may follow an invalid-output (or schema-failing) answer with ONE repair (claude-cli roles have maxRepairs 1;
+    prompts.repair_issues_builder): a new call through this adapter, admitted, guarded, traced and counted on its own
+    (call key attempt 1), on the same role's model, its prompt quoting the local schema issues and the previous answer.
   * Errors keep the CLI's own words: the result text (e.g. "You've hit your limit · resets 3:30pm (America/Chicago)"), the
     HTTP status, the CLI's error code (rate_limit, authentication_failed, server_error, ...), the rate-limit info
     (status, rateLimitType, resetsAt, utilization) and the provider request id go into the TypedError message/detail and

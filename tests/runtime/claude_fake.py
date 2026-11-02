@@ -315,6 +315,13 @@ class FakeForwarder:
                             "unparsed": 0}
 
 
+class Raw:
+    """A scripted answer given as the model's exact result text, not JSON-dumped: prose or broken JSON (REPAIR1)."""
+
+    def __init__(self, text: str):
+        self.text = text
+
+
 class ScriptedRunner:
     """An in-process stand-in for run_bounded_stream: one scenario per call (default "ok"); the stdout lines go through
     the adapter's live audit exactly as the real runner feeds them, and the run stops at the first abort (the kill). Its
@@ -330,7 +337,11 @@ class ScriptedRunner:
         self.seen.append({"argv": list(argv), "stdin": stdin, "env": dict(env), "cwd": cwd, "timeout": timeout,
                           "cwd_listing": os.listdir(cwd), "scenario": sc,
                           "tokenSha256": hashlib.sha256(token.reveal().encode()).hexdigest() if token else None})
-        ans = json.dumps(self.answers.pop(0)) if self.answers else self.answer
+        if self.answers:
+            a = self.answers.pop(0)
+            ans = a.text if isinstance(a, Raw) else json.dumps(a)
+        else:
+            ans = self.answer
         lines, rc, err, sleep = simulate(sc, argv, stdin, env, cwd, answer=ans, token=token.reveal() if token else None)
         self.forwarder.record(env, sc)
         aborted, out = None, b""
