@@ -1,5 +1,5 @@
 """CLAUDE-CLI-PROVIDER: the Claude Code CLI subscription adapter, offline. The fake CLI (claude_fake) prints the stream-json
-events the real claude 2.1.309 produces; no network, no credential, no live call. RealCliCaptureProof runs the REAL CLI
+events the real claude 2.1.317 produces (CLI317; as 2.1.309 but for the deltas in claude_cli); no network, no credential, no live call. RealCliCaptureProof runs the REAL CLI
 against a loopback fake Anthropic endpoint inside a network-less namespace (a dummy token; no inference)."""
 
 import functools
@@ -126,7 +126,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(a, C.isolation_identity(F.MODEL))
         self.assertEqual({k for k in a if a[k] != b[k]}, {"argvSha256"})
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
-                         ("claude-cli-isolated@4", "2.1.309", "claude-bwrap-masked@2"))
+                         ("claude-cli-isolated@5", "2.1.317", "claude-bwrap-masked@2"))
 
     def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
         oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
@@ -692,6 +692,60 @@ class Audits(unittest.TestCase):
             self.assertIn("token-persisted:tmp/x.log", C.audit_work_after(d, F.dummy_token().secret)["forbidden"])
             self.assertNotIn("token-persisted:tmp/x.log", C.audit_work_after(d)["forbidden"])
 
+    def test_work_audit_admits_only_the_builtin_plugin_store_layout(self):
+        """CLI317: 2.1.317's builtin plugins keep state in <config>/plugins/store/: the store file, its atomic-write temp and
+        its empty mkdir lock are admitted for the BUILTIN_PLUGINS only; any other `plugins` content still fails."""
+        name = "cc-plugin-agents-md_builtin-" + hashlib.sha256(b"cc-plugin-agents-md@builtin").hexdigest()[:12] + ".json"
+        self.assertEqual(name, "cc-plugin-agents-md_builtin-b049b47b3618.json")             # what the real 2.1.317 writes
+        self.assertEqual(len(C.PLUGIN_STORE_FILES), len(C.BUILTIN_PLUGINS))
+
+        def audit(make):
+            with tempfile.TemporaryDirectory() as d:
+                C.isolated_home(d, {})
+                os.mkdir(os.path.join(d, "cwd"))
+                store = Path(d, "home", ".claude", "plugins", "store")
+                store.mkdir(parents=True)
+                make(store)
+                return C.audit_work_after(d, F.dummy_token().secret)
+
+        good = (lambda s: None, lambda s: Path(s, name).write_text('{"usage-rows-queued": "x ok"}\n'),
+                lambda s: (Path(s, name + ".lock").mkdir(), Path(s, name + ".tmp.9efb39f4").write_text("{")),   # killed mid-write
+                lambda s: s.rmdir())                                                      # plugins/ without store/
+        for i, make in enumerate(good):
+            with self.subTest(good=i):
+                self.assertTrue(audit(make)["ok"])
+        other = "evil_market-" + "0" * 12 + ".json"
+        bad = {"another plugin's store": lambda s: Path(s, other).write_text("{}"),
+               "a carry temp": lambda s: Path(s, name + ".carry-1").write_text("{}"),
+               "a lock with content": lambda s: (Path(s, name + ".lock").mkdir(), Path(s, name + ".lock", "x").write_text("")),
+               "a lock that is a file": lambda s: Path(s, name + ".lock").write_text(""),
+               "a symlink": lambda s: Path(s, name).symlink_to("/etc/hostname"),
+               "an oversize store": lambda s: Path(s, name).write_text("x" * (C.PLUGIN_STORE_MAX_BYTES + 1)),
+               "an installed plugin": lambda s: Path(s.parent, "installed_plugins.json").write_text("{}"),
+               "a marketplace": lambda s: Path(s.parent, "marketplaces").mkdir(),
+               "the token in the store": lambda s: Path(s, name).write_text(F.DUMMY_TOKEN)}
+        for why, make in bad.items():
+            with self.subTest(bad=why):
+                r = audit(make)
+                self.assertFalse(r["ok"], r)
+        with tempfile.TemporaryDirectory() as d:                                          # `plugins` anywhere else: still forbidden
+            C.isolated_home(d, {})
+            os.mkdir(os.path.join(d, "cwd"))
+            Path(d, "home", "xdg", "config", "plugins").mkdir(parents=True)
+            self.assertEqual(C.audit_work_after(d)["forbidden"], ["home/xdg/config/plugins"])
+
+    def test_init_admits_the_2_1_317_builtin_plugins_only(self):
+        """CLI317: init lists cc-plugin-agents-md, cc-plugin-privacy and cc-plugin-plugin-authoring (all builtin); any other
+        plugin, a builtin name from another path, or the 2.1.309 version still fails the init surface."""
+        ev = json.loads(F.init(C.CLAUDE_CLI_MODELS[F.MODEL]["cliModel"]))
+        self.assertEqual(sorted(p["source"] for p in ev["plugins"]), sorted(C.BUILTIN_PLUGINS))
+        self.assertEqual(C.init_problems(ev, F.MODEL), [])
+        for over, why in (({"plugins": ev["plugins"] + [{"name": "x", "path": "builtin", "source": "cc-plugin-x@builtin"}]}, "init-plugins"),
+                          ({"plugins": [dict(ev["plugins"][1], path="/x")]}, "init-plugins"),
+                          ({"claude_code_version": "2.1.309"}, "init-version")):
+            with self.subTest(why=why, over=over):
+                self.assertEqual(C.init_problems(dict(ev, **over), F.MODEL), [why])
+
 
 def capture_out(**over):
     m = F.MODEL
@@ -906,7 +960,7 @@ def _pinned_cli():
     return r.stdout.decode().strip() == C.CLAUDE_CLI_VERSION + " (Claude Code)"
 
 
-@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.309 and bwrap")
+@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.317 and bwrap")
 class RealCliCaptureProof(unittest.TestCase):
     """The REAL claude binary, offline: private network namespace, a dummy OAuth token on the live fd path, loopback fake
     Anthropic endpoint, the exact live argv/env, run through the live bwrap sandbox. No inference, no real credential."""
@@ -927,7 +981,7 @@ class RealCliCaptureProof(unittest.TestCase):
                 self.assertEqual(cap["posts"], 1)                                   # exact: the forwarder relays at most one
 
 
-@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.309 and bwrap")
+@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.317 and bwrap")
 class RealCliRepairProof(unittest.TestCase):
     """CLAUDE-CLI-REPAIR1 on the REAL claude binary, offline (tests/runtime/claude_repair_proof: private network namespace,
     loopback fake Anthropic endpoint, dummy token, the live sandbox and forwarder) under Pullo's real Gateway: a schema-invalid

@@ -1,9 +1,19 @@
 """provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`) on the user's
 Claude subscription, with NO tools - runtime only (CLAUDE-CLI-PROVIDER).
 
-Isolation `claude-cli-isolated@4` (Claude Code 2.1.309 exactly; behaviour read from the CLI's bundled source and proved
+Isolation `claude-cli-isolated@5` (Claude Code 2.1.317 exactly; behaviour read from the CLI's bundled source and proved
 offline against a loopback fake Anthropic endpoint, no inference; @2 = phase A3 gate fixes S1-S4, N1-N4; @3 = phase A5:
-ADAPTIVE THINKING admitted as passive, counted events, see THINKING below):
+ADAPTIVE THINKING admitted as passive, counted events, see THINKING below; @4 = TIMEOUT-FIX; @5 = CLI317, below).
+CLI317 (2.1.309 -> 2.1.317, re-proved offline on the real 2.1.317 binary: all CAPTURE_MODES x both models and the timeout-fix
+gate's adversarial cut cases give the same requests, rows and outcomes as on 2.1.309). Every 2.1.309 statement below holds for
+2.1.317 unless named here. The deltas: (1) init lists a third builtin plugin, cc-plugin-privacy@builtin (a tool.check hook that
+asks before a shell/web tool runs with the account e-mail in its input; with no tools it never fires): admitted in
+BUILTIN_PLUGINS; (2) builtin plugins keep state in <config>/plugins/store/ (cc-plugin-agents-md writes a local usage-row queue
+there, atomically, under a mkdir lock): exactly that layout is admitted (builtin_plugin_store_only), any other `plugins` entry
+still fails; (3) with SHELL unset the environment block names the first of zsh / bash on PATH instead of "unknown"
+(claude_capture.ENV_TEMPLATE); (4) the anthropic-beta list is the same 8 betas in another order. argv, env, the stream-json
+event types, the request keys and system blocks, the continuation prefix (both texts), the 401/404 retry handling, the
+remote-settings / policy suppression and the token-on-fd path are unchanged.
   * ONE ENDPOINT - the host loopback FORWARDER (`claude-loopback-forwarder@1`, class Forwarder, one per adapter = per run, run by
     this trusted host process): every live call gets ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/c/<per-call random token>. It
     relays exactly ONE `POST /v1/messages?beta=true` per call to https://api.anthropic.com - only a JSON body with "stream": true,
@@ -176,7 +186,7 @@ SCHEMA_FLAVOR = "anthropic"
 EFFORT = "high"                  # pinned (the API default when no effort is sent, as on the OpenRouter arm)
 OUTPUT_TOKENS = 128_000          # the models' maximum: the largest per-call output cap a request may carry
 OUTPUT_CAP_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"   # TIMEOUT-FIX: set PER CALL to the request's maxOutputTokens (the role cap)
-CONTINUATION_PREFIX = "Output token limit hit"     # 2.1.309's own hidden max_tokens continuation turns all start with this
+CONTINUATION_PREFIX = "Output token limit hit"     # 2.1.309's and 2.1.317's own hidden max_tokens continuation turns all start with this
 REQUIRED_HELP_FLAGS = ("--print", "--output-format", "--input-format", "--verbose", "--model", "--tools",
                        "--strict-mcp-config", "--setting-sources", "--disable-slash-commands", "--no-session-persistence",
                        "--system-prompt", "--effort")
@@ -218,7 +228,15 @@ THINKING_BLOCK_KEYS = {"thinking": frozenset({"type", "thinking", "signature"}),
 SSE_BLOCK_TYPES = frozenset({"text", "thinking", "redacted_thinking"})        # upstream content blocks the forwarder admits
 THINKING_POLICY = ("adaptive (effort high): thinking / redacted_thinking blocks and system/thinking_tokens events are passive, "
                    "counted events; thinking text is never parsed or kept")
-BUILTIN_PLUGINS = ("cc-plugin-agents-md@builtin", "cc-plugin-plugin-authoring@builtin")
+BUILTIN_PLUGINS = ("cc-plugin-agents-md@builtin", "cc-plugin-plugin-authoring@builtin", "cc-plugin-privacy@builtin")   # CLI317: + privacy
+# CLI317: 2.1.317's builtin plugins keep their own state in <config>/plugins/store/<source with every char outside [A-Za-z0-9_-] as
+# "_">-<sha256(source)[:12]>.json (cc-plugin-agents-md writes a local usage-row queue there), written atomically (<file>.tmp.<8 hex>,
+# mode 0600) under a mkdir lock (<file>.lock/); a CLI killed mid-write leaves those two behind. The per-call home is discarded after
+# the call and nothing can be sent (no network, one relayed request), so exactly that layout is the ONE admitted `plugins` entry.
+PLUGIN_STORE_FILES = frozenset(re.sub(r"[^a-zA-Z0-9_-]", "_", s) + "-" + hashlib.sha256(s.encode()).hexdigest()[:12] + ".json"
+                               for s in BUILTIN_PLUGINS)
+PLUGIN_STORE_ENTRY = re.compile(r"(?P<file>[^/]+\.json)(?P<kind>|\.lock|\.tmp\.[0-9a-f]{8})")
+PLUGIN_STORE_MAX_BYTES = 16 << 10
 # Names that must never appear in the per-call home or cwd after a call (a persisted token, settings, extensions).
 FORBIDDEN_HOME_NAMES = frozenset({".credentials.json", "credentials.json", "settings.json", "settings.local.json",
                                   "CLAUDE.md", "AGENTS.md", ".mcp.json", "plugins", "skills", "agents", "commands",
@@ -848,10 +866,33 @@ def review_call_problems(argv, stdin, env, cwd, model: str, first: dict | None =
 
 # ------------------------------------------------------------------ post-call audits
 
+def builtin_plugin_store_only(d: Path) -> bool:
+    """CLI317: `d` (<home>/.claude/plugins) holds nothing but store/ with admitted builtin plugins' own state (PLUGIN_STORE_FILES):
+    the file or its atomic-write temp (regular files, no symlink, at most PLUGIN_STORE_MAX_BYTES each) and its empty lock dir."""
+    def entry_ok(x: Path) -> bool:
+        m = PLUGIN_STORE_ENTRY.fullmatch(x.name)
+        if m is None or m["file"] not in PLUGIN_STORE_FILES or x.is_symlink():
+            return False
+        if m["kind"] == ".lock":
+            return x.is_dir() and not any(x.iterdir())
+        return x.is_file() and x.stat().st_size <= PLUGIN_STORE_MAX_BYTES
+
+    try:
+        if d.is_symlink() or not d.is_dir() or {x.name for x in d.iterdir()} - {"store"}:
+            return False
+        s = d / "store"
+        if not s.exists():
+            return True
+        return not s.is_symlink() and s.is_dir() and all(entry_ok(x) for x in s.iterdir())
+    except OSError:
+        return False
+
+
 def audit_work_after(work: str, secret: Secret | None = None) -> dict:
     """By entry NAME: a credential/settings/extension name anywhere under the per-call home, or anything written into the
-    cwd, is an isolation failure. With `secret`, every file the CLI left in the work dir is also scanned for the OAuth token
-    bytes (2.1.309 persists none: proved offline): a hit means the token reached disk."""
+    cwd, is an isolation failure; the one exception is <home>/.claude/plugins holding only the admitted builtin plugins' own
+    state files (builtin_plugin_store_only; CLI317). With `secret`, every file the CLI left in the work dir is also scanned for
+    the OAuth token bytes (2.1.309 and 2.1.317 persist none: proved offline): a hit means the token reached disk."""
     p, forbidden, entries = Path(work), [], []
     if secret is not None:
         needle, budget = secret.reveal().encode("ascii"), 64 << 20
@@ -874,7 +915,7 @@ def audit_work_after(work: str, secret: Secret | None = None) -> dict:
             for n in dirs + files:
                 rel = str(Path(root, n).relative_to(p))
                 entries.append(rel[:80])
-                if n in FORBIDDEN_HOME_NAMES:
+                if n in FORBIDDEN_HOME_NAMES and not (rel == "home/.claude/plugins" and builtin_plugin_store_only(Path(root, n))):
                     forbidden.append(rel[:80])
             if depth >= 5:
                 dirs[:] = []

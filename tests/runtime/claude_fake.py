@@ -1,6 +1,6 @@
-"""A fake `claude` 2.1.309 for offline tests (CLAUDE-CLI-PROVIDER). Nothing here touches the network, a credential or the
+"""A fake `claude` 2.1.317 for offline tests (CLAUDE-CLI-PROVIDER). Nothing here touches the network, a credential or the
 real CLI. `simulate()` returns the `--output-format stream-json --verbose` stdout lines the real CLI prints (event shapes
-captured from 2.1.309 against a loopback fake endpoint) and makes the side effects a scenario needs. It backs an in-process
+captured from 2.1.309 and re-proved on 2.1.317 against a loopback fake endpoint) and makes the side effects a scenario needs. It backs an in-process
 runner (`ScriptedRunner`, most tests) and a real executable (`write_fake_binary`, subprocess tests)."""
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ def init(model_cli, **over):
          "claude_code_version": C.CLAUDE_CLI_VERSION, "output_style": "default",
          "agents": ["claude", "Explore", "general-purpose", "Plan", "statusline-setup"], "skills": [],
          "plugins": [{"name": "cc-plugin-agents-md", "path": "builtin", "source": "cc-plugin-agents-md@builtin"},
+                     {"name": "cc-plugin-privacy", "path": "builtin", "source": "cc-plugin-privacy@builtin"},   # CLI317: new in 2.1.317
                      {"name": "cc-plugin-plugin-authoring", "path": "builtin",
                       "source": "cc-plugin-plugin-authoring@builtin"}]}
     d.update(over)
@@ -274,7 +275,7 @@ def simulate(scenario, argv, stdin, env, cwd, *, answer=None, token=None):
 CUT = frozenset({"max-tokens-cut", "max-tokens-cut-thinking", "max-tokens-other-turn"})
 CUT_TEXT = '{"hypotheses": [{"claim": "the answer was cut her'
 CONTINUATION = ("Output token limit hit. Resume directly \u2014 no apology, no recap of what you were doing. Pick up mid-thought "
-                "if that is where the cut happened. Break remaining work into smaller pieces.")      # 2.1.309's own words
+                "if that is where the cut happened. Break remaining work into smaller pieces.")      # 2.1.309's and 2.1.317's own words
 CONTINUATION_THINKING = ("Output token limit hit while you were still reasoning, before this response produced any text or tool "
                          "call. That reasoning was not kept and is not part of this conversation, so there is nothing to resume.")
 SENT = {"not-logged-in": 0, "stderr-only": 0, "init-tools": 0, "init-mcp": 0, "init-plugin": 0, "wrong-model": 0, "unrelayed": 0}

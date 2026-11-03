@@ -74,7 +74,7 @@ class ConfigAndProfile(unittest.TestCase):
             rep = cfg.report()
             self.assertEqual({r: (v["provider"], v["model"]) for r, v in rep["roles"].items()},
                              {r: ("claude-cli", model) for r in ("investigator", "verifier", "judge")})
-            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@4"
+            self.assertTrue(all(v["isolation"] == "claude-cli-isolated@5"
                                 and v["billing"] == "claude-subscription ($0; pacing estimate at Terra-6 list rates, not money)"
                                 for v in rep["roles"].values()))
             self.assertEqual(cfg.models.providers(), frozenset({"claude-cli"}))
@@ -259,7 +259,7 @@ class Routing(unittest.TestCase):
 
     def test_preflight_failure_is_a_typed_config_refusal(self):
         def unsupported(**kw):
-            raise O.ClaudeCliUnsupported("claude version is not the pinned 2.1.309")
+            raise O.ClaudeCliUnsupported("claude version is not the pinned 2.1.317")
         with self.assertRaisesRegex(P.PipelineError, "claude-cli isolation preflight failed"):
             P.live_terra(self.profile(), None, "s", claude_factory=unsupported)
 
@@ -306,7 +306,7 @@ class RepositoryClaudeCli(RT.Base):
         first = rep["plan"]["firstRequest"]
         self.assertEqual((first["provider"], first["model"], first["schemaName"], first["billingKind"]),
                          ("claude-cli", MODEL, "InvestigatorTurn", "claude-subscription"))
-        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@4", "2.1.309"))
+        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@5", "2.1.317"))
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
         p = rep["plan"]                                                     # REPAIR1: one repair, bounded with each first call
@@ -385,7 +385,7 @@ class BenchmarkClaudeCli(BT.Base):
         for k in ("argvSha256", "instructionsSha256", "envSha256", "sandboxSha256"):
             self.assertRegex(first[k], "^sha256:[0-9a-f]{64}$")
         self.assertTrue(all(f["provider"] == "claude-cli" for f in p["capturedRequests"]))
-        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@4" for v in p["models"].values()))
+        self.assertTrue(all(v["isolation"] == "claude-cli-isolated@5" for v in p["models"].values()))
         self.assertEqual(self.w.state_bytes(), before)
 
     def test_live_runs_every_role_on_the_subscription_and_the_plan_pin_is_the_actual_stdin(self):
