@@ -311,6 +311,25 @@ class Host(V19Rig):
         finally:
             shutil.rmtree(parent)
 
+    def test_f3_every_exported_file_is_fresh_even_when_the_source_tree_is_hard_linked(self):
+        files = {"src/a.py": "SAME = 1\n", "src/b.py": "SAME = 1\n"}
+        m = self.mini("links", base=files, head=files)
+        head_root = Path(m.head.root)
+        os.unlink(head_root / "src/b.py")                                      # the source tree now holds a hard link
+        os.link(head_root / "src/a.py", head_root / "src/b.py")
+        from reviewer.runtime.claude_agentic import Snapshot
+        self.assertTrue(any("hard link" in x for x in Snapshot(head=str(head_root)).problems()))   # F3 is live
+        snap, parent = PV.export_snapshot(m.base, m.head)
+        try:
+            self.assertEqual(snap.problems(), [])
+            for root in (snap.head, snap.base):
+                for f in Path(root).rglob("*"):
+                    if f.is_file():
+                        self.assertEqual(os.lstat(f).st_nlink, 1, f)
+            self.assertEqual(Path(snap.head, "src/b.py").read_text(), "SAME = 1\n")
+        finally:
+            shutil.rmtree(parent)
+
     def test_live_terra_opens_the_adapter_agentic_with_the_snapshot_and_refuses_without_one(self):
         c = resolve_config(ROOT / "pullo-claude-cli-sj.toml").models
         p19, p16 = RP.repository_profile(True, c, impact_version=19), RP.repository_profile(True, c, impact_version=16)

@@ -139,7 +139,10 @@ def export_snapshot(base, head) -> tuple:
     pinned imports (`base`, `head`: SnapshotInput-like, root + manifest; every byte read through read_verified) into a
     private 0700 directory under TMPDIR, outside home and the repository: regular and executable entries only (links are
     left out; so are a top-level .git or .env). -> (claude_agentic.Snapshot(head, base), the directory to remove after
-    the run). A snapshot the adapter would refuse is a typed config refusal (the directory is removed first)."""
+    the run). Every file is written FRESH (one hard link: gate-agentic-p1 F3, claude_agentic.Snapshot refuses a hard link,
+    which would be the host file itself); the benchmark host has no git repository to `git archive` at review time (the
+    importer removes its bare store after materializing), so the pinned, hash-verified tree is the source. A snapshot the
+    adapter would refuse is a typed config refusal (the directory is removed first)."""
     from reviewer.runtime.claude_agentic import Snapshot
     parent = os.path.realpath(tempfile.mkdtemp(prefix="pullo-agentic-snapshot-"))
     os.chmod(parent, 0o700)
