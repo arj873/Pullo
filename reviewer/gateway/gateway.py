@@ -806,7 +806,7 @@ class Gateway:
             return self._finish_error(c, copy.deepcopy(rerr), 0, 0, None,
                                       replay_cost=self._replayed_cost(c, recorded_cost, 0))
         spec = self._spec(c["role"], c["req"])
-        amount = reservation(spec["price"], estimate_input_tokens(c["req"]), spec["caps"]["maxOutputTokens"])
+        amount = _call_reservation(spec, c["req"])          # as recorded: an AGENTIC call reserved its session budget
         rkey = scoped_key(self.run_id, c["cid"])
         if amount != recorded_cost["reservedUsdMicros"]:
             return self._mismatch(c, "recomputed reservation differs from the recording (profile or request drift)")
