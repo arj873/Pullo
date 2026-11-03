@@ -357,7 +357,10 @@ class EndToEnd(V19Rig):
         m = self.case12()
         res, _ = self.record_v19(m, script(self.tool_kill(A), self.tool_kill(R)))
         self.assertEqual(res.status, "failed")
+        self.assertTrue(agentic.is_tool_attempt(res.error), res.error)        # failed by the re-ask's own tool attempt
         self.assertEqual([e["agentId"] for e in inv_calls(res)], [A, R])
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(A, "failed"), (R, "failed")])
         self.assertEqual(model_calls(res, "VERIFY") + model_calls(res, "JUDGE"), [])
 
     def test_the_tool_re_ask_stays_inside_the_b1_admission_bound(self):
