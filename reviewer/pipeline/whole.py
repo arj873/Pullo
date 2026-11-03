@@ -11,8 +11,9 @@ Rule (BEHAVIOR):
              within CONTEXT_CHARS excerpt characters: when the diffs alone exceed it, the largest diffs are left out
              first (then path order); the head files fill what is left smallest first, each up to an equal share of
              what remains, so the LARGEST files are cut first, to a line prefix. Every cut is listed in the
-             model-visible wholeChange block and in review.md. No impact map, lanes, units, hunk questions, floors or
-             merges;
+             model-visible wholeChange block and in review.md, and so is every PREPARE file without a PREPARE diff
+             (NOT_COLLECTED, no char count: PREPARE's tool cap ended first; its head content is planned like every
+             changed file's). No impact map, lanes, units, hunk questions, floors or merges;
   turns      one chain of at most HOPS hops (HOPS - 1 read turns, then the answer), at most READS requested reads;
   shares     its spend ceiling is deepcov's INVESTIGATE top (deepcov.spend_top, FINAL_RULE as every v12 agent); it
              runs until the INVESTIGATE ceiling (v12's clocks);
@@ -50,12 +51,14 @@ HOPS = 4                           # three read turns, then the answer
 READS = 12
 MAX_HYPOTHESES = 15
 REASK_CODES = ("schema-invalid", "repair-exhausted")
+LISTED = 50                        # review.md rows per list (the request lists up to prompts.MAX_LISTED_PATHS)
+NOT_COLLECTED = "not collected by PREPARE"   # gate L1: a changed path PREPARE's tool cap left without a diff
 REASK_EXHAUSTED_HOPS = 1           # a reviewer chain ended by a limit without an answer: re-asked for its answer only
 
 TEXT = ("one reviewer: the PR text when supplied, every changed file's diff and the changed files' head content in "
         "one request of at most CONTEXT_CHARS excerpt characters (largest diffs out first beyond it; head files "
         "smallest first, each up to an equal share of what remains, so the largest are cut first, to a line prefix; "
-        "every cut disclosed), at most HOPS hops and READS requested reads, deepcov's INVESTIGATE spend top, until the "
+        "every cut disclosed, and every changed path PREPARE did not collect listed as not shown), at most HOPS hops and READS requested reads, deepcov's INVESTIGATE spend top, until the "
         "INVESTIGATE ceiling; at most MAX_HYPOTHESES hypotheses in the model's order; VERIFY in output order, one "
         "verifier session each, at most deepcov.MAX_VERIFY; JUDGE deepcov.CAP_RULE")
 REASK_TEXT = ("a chain of the reviewer or a verifier that ends with schema-invalid or repair-exhausted is asked once "
@@ -144,8 +147,14 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
         out.append(f"- Context ({CONTEXT_RULE}): {block.get('diffsShown', 0)} diff(s) shown, "
                    f"{len(block.get('diffsNotShown', []))} not shown; {block.get('headFilesShownWhole', 0)} head "
                    f"file(s) shown whole, {len(cut)} cut; pull request text {block.get('pullRequestText')}.")
-        out += [f"  - diff not shown: `{d['path']}` ({d['chars']} chars)" for d in block.get("diffsNotShown", [])[:20]]
-        out += [f"  - head file cut: `{f['path']}` lines 1-{f['shownLines']} of {f['lines']}" for f in cut[:20]]
+        nd = block.get("diffsNotShown", [])
+        out += [f"  - diff not shown: `{d['path']}` ({d['chars']} chars)" if "chars" in d else
+                f"  - diff not shown: `{d['path']}` ({d['reason']})" for d in nd[:LISTED]]
+        if len(nd) > LISTED:
+            out.append(f"  - ... and {len(nd) - LISTED} more diff(s) not shown (all listed in the request)")
+        out += [f"  - head file cut: `{f['path']}` lines 1-{f['shownLines']} of {f['lines']}" for f in cut[:LISTED]]
+        if len(cut) > LISTED:
+            out.append(f"  - ... and {len(cut) - LISTED} more head file(s) cut (all listed in the request)")
     for a in payload.get("agents", []):
         if a["status"] != "completed":
             err = a.get("error") or {}
@@ -162,7 +171,8 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
 def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: int) -> dict:
     """Everything about impact@v16 that is not a template digest (bound into the config identity)."""
     return {"behavior": BEHAVIOR, "agent": AGENT, "headAgent": HEAD_AGENT, "text": TEXT,
-            "context": {"rule": CONTEXT_RULE, "chars": CONTEXT_CHARS, "readLines": READ_LINES, "readChars": READ_CHARS},
+            "context": {"rule": CONTEXT_RULE, "chars": CONTEXT_CHARS, "readLines": READ_LINES, "readChars": READ_CHARS,
+                        "notCollected": NOT_COLLECTED},
             "turns": {"hops": HOPS, "reads": READS, "maxHypotheses": MAX_HYPOTHESES},
             "budget": {"rule": BUDGET_RULE, "investigateTopBp": deepcov.INVESTIGATE_TOP_BP},
             "verify": {"rule": deepcov.VERIFY_RULE, "maxVerify": deepcov.MAX_VERIFY},

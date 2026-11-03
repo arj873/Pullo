@@ -1392,9 +1392,17 @@ class Engine:
         ctx, more = self._cap_host_results(ctx, more)
         pr = self.case["pr"]
         block = prompts.whole_block(whole.MAX_HYPOTHESES, len(diffs),
-                                    [{"path": name[d["path"]], "chars": d["chars"]} for d in out], rows,
-                                    bool(pr["title"] or pr["body"]))
+                                    [{"path": name[d["path"]], "chars": d["chars"]} for d in out]
+                                    + [{"path": q, "reason": whole.NOT_COLLECTED} for q in self._uncollected(items)],
+                                    rows, bool(pr["title"] or pr["body"]))
         return ctx, notes + more, block
+
+    def _uncollected(self, items: list) -> list[str]:
+        """impact@v16 (gate L1): the PREPARE files (every changed path, with zero counts when undiffed) that have no
+        PREPARE diff item, in PREPARE order: its tool cap ended before them (or, under partial coverage, a one-sided
+        gap row that is never diffed)."""
+        have = {i["args"].get("path") for i in items}
+        return [f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"] if f["path"] not in have]
 
     def _whole_chain(self, stage, t0, agent, ctx, doc, turns):
         """One impact@v16 reviewer chain (at most `turns` hops, no floor) in its own session."""
@@ -1883,6 +1891,7 @@ class Engine:
             if self.v16 and rec is not None and rec["verdict"] == "failed" \
                     and rec["error"]["code"] in whole.REASK_CODES:      # whole.REASK_RULE: once more, a new session
                 why = ("a stop applies" if self.gate(stage, t0) is not None or self.fatal
+                       else "the spend book needs reconciliation" if self.needs_reconciliation      # gate L2
                        else "the JUDGE spend reserve" if self.run_spend() >= sweeps.judge_reserve_floor(self.budget)
                        else None)
                 first = rec["callIds"]
@@ -1895,8 +1904,10 @@ class Engine:
                     rec = dict(rec, callIds=(first + rec["callIds"])[-10:]) if why is None else rec
                     if drop is not None and drop["reason"] == "verifier-failed" \
                             and rec["error"]["code"] in whole.REASK_CODES:
+                        # a note unless the spend book needs reconciliation (then v12's incomplete entry stands)
                         drop = dict(drop, detail=(f"{whole.REASK_RULE}: " + (f"not re-asked ({why})" if why else
-                                                  "re-asked once") + f", {rec['error']['code']} (a note); "
+                                                  "re-asked once") + f", {rec['error']['code']}"
+                                                  + ("" if self.needs_reconciliation else " (a note)") + "; "
                                                   + drop.get("detail", ""))[:1000])
             if rec is None:
                 return False

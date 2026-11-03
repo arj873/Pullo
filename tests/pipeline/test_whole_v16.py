@@ -22,7 +22,7 @@ from reviewer.contracts.entities import validate_trace
 from reviewer.pipeline import PipelineError, RetrievalPolicy, deepcov, identity, prompts, whole
 from reviewer.pipeline import load_result
 
-from tests.pipeline.helpers import entry, events_of, judge, model_calls, resp, script, terr, tool_calls
+from tests.pipeline.helpers import entry, events_of, hyp, judge, model_calls, resp, script, terr, tool_calls
 from tests.pipeline.test_coverage_v12 import (CORE_HEAD, ELIGIBLE, ROOT, SKIPPED, V12_PLAN, V12Rig, final, hid,
                                               inv_calls, md_of, payload, rf, turn, vdone)
 from tests.pipeline.test_impact_pipeline import doc_of, w
@@ -441,6 +441,74 @@ class Reask(V16Rig):
         self.assertIn("not re-asked (the JUDGE spend reserve)", drop["detail"])
         self.assertNotIn("verifier-01-reask", {e["agentId"] for e in model_calls(res, "VERIFY")})
 
+
+
+
+# ---------------------------------------------------------------- 4b. gate-v16 fixes (L1, L2)
+
+WIDE_BASE = {f"src/w{i:02d}.py": f"def w{i}():\n    return {i}\n" for i in range(120)}
+WIDE_HEAD = {q: t.replace("return", "return -") for q, t in WIDE_BASE.items()}
+
+
+class GateFixes(V16Rig):
+    def test_l1_changed_paths_prepare_did_not_collect_are_listed_as_not_shown(self):
+        m = self.mini("mini-wide", base=WIDE_BASE, head=WIDE_HEAD)
+        h = hyp(m, "src/w00.py", 2, claim="w0 now returns the negated value")
+        res, spy = self.record_v16(m, script(final(A, 0, h), vdone("verifier-01", m, path="src/w00.py", line=2),
+                                             judge(w([hid(A, 0, h)]))))
+        self.assertEqual(validate_trace(events_of(res)), [])
+        files = [f["path"] for f in payload(res, "PREPARE")["files"]]
+        self.assertEqual(sorted(files), sorted(WIDE_HEAD))                      # every changed path is a PREPARE file
+        collected = {t["args"]["path"] for t in tool_calls(res) if t["stage"] == "PREPARE" and t["tool"] == "diff"
+                     and t["args"].get("path")}
+        missing = [q for q in files if q not in collected]
+        self.assertTrue(missing and collected)                                  # the PREPARE tool cap binds
+        self.assertIn("PREPARE", [i["stage"] for i in res.incomplete])
+        d = next(doc_of(r) for r in spy.requests if r["role"] == "investigator" and r["hop"] == 0)
+        b = d["wholeChange"]
+        nc = [x for x in b["diffsNotShown"] if x.get("reason") == whole.NOT_COLLECTED]
+        self.assertEqual([x["path"] for x in nc], missing)                      # in PREPARE order
+        self.assertTrue(all(set(x) == {"path", "reason"} for x in nc))          # no char count
+        self.assertEqual(b["diffsShown"], len(collected) + 1)                   # + the changed-path listing
+        md = md_of(res)
+        self.assertIn(f"{b['diffsShown']} diff(s) shown, {len(missing)} not shown", md)
+        for q in missing[:whole.LISTED]:
+            self.assertIn(f"diff not shown: `{q}` (not collected by PREPARE)", md)
+        self.assertGreater(len(missing), whole.LISTED)
+        self.assertIn(f"... and {len(missing) - whole.LISTED} more diff(s) not shown (all listed in the request)", md)
+        cut = b["headFilesCut"]                                                 # the whole.head session cap binds too
+        self.assertTrue(cut)
+        self.assertEqual(md.count("head file cut: `"), min(len(cut), whole.LISTED))
+
+    def test_l1_nothing_is_listed_when_prepare_collected_every_diff(self):
+        m = self.case12()
+        scr, _ = self.e2e(m)
+        res, spy = self.record_v16(m, scr)
+        d = next(doc_of(r) for r in spy.requests if r["role"] == "investigator" and r["hop"] == 0)
+        self.assertNotIn("diffsNotShown", d["wholeChange"])
+
+    def test_l2_no_verifier_re_ask_while_the_spend_book_needs_reconciliation(self):
+        from reviewer.pipeline.engine import Engine
+        m = self.case12()
+        scr, (hl, hb, hs) = self.e2e(m, verifiers=[
+            *bad_turn("verifier-01", 0, "VERIFY", "verifier"), vdone("verifier-01-reask", m, path="src/lib.py", line=1),
+            vdone("verifier-02", m, path="src/handlers/b.py", line=2), vdone("verifier-03", m, path="src/svc.py", line=2)],
+            judged=(1, 2))
+        real = Engine.verify
+
+        def verify(eng, t0):                     # the spend book needs operator reconciliation when VERIFY starts
+            eng.needs_reconciliation = True
+            return real(eng, t0)
+        with mock.patch.object(Engine, "verify", verify):
+            res, _ = self.record_v16(m, scr)
+        self.assertNotIn("verifier-01-reask", {e["agentId"] for e in model_calls(res, "VERIFY")})
+        drop = next(d for d in payload(res, "VERIFY")["drops"] if d["subjectIds"] == [hid(A, 0, hl)])
+        self.assertEqual(drop["reason"], "verifier-failed")
+        self.assertIn("schema-reask@1: not re-asked (the spend book needs reconciliation), repair-exhausted; ",
+                      drop["detail"])
+        self.assertNotIn("(a note)", drop["detail"])                            # v12's incomplete entry stands
+        self.assertIn(("VERIFY", "verifier-failure"), [(i["stage"], i["reason"]) for i in res.incomplete])
+        self.assertNotIn(hid(A, 0, hl), [f["id"] for f in payload(res, "VERIFY")["findings"]])
 
 
 # ---------------------------------------------------------------- 5. parity: v1-v12 unchanged
