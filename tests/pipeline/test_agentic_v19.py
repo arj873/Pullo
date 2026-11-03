@@ -214,6 +214,32 @@ class EndToEnd(V19Rig):
         self.assertIn("1 agentic session(s) (claude-cli-isolated@6", md)
         self.assertIn("JUDGE rule (judge-concrete@1): 1 finding(s) left out", md)
 
+    def test_the_judge_sees_every_finding_even_beyond_the_cap_and_the_cap_applies_after_its_drops(self):
+        m = self.case12()
+        scr, ids = self.run19(m, judged=(1, 2))                                  # the judge leaves the first out
+        res, _ = self.record_v19(m, scr, comment_cap=2)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(len(doc_of(model_calls(res, "JUDGE")[0]["request"])["verifiedFindings"]), 3)
+        drops = payload(res, "JUDGE")["drops"]
+        self.assertEqual([(x["subjectIds"], x["reason"]) for x in drops], [([ids[0]], "below-threshold")])
+        self.assertEqual(sorted(c["findingIds"][0] for c in comments_of(res)), sorted(ids[1:]))   # 2 left, cap 2: no over-cap
+
+    def test_one_hop_a_session_asking_for_context_runs_no_host_read_and_is_re_asked_for_its_answer(self):
+        m = self.case12()
+        hl = self.h_lib(m)
+        ask = cli(A, 0, None)
+        ask["response"]["output"] = {"contextRequests": [rf("src/use.py", 1, 7)], "output": None}
+        scr = script(ask, cli(R, 0, {"hypotheses": [hl]}), vdone("verifier-01", m, path="src/lib.py", line=1),
+                     judge(w([hid(R, 0, hl)])))
+        res, _ = self.record_v19(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        first = inv_calls(res, A)
+        self.assertEqual(len(first), 1)                                          # one hop: its request is the last turn
+        self.assertTrue(doc_of(first[0]["request"])["retrieval"]["lastTurn"])
+        self.assertFalse([t for t in tool_calls(res) if t["stage"] == "INVESTIGATE" and "requestedBy" in t])
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(A, "failed"), (R, "completed")])
+
     def test_strict_replay_load_and_identity(self):
         m = self.case12()
         scr, _ = self.run19(m)

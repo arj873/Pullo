@@ -773,7 +773,8 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     if is_agentic_profile(profile):              # impact@v19: the agentic session's PR snapshot, removed after the run
         snapshot, snap_dir = export_snapshot(ing.base, ing.head)
     try:
-        terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat), snapshot=snapshot)    # CLI preflight
+        terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat),     # CLI preflight before any output
+                           **({} if snapshot is None else {"snapshot": snapshot}))
         return _live_run(o, ing, cfg, out, evr, handle, book, ledger, profile, plan, policy, terra, transport, key_loader,
                          runner)
     finally:
