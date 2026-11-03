@@ -375,6 +375,10 @@ class TallyAndAudit(unittest.TestCase):
         a = self.audit()
         a.feed(self.user({"type": "text", "text": C.CONTINUATION_PREFIX + ". Resume"}))
         self.assertEqual((a.reason, a.continuation), ("extra-turn", True))
+        a = self.audit()                                                        # URGENT 20:15Z: the attempted names, sanitized
+        a.feed(self.init())
+        a.feed(self.assistant("m1", TOOL_USE, dict(TOOL_USE, id="t2", name="json"), dict(TOOL_USE, id="t3", name="rm -rf /; echo")))
+        self.assertEqual((a.reason, a.tool_attempts), ("tool-attempt", ["json", "<other>"]))
 
 
 class ForwarderRoundTrip(unittest.TestCase):
@@ -590,6 +594,67 @@ class Outcomes(unittest.TestCase):
         self.assertEqual((r.outcome, row["outcome"]), ("unknown", "unknown"))
         self.assertEqual((row["usage"]["uncachedInputTokens"], row["usage"]["outputTokens"]), (2000, 40))
         self.assertEqual((r.error["detail"]["errorType"], r.error["detail"]["latched"]), ("claude.rate-limit", True))
+
+
+class ToolAttempt(unittest.TestCase):
+    """Root URGENT 2026-11-03T20:15Z (ccsj19 sentry93824: the model called a tool named `json`): the kill is its own error."""
+
+    def test_the_kill_is_agentic_tool_attempt_with_the_names_and_the_adapter_stays_enabled(self):
+        from reviewer.runtime import RuntimeLedger
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        led = RuntimeLedger(os.path.join(d, "l.jsonl"), 50_000_000)
+        prov = C.ClaudeCliProvider(enabled=True, runner=lambda *a, **k: None, preflight={"supported": True}, token_loader=F.dummy_token,
+                                   ledger=led)
+        ck = prov.scope + "|x"
+        led.admit(ck, 0, model=F.MODEL)
+        prov._models[ck] = F.MODEL
+        s = session()
+        s.tool_uses = {"Read": 4, "Grep": 3, "json": 1}
+        s.worst, s.usages, s.stops = [5000] * 7, [None] * 7, ["tool_use"] * 7
+        audit = A.AgenticStreamAudit(model=F.MODEL, max_requests=30, base=True)
+        audit.init, audit.tool_attempts = {"tools": ["Glob", "Grep", "Read"]}, ["json"]
+        res = C.RunResult(None, b"", b"", False, False, "tool-attempt")
+        r = A._interpret(prov, res, audit, ck, time.monotonic(), "InvestigatorOutput", F.MODEL, 1000,
+                         {"requestsSent": 7, "forwarder": {"toolUses": dict(s.tool_uses)}}, s)
+        d_ = r.error["detail"]
+        self.assertEqual((r.outcome, r.error["code"], d_["reason"], d_["itemType"], d_["attemptedTools"], d_["retryableByReask"],
+                          r.error["retryable"], d_["requestsSent"]),
+                         ("unknown", "provider-error", "agentic-tool-attempt", "tool-attempt", ["json"], True, False, 7))
+        row = next(json.loads(x) for x in Path(led.path).read_text().splitlines() if '"result"' in x)
+        self.assertEqual((row["errorKind"], row["note"], row["outcome"], row["isolation"]["agentic"]["toolAttempts"]),
+                         ("agentic-tool-attempt", "agentic-tool-attempt:json", "unknown", ["json"]))
+        self.assertIsNone(prov.disabled_reason)                                     # the engine's re-ask can still run
+
+    def test_the_forwarder_relays_nothing_after_a_turn_with_an_outside_tool(self):
+        bad = RESPONSE.replace(b'"name": "Read"', b'"name": "json"')
+        url, srv, log = F.start_upstream(sse=bad)
+        self.addCleanup(srv.shutdown)
+        fwd = C.Forwarder(url)
+        self.addCleanup(fwd._srv.shutdown)
+        sock = fwd.unix_path()
+        slot = fwd.open("claude-sonnet-5-5", 10, 1000)
+        slot.agentic = session(max_requests=6)
+
+        class UnixConn(http.client.HTTPConnection):
+            def connect(conn):
+                conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.sock.connect(sock)
+
+        def post(b):
+            c = UnixConn("localhost", timeout=10)
+            c.request("POST", f"/c/{slot.token}{C.FORWARD_PATH}", body=json.dumps(b).encode(),
+                      headers={"content-type": "application/json", "authorization": "Bearer DUMMY"})
+            r = c.getresponse()
+            out = r.status
+            r.read()
+            c.close()
+            return out
+        self.assertEqual(post(body(FIRST)), 200)
+        self.assertEqual((slot.agentic.stopped, slot.agentic.tool_uses), ("tool-outside-set", {"json": 1}))
+        m = copy.deepcopy(SECOND)
+        m[2]["content"][1]["name"] = "json"
+        self.assertEqual((post(body(m)), post(body(SECOND)), len(log), slot.forwarded), (404, 404, 1, 1))
 
 
 class GatewaySession(unittest.TestCase):

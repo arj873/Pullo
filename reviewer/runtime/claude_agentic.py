@@ -34,6 +34,11 @@ run's PR snapshot. Two independent walls, both proved offline on the real 2.1.31
   * STREAM AUDIT (AgenticStreamAudit): as isolated@5, except that a tool_use of Read/Grep/Glob and a user event made only of
     tool_result blocks for pending ids are admitted and counted; any other tool_use (or server tool) kills the run at its block
     (tool-attempt), init must offer exactly [Glob, Grep, Read], permissionMode dontAsk, cwd /pullo/head, no MCP/skill/command.
+    TOOL ATTEMPT (root URGENT 2026-11-03T20:15Z, ccsj19 sentry93824: the model called a tool named `json`): that kill is its own
+    provider error - reason agentic-tool-attempt, the attempted tool NAMES (host-side: the audit's tool_use names and the forwarder's
+    SSE tally, sanitized identifiers only, never model text), retryableByReask (the engine may re-ask in a fresh session; the gateway
+    never retries it), outcome unknown, errorKind agentic-tool-attempt, note agentic-tool-attempt:<names>; the adapter stays enabled.
+    Nothing is sent after the kill: the forwarder ends the session as soon as a relayed turn holds a tool outside the set.
   * The snapshot (Snapshot: head, base) is host-trusted, given to the adapter per run (agentic_snapshot=), never in a request: absolute,
     real (no symlink component), a directory, no top-level .git or .env, not under the user home or the reviewer repository, and
     no regular file with more than one hard link (gate F3: a hard link would be the host file itself). export_snapshot builds one
@@ -386,6 +391,11 @@ def agentic_problems(claude: str = "claude") -> list[str]:
 
 
 # ------------------------------------------------------------------ forwarder @4: the per-request audit
+
+def tool_name(n) -> str:
+    """A model-chosen tool name as a bounded identifier for receipts (never free text): itself if [A-Za-z0-9_.:-]{1,40}, else <other>."""
+    return str(n) if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,40}", n) else "<other>"
+
 
 def _strip_cc(o):
     if isinstance(o, dict):
@@ -754,7 +764,9 @@ class AgenticSession:
                 for b in detail:
                     self.blocks[b["type"]] = self.blocks.get(b["type"], 0) + 1
                     if b["type"] == "tool_use":
-                        self.tool_uses[str(b["name"])[:40]] = self.tool_uses.get(str(b["name"])[:40], 0) + 1
+                        self.tool_uses[tool_name(b["name"])] = self.tool_uses.get(tool_name(b["name"]), 0) + 1
+                        if b.get("name") not in AGENTIC_TOOLS:             # URGENT 20:15Z: nothing is relayed after this turn
+                            self.stopped = self.stopped or "tool-outside-set"
                 complete = status == 200 and not tally.overflow and slot.relay_error is None
                 self.usages[-1] = dict(tally.usage) if complete else (
                     {"input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0}
@@ -809,6 +821,7 @@ class AgenticStreamAudit(C.StreamAudit):
     results: int = 0
     result_errors: int = 0
     denials: int = 0
+    tool_attempts: list = field(default_factory=list)   # names (tool_name) of tool_use blocks outside the set: the kill's cause
 
     def feed(self, line: bytes) -> str | None:
         try:
@@ -847,6 +860,7 @@ class AgenticStreamAudit(C.StreamAudit):
                     self.tool_uses[c["name"]] = self.tool_uses.get(c["name"], 0) + 1
                     self.pending.append(c["id"])
                 elif ct in ("tool_use", "server_tool_use") or (isinstance(ct, str) and ct.endswith("tool_use")):
+                    self.tool_attempts.append(tool_name(c.get("name")))
                     self._abort("tool-attempt")
                 elif ct in C.THINKING_BLOCK_KEYS:
                     if set(c) == C.THINKING_BLOCK_KEYS[ct] and all(isinstance(v, str) for v in c.values()):
@@ -1023,9 +1037,15 @@ def _interpret(prov, res, audit: AgenticStreamAudit, ck, t0, out_name, model, ca
         return prov._done(ck, t0, lost, _err(prov, "provider-error", msg, lost, reason="isolation-violation", itemType=item[:80],
                                              requestsSent=sent, maxRequestsPerCall=sess.max_requests),
                           errorKind="isolation-violation", isolation=iso, note=item[:80])
-    if res.aborted == "tool-attempt":
-        return violation("tool-attempt", "isolation violation: the model attempted a tool outside Read/Grep/Glob; output discarded; "
-                                         "the run was killed at the tool_use block")
+    if res.aborted == "tool-attempt":                  # root URGENT 20:15Z: its own error, the attempted names, re-askable
+        names = sorted({*audit.tool_attempts, *(tool_name(t) for t in sess.tool_uses if t not in AGENTIC_TOOLS)}) or ["<other>"]
+        iso["agentic"]["toolAttempts"] = names
+        return prov._done(ck, t0, lost, _err(
+            prov, "provider-error", "the agentic session attempted a tool outside Read/Grep/Glob (" + ", ".join(names) + "); the CLI "
+            "was killed at that tool_use block before anything ran and nothing was sent after it; output discarded; the engine may "
+            "re-ask in a fresh session", lost, reason="agentic-tool-attempt", itemType="tool-attempt", attemptedTools=names,
+            retryableByReask=True, requestsSent=sent, maxRequestsPerCall=sess.max_requests),
+            errorKind="agentic-tool-attempt", isolation=iso, note=("agentic-tool-attempt:" + ",".join(names))[:120])
     bad_sse = set(sess.blocks) - SSE_BLOCK_TYPES or set(sess.tool_uses) - set(AGENTIC_TOOLS)
     if (res.aborted == "extra-turn" and audit.continuation and sent >= 1 and sess.stops and sess.stops[-1] == "max_tokens"
             and audit.init is not None and not audit.unknown and not audit.bad and not bad_sse):
@@ -1405,7 +1425,8 @@ def capture_main(spec: dict) -> dict:
         if res.error is not None:
             d = res.error.get("detail") or {}
             verdict.update(code=res.error.get("code"), reason=d.get("reason"), itemType=d.get("itemType"), requestsSent=d.get("requestsSent"),
-                           errorType=d.get("errorType"), latched=d.get("latched"))
+                           errorType=d.get("errorType"), latched=d.get("latched"), attemptedTools=d.get("attemptedTools"),
+                           retryableByReask=d.get("retryableByReask"))
         posts = [x for x in first_log if x["method"] == "POST"]
         fwd = prov._fwd
         raw = "".join(x["raw"] for x in posts)
@@ -1497,8 +1518,12 @@ def analyse(out: dict, model: str, mode: str) -> dict:
         if mode == "agentic-escape" and (not results or not all(r["isError"] for r in results)):
             problems.append("an escape attempt was not refused by the CLI (--restricted)")
     elif mode == "agentic-forbidden":
-        if (v.get("reason"), v.get("itemType")) != ("isolation-violation", "tool-attempt") or out.get("posts") != 1:
-            problems.append(f"a call to a tool outside Read/Grep/Glob was not killed at its block: {v}, posts {out.get('posts')}")
+        if (v.get("reason"), v.get("itemType"), v.get("attemptedTools"), v.get("retryableByReask")) != (
+                "agentic-tool-attempt", "tool-attempt", ["Bash"], True) or out.get("posts") != 1 or out.get("disabled"):
+            problems.append(f"a call to a tool outside Read/Grep/Glob was not killed at its block as agentic-tool-attempt: {v}, "
+                            f"posts {out.get('posts')}")
+        if not str(row.get("note") or "").startswith("agentic-tool-attempt:Bash") or row.get("errorKind") != "agentic-tool-attempt":
+            problems.append(f"the tool attempt's ledger row does not name it: {row.get('errorKind')} / {row.get('note')}")
     elif mode == "agentic-loop":
         if out.get("posts") != 3 or v.get("reason") != "agentic-max-requests":
             problems.append(f"the request cap (3) did not stop the session: posts {out.get('posts')}, {v}")
