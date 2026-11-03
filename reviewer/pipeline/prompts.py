@@ -927,8 +927,11 @@ V19_JUDGE_RULE = (
     "remark with no caller shown to break, or a performance remark without a measurable regression on a real path. A "
     "finding you leave out is not published (the host drops it and says so)."
 )
+V19_TOOL_NOTE = "Only Read, Grep and Glob exist; any other tool call ends the session."
+TOOL_REASK_VERSION = "agentic-tool-reask@1"
 V19_TEMPLATES = {"task": V19_WHOLE_TASK, "version": AGENTIC_REVIEW_VERSION, "judgeRule": V19_JUDGE_RULE,
-                 "judgeRuleVersion": JUDGE_CONCRETE_VERSION}
+                 "judgeRuleVersion": JUDGE_CONCRETE_VERSION, "toolNote": V19_TOOL_NOTE,
+                 "toolReaskVersion": TOOL_REASK_VERSION}
 IMPACT_V19_TEMPLATES = {**IMPACT_V16_TEMPLATES, "agenticReview": V19_TEMPLATES}
 
 

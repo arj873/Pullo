@@ -1477,9 +1477,12 @@ class Engine:
                         self._inc_doc(stage, "tool-calls-exhausted", f"reviewer {agent}: " + self._exhausted_detail(end))]
                 err = end.error
                 agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-                if not (err["code"] in whole.REASK_CODES and not whole.is_reask(agent) and not self.fatal
+                tool = self.v19 and agentic.is_tool_attempt(err)        # agentic.TOOL_REASK_RULE: re-asked once too
+                if not ((err["code"] in whole.REASK_CODES or tool) and not whole.is_reask(agent) and not self.fatal
                         and not self.needs_reconciliation):
                     return self._v3_failed(agents, err, end.stop[0] if end.stop else None)
+                if tool:                                 # the fresh session is told which tools exist
+                    doc = dict(doc, task=doc["task"] + " " + prompts.V19_TOOL_NOTE)
         finally:
             self._tool_share = self._spend_ceiling = None
 

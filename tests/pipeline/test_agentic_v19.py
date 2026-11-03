@@ -163,6 +163,14 @@ class Rules(unittest.TestCase):
         self.assertEqual(agentic.session_need({"params": {"agentic": agentic.spec()}}, 1), 4_000_000)
         self.assertEqual(agentic.session_need({"params": {}}, 1), 0)
 
+    def test_is_tool_attempt_knows_both_forms(self):
+        self.assertTrue(agentic.is_tool_attempt({"code": "provider-error", "detail": {
+            "reason": "isolation-violation", "itemType": "tool-attempt"}}))
+        self.assertTrue(agentic.is_tool_attempt({"code": agentic.TOOL_ATTEMPT_CODE}))     # ccprov's distinct code
+        for err in ({"code": "provider-error", "detail": {"reason": "isolation-violation", "itemType": "forbidden-work-entry"}},
+                    {"code": "provider-error", "detail": {"itemType": "tool-attempt"}}, {"code": "schema-invalid"}, None):
+            self.assertFalse(agentic.is_tool_attempt(err))
+
     def test_live_hosts_accept_exactly_each_plans_reviewed_ceiling(self):
         class Ledger:
             def totals(self):
@@ -319,6 +327,63 @@ class EndToEnd(V19Rig):
         self.assertGreater(err["detail"]["spentUsdMicros"] + 4_000_000, err["detail"]["ceilingUsdMicros"])
         self.assertEqual(res.status, "failed")                                   # no answer: V1, nothing later runs
         self.assertEqual(model_calls(res, "VERIFY"), [])
+
+    def tool_kill(self, agent, ordinal=0):
+        """The adapter's end of a session whose model tried a tool outside Read/Grep/Glob (today's form; nothing ran)."""
+        return entry("INVESTIGATE", "investigator", agent, ordinal, error={
+            "code": "provider-error", "message": "isolation violation: the model attempted a tool outside Read/Grep/Glob",
+            "retryable": False, "stage": "INVESTIGATE",
+            "detail": {"reason": "isolation-violation", "itemType": "tool-attempt", "requestsSent": 1}})
+
+    def test_tool_attempt_is_re_asked_once_in_a_fresh_session_told_which_tools_exist(self):
+        m = self.case12()
+        hl, hb, hs = self.h_lib(m), self.h_b(m), self.h_svc(m)
+        scr, ids = self.run19(m, session=[self.tool_kill(A), cli(R, 0, {"hypotheses": [hl, hb, hs]})])
+        res, _ = self.record_v19(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)               # the first end is a note
+        self.assertEqual(validate_trace(events_of(res)), [])
+        agents = payload(res, "INVESTIGATE")["agents"]
+        self.assertEqual([(a["agentId"], a["status"]) for a in agents], [(A, "failed"), (R, "completed")])
+        first, again = doc_of(inv_calls(res, A)[0]["request"]), doc_of(inv_calls(res, R)[0]["request"])
+        self.assertEqual(first["task"], prompts.V19_WHOLE_TASK)
+        self.assertEqual(again["task"], prompts.V19_WHOLE_TASK + " " + prompts.V19_TOOL_NOTE)
+        self.assertEqual(inv_calls(res, R)[0]["request"]["params"]["agentic"], agentic.spec())
+        self.assertEqual(len(comments_of(res)), 3)
+        self.assertIn("Tool re-ask (agentic-tool-reask@1): 1 session(s) ended", md_of(res))
+        rep = self.replay_v19(m, res)
+        self.assertEqual(rep.receipt["artifactDigests"], res.receipt["artifactDigests"])
+
+    def test_a_second_tool_attempt_fails_investigate_and_nothing_later_runs(self):
+        m = self.case12()
+        res, _ = self.record_v19(m, script(self.tool_kill(A), self.tool_kill(R)))
+        self.assertEqual(res.status, "failed")
+        self.assertEqual([e["agentId"] for e in inv_calls(res)], [A, R])
+        self.assertEqual(model_calls(res, "VERIFY") + model_calls(res, "JUDGE"), [])
+
+    def test_the_tool_re_ask_stays_inside_the_b1_admission_bound(self):
+        from reviewer.pipeline.engine import Engine
+        m = self.case12()
+        real = Engine.stage_spend
+
+        def spend(eng, stage):                   # as if the killed session had spent 2.6M PACING micros
+            return real(eng, stage) + (2_600_000 if stage == "INVESTIGATE" and inv_calls_of(eng) else 0)
+
+        def inv_calls_of(eng):
+            return any(e["type"] == "model.call" and e["stage"] == "INVESTIGATE" for e in eng.recorder.events)
+        with mock.patch.object(Engine, "stage_spend", spend):
+            res, _ = self.record_v19(m, script(self.tool_kill(A), cli(R, 0, {"hypotheses": [self.h_lib(m)]})))
+        self.assertNotIn(R, {e["agentId"] for e in inv_calls(res)})
+        err = next(e["error"] for e in events_of(res) if e["type"] == "error" and e["error"]["code"] == "budget-exhausted")
+        self.assertEqual(err["detail"]["scope"], "agentic-session")
+        self.assertEqual(res.status, "failed")
+
+    def test_other_unknown_outcome_ends_still_stop_at_once(self):
+        m = self.case12()
+        res, _ = self.record_v19(m, script(entry("INVESTIGATE", "investigator", A, 0, error={
+            "code": "provider-error", "message": "scripted", "retryable": False, "stage": "INVESTIGATE",
+            "detail": {"reason": "isolation-violation", "itemType": "forbidden-work-entry"}})))
+        self.assertEqual(res.status, "failed")
+        self.assertEqual([e["agentId"] for e in inv_calls(res)], [A])          # V1: no re-ask
 
     def test_v16_is_untouched_by_the_v19_paths(self):
         from tests.pipeline.test_whole_v16 import V16Rig as R16
