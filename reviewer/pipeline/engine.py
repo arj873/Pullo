@@ -716,7 +716,9 @@ class Engine:
     def omissions(self, stage: str, agent: str | None = None) -> list[str]:
         return omission_notes(self.recorder.events, stage, self.incomplete, agent)
 
-    def bounded_context(self, items: list[dict], limit: int = CONTEXT_CHARS) -> tuple[list[dict], list[str]]:
+    def bounded_context(self, items: list[dict], limit: int | None = None) -> tuple[list[dict], list[str]]:
+        """`limit` (impact@v16: whole.CONTEXT_CHARS) defaults to CONTEXT_CHARS, read at call time."""
+        limit = CONTEXT_CHARS if limit is None else limit
         total, out, notes = 0, [], []
         for it in items:
             size = sum(len(x) for x in it["excerpts"])
@@ -1394,13 +1396,13 @@ class Engine:
                                     bool(pr["title"] or pr["body"]))
         return ctx, notes + more, block
 
-    def _whole_chain(self, stage, t0, agent, ctx, doc):
-        """One impact@v16 reviewer chain (whole.HOPS hops, no floor) in its own session."""
+    def _whole_chain(self, stage, t0, agent, ctx, doc, turns):
+        """One impact@v16 reviewer chain (at most `turns` hops, no floor) in its own session."""
         events = self.tool_calls()
         host = [events[c["toolCallId"]] for c in ctx]
         session = self.new_session(stage, agent)
         return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
-                               turns=whole.HOPS, policy=self.policy, host_events=host,
+                               turns=turns, policy=self.policy, host_events=host,
                                unrendered=self.unrendered_ids(ctx, host)).run(
             lambda hop, state: prompts.turn_request(self.profile, self.profile_ref, "investigator", doc, state,
                                                     self.policy.requests_per_turn, retrieval.RETRIEVAL_VERSION,
@@ -1409,8 +1411,10 @@ class Engine:
     def _investigate_v16(self, stage, t0):
         """investigator.impact@v16 (reviewer.pipeline.whole): one whole-change reviewer under deepcov's INVESTIGATE
         spend top, whole.READS reads and whole.HOPS hops, until the stage ceiling. A chain that ends with a
-        whole.REASK_CODES code is asked once more in a new session (whole.REASK_RULE; the first end is a note). Any other
-        end without an answer fails INVESTIGATE exactly as a v12 run without a usable lane: nothing later runs (V1).
+        whole.REASK_CODES code is asked once more in a new session (whole.REASK_RULE; the first end is a note); one that
+        ends at a turn, read or context limit without an answer is asked once more for its answer only
+        (whole.REASK_EXHAUSTED_HOPS). Any other end without an answer fails INVESTIGATE exactly as a v12 run without a
+        usable lane: nothing later runs (V1).
         The payload carries the first whole.MAX_HYPOTHESES drafts' resolved hypotheses; there is nothing to merge."""
         agents: list = []
         g = self.gate(stage, t0, new_agent=True)
@@ -1429,16 +1433,20 @@ class Engine:
         doc["wholeChange"] = block
         self._spend_ceiling = deepcov.spend_top(self.budget)
         try:
+            turns = whole.HOPS
             for agent in (whole.AGENT, whole.AGENT + whole.REASK_SUFFIX):
                 self._tool_share = whole.READS
-                end = self._whole_chain(stage, t0, agent, ctx, doc)
+                end = self._whole_chain(stage, t0, agent, ctx, doc, turns)
                 if end.error is None and end.exhausted is None:
                     agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
                     hyps = self._hypotheses(agent, {"hypotheses": end.payload["hypotheses"][:whole.MAX_HYPOTHESES]},
                                             end.final_call)
                     return "completed", {"hypotheses": hyps, "agents": agents}, None, []
-                if end.error is None:            # tool calls exhausted without a final answer (as a v12 lens lane)
+                if end.error is None:            # a turn, read or context limit ended it without a final answer
                     agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                    if not whole.is_reask(agent) and not self.fatal:
+                        turns = whole.REASK_EXHAUSTED_HOPS          # whole.REASK_RULE: its answer only, once
+                        continue
                     return "partial", {"hypotheses": [], "agents": agents}, None, [
                         self._inc_doc(stage, "tool-calls-exhausted", f"reviewer {agent}: " + self._exhausted_detail(end))]
                 err = end.error

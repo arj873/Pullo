@@ -264,6 +264,43 @@ class Bounds(V16Rig):
         self.assertEqual(d["wholeChange"]["headFilesShownWhole"], 2)
         self.assertIn(f"head content of {seen[2]} from line 1 not read: tool-calls-exhausted", d["omitted"])
 
+    def test_the_reviewer_runs_under_deepcovs_investigate_spend_top(self):
+        m = self.case12()
+        scr, _ = self.e2e(m)
+        with mock.patch.object(deepcov, "spend_top", lambda budget: 0):
+            res, _ = self.record_v16(m, scr)
+        self.assertNotEqual(res.status, "completed")
+        self.assertEqual(model_calls(res, "INVESTIGATE") + model_calls(res, "VERIFY"), [])
+        err = next(e["error"] for e in events_of(res) if e["type"] == "error"
+                   and e["error"]["code"] == "budget-exhausted")
+        self.assertEqual((err["detail"]["scope"], err["detail"]["rule"]), ("whole-share", whole.BUDGET_RULE))
+
+    def test_at_most_twelve_reads_then_a_limit_end_is_re_asked_for_its_answer_only(self):
+        m = self.case12()
+        hl = self.h_lib(m)
+        paths = ["src/use.py", "src/lib.py", "src/svc.py", "src/handlers/a.py", "src/handlers/b.py", "src/handlers/c.py"]
+        e = [turn(A, k, [rf(p, 1 + k) for p in paths]) for k in range(3)] + [final(R, 0, hl)]
+        e += [vdone("verifier-01", m, path="src/lib.py", line=1), judge(w([hid(R, 0, hl)]))]
+        res, _ = self.record_v16(m, script(*e))
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(validate_trace(events_of(res)), [])
+        ran = [t for t in tool_calls(res) if t["agentId"] == A and "requestedBy" in t and t["result"]["status"] == "ok"]
+        self.assertEqual(len(ran), whole.READS)                                    # the 13th to 18th never ran
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(A, "failed"), (R, "completed")])
+        self.assertEqual(len(inv_calls(res, R)), 1)                                # its answer only
+        self.assertEqual(len(comments_of(res)), 1)
+
+    def test_no_fifth_hop_and_a_re_ask_that_still_asks_for_context_ends_partial(self):
+        m = self.case12()
+        e = [turn(A, k, [rf("src/use.py", 1 + k)]) for k in range(4)] + [turn(R, 0, [rf("src/lib.py")])]
+        res, _ = self.record_v16(m, script(*e))
+        self.assertEqual(len(inv_calls(res, A)), whole.HOPS)                       # hop 3 is the last turn
+        self.assertEqual(len(inv_calls(res, R)), whole.REASK_EXHAUSTED_HOPS)
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "INVESTIGATE"], ["tool-calls-exhausted"])
+        self.assertEqual(payload(res, "INVESTIGATE")["hypotheses"], [])
+
     def test_only_the_first_max_hypotheses_are_candidates(self):
         m = self.case12()
         hl, hb, hs = self.h_lib(m), self.h_b(m), self.h_svc(m)

@@ -25,7 +25,9 @@ Rule (BEHAVIOR):
              budget.effective_retry_limits) and a second call at the same hop of a Turn chain is a fork the trace
              checker refuses; so when the reviewer's or a verifier's chain ends with a REASK_CODES code, the host asks
              the same question ONCE more in a new session `<agent>` + REASK_SUFFIX (a fresh chain from hop 0; every
-             call separately admitted, guarded and traced, with its own repair). The first end is then a note. A
+             call separately admitted, guarded and traced, with its own repair). A reviewer chain that a turn, read or
+             context limit ends without an answer (a lone reviewer would leave the review empty) is re-asked the same
+             way with REASK_EXHAUSTED_HOPS hop: its answer from the request context. The first end is then a note. A
              verifier re-ask that ends with a REASK_CODES code again drops the candidate as verifier-failed, a note
              (the run is not partial for one candidate's answer format); every other end keeps v12's handling.
 """
@@ -48,6 +50,7 @@ HOPS = 4                           # three read turns, then the answer
 READS = 12
 MAX_HYPOTHESES = 15
 REASK_CODES = ("schema-invalid", "repair-exhausted")
+REASK_EXHAUSTED_HOPS = 1           # a reviewer chain ended by a limit without an answer: re-asked for its answer only
 
 TEXT = ("one reviewer: the PR text when supplied, every changed file's diff and the changed files' head content in "
         "one request of at most CONTEXT_CHARS excerpt characters (largest diffs out first beyond it; head files "
@@ -57,8 +60,10 @@ TEXT = ("one reviewer: the PR text when supplied, every changed file's diff and 
         "verifier session each, at most deepcov.MAX_VERIFY; JUDGE deepcov.CAP_RULE")
 REASK_TEXT = ("a chain of the reviewer or a verifier that ends with schema-invalid or repair-exhausted is asked once "
               "more in a new session <agent>-reask (fresh chain; each call admitted, guarded, traced, with its own "
-              "one repair); the first end is a note; a verifier re-ask that ends the same way drops the candidate as "
-              "verifier-failed, a note; every other end keeps v12's handling")
+              "one repair); a reviewer chain ended by a turn, read or context limit without an answer is asked once "
+              "more for its answer only (REASK_EXHAUSTED_HOPS hop); the first end is a note; a verifier re-ask that "
+              "ends out of schema again drops the candidate as verifier-failed, a note; every other end keeps v12's "
+              "handling")
 
 
 def plan_specialists() -> list[str]:
@@ -163,5 +168,6 @@ def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: in
             "verify": {"rule": deepcov.VERIFY_RULE, "maxVerify": deepcov.MAX_VERIFY},
             "judge": {"rule": deepcov.CAP_RULE, "base": comment_cap_base, "maxComments": deepcov.MAX_COMMENTS,
                       "strongEvidence": list(deepcov.STRONG_EVIDENCE)},
-            "reask": {"rule": REASK_RULE, "suffix": REASK_SUFFIX, "codes": list(REASK_CODES), "text": REASK_TEXT},
+            "reask": {"rule": REASK_RULE, "suffix": REASK_SUFFIX, "codes": list(REASK_CODES),
+                      "exhaustedHops": REASK_EXHAUSTED_HOPS, "text": REASK_TEXT},
             "policy": {"runToolCalls": min(policy.run_tool_calls, budget["maxToolCalls"]), "hostMaxCalls": tool_max_calls}}
