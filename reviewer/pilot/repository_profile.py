@@ -26,6 +26,8 @@ exactly as v7), merged restatement-only; its Plan lists the six lanes and names 
 investigator model only (no alternate): the three v3 lenses with a depth paragraph, then one coverage investigator per
 unit of a deterministic changed-file partition, a host-enforced depth floor, per-candidate verifier sessions and a
 dynamic comment cap (reviewer.pipeline.deepcov); its Plan lists the lenses and the coverage-unit marker (V12_* below).
+16 (explicit only) is investigator.impact@v16: ONE whole-change reviewer (reviewer.pipeline.whole) on the primary
+investigator model, v12's VERIFY and JUDGE rules, v12's clocks and tool cap, the $4 ceiling; its Plan lists `whole`.
 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
@@ -35,12 +37,13 @@ from __future__ import annotations
 from reviewer.pipeline import RetrievalPolicy
 import copy
 
-from reviewer.pipeline import deepcov, lanes
+from reviewer.pipeline import deepcov, lanes, whole
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
                                        INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                        INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                                        INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
-                                       INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT, SPECIALIST_AGENTS,
+                                       INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
+                                       INVESTIGATOR_IMPACT_V16_PROMPT, SPECIALIST_AGENTS,
                                        V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
@@ -66,7 +69,8 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
 
 IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT,
                    4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT,
-                   10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT}
+                   10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT,
+                   16: INVESTIGATOR_IMPACT_V16_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -175,6 +179,21 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep
     marker and the V4_* budget scaling (every other profile keeps the one generalist, same Plan bytes)."""
     inv = profile["roles"]["investigator"]["promptVersion"]
+    if inv == INVESTIGATOR_IMPACT_V16_PROMPT:    # v12's clocks and tool cap (V12_*), one reviewer; primary model only
+        if "alternates" in profile:
+            raise ProfileError("investigator.impact@v16 runs on the primary investigator model only (no alternates)")
+        plan = live_plan(profile, **({"stage_ceilings_sec": V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
+                                      "wall_clock_sec": V12_LIVE_WALL_CLOCK_SEC,
+                                      "soft_deadline_sec": V12_LIVE_SOFT_DEADLINE_SEC}
+                                     if live_stage_timing else {"stage_ceilings_sec": V12_LEGACY_STAGE_CEILINGS_SEC}))
+        plan["budget"] = dict(plan["budget"], maxToolCalls=V12_MAX_TOOL_CALLS,
+                              maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
+        plan["specialists"] = whole.plan_specialists()
+        plan["reasons"] = ["pilot-repository: fixed standard Plan, retries/repairs off, complete pinned repository imports",
+                           "investigator.impact@v16: one whole-change reviewer (the whole diff and the changed files' "
+                           f"head content, at most {whole.MAX_HYPOTHESES} hypotheses), then v12's VERIFY and JUDGE "
+                           "(primary investigator model only)"]
+        return plan
     if inv == INVESTIGATOR_IMPACT_V12_PROMPT:    # the v12 scaling (V12_*); primary model only
         if "alternates" in profile:
             raise ProfileError("investigator.impact@v12 runs on the primary investigator model only (no alternates)")
@@ -267,6 +286,6 @@ def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V7_MAX_TOOL_CALLS)
     if inv == INVESTIGATOR_IMPACT_V10_PROMPT:        # and v10
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V10_MAX_TOOL_CALLS)
-    if inv == INVESTIGATOR_IMPACT_V12_PROMPT:        # and v12
+    if inv in (INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT):       # and v12, v16 (v12's cap)
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V12_MAX_TOOL_CALLS)
     return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)

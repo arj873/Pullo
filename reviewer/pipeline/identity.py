@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import deepcov, lanes, prompts, repocov, retrieval, specialists, sweeps
+from . import deepcov, lanes, prompts, repocov, retrieval, specialists, sweeps, whole
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -99,6 +99,8 @@ def plan_specialists(spec) -> list[str]:
     """The Plan.specialists the selected investigator needs: the v3 specialist ids (impact@v4: followed by the
     diff-shard sweep marker), else the one generalist."""
     pol = retrieval_policy(spec)
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.whole_change and "investigator" in turn_roles(spec.profile):
+        return whole.plan_specialists()          # impact@v16: the one whole-change reviewer
     if isinstance(pol, retrieval.RetrievalPolicy) and pol.specialists is not None \
             and "investigator" in turn_roles(spec.profile):
         if pol.coverage_forced:                  # impact@v12: the lens lanes, then the coverage-unit marker
@@ -159,6 +161,9 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
+        if pol.whole_change:                     # investigator.impact@v16 only => v1-v12 run ids are unchanged
+            extra["impact"]["whole"] = whole.identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                          spec.host.comment_cap)
         if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
             extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                   spec.host.comment_cap)

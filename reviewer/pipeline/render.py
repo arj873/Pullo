@@ -111,7 +111,7 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
               coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
               specialists: dict | None = None, sweep: dict | None = None,
               alternate_models: list | None = None, alt_coverage: list | None = None,
-              deep_coverage: list | None = None) -> str:
+              deep_coverage: list | None = None, whole_change: list | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -195,6 +195,8 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
         out += sweep_section(sweep, specialists)
     if deep_coverage is not None:   # investigator.impact@v12 only: bytes unchanged else
         out += ["## Coverage-forced investigation", "", *deep_coverage, ""]
+    if whole_change is not None:    # investigator.impact@v16 only: bytes unchanged else
+        out += ["## Whole-change review", "", *whole_change, ""]
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

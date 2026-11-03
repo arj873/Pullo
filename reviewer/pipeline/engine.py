@@ -34,7 +34,8 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
                             import_view, omissions_from_records)
 
 from . import coverage as cov_mod
-from . import deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists, sweeps
+from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists,
+               sweeps, whole)
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -133,7 +134,10 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                                         if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
                           deep_coverage=(deepcov.coverage_lines(deep_plan(files, events), artifacts["INVESTIGATE"]["payload"],
                                                                 events, artifacts["VERIFY"]["payload"].get("drops", ()))
-                                         if deepcov.is_v12_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
+                                         if deepcov.is_v12_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
+                          whole_change=(whole.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                             artifacts["VERIFY"]["payload"].get("drops", ()))
+                                        if whole.is_v16_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -200,6 +204,8 @@ class Engine:
         self.v10 = bool(self.impact and self.policy.cross_v3)
         # investigator.impact@v12: the v3 lenses with a depth floor, then coverage investigators (reviewer.pipeline.deepcov)
         self.v12 = bool(self.impact and self.policy.coverage_forced)
+        # investigator.impact@v16: one whole-change reviewer, then v12's VERIFY and JUDGE rules (reviewer.pipeline.whole)
+        self.v16 = bool(self.impact and self.policy.whole_change)
         self._reread: dict = {}                 # v12: `<agent>.reread` sessions that re-show earlier reads to a continuation
         self._verify_note_only = False          # v12 VERIFY of unit candidates: limit ends are coverage notes
         self._verify_slice: int | None = None   # v12: seconds into VERIFY after which no unit candidate starts
@@ -403,6 +409,8 @@ class Engine:
         'coverage investigator' for a v12 coverage unit."""
         if self.v12 and deepcov.is_unit(agent):
             return "coverage investigator"
+        if self.v16:
+            return "reviewer"
         return "sweep investigator" if self.sweep and agent not in specialists.AGENTS else "specialist"
 
     def session_hard_limit(self) -> int:
@@ -456,7 +464,9 @@ class Engine:
             if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
                 sweep = self.agent_label(agent) != "specialist"
                 alt = self.cross and prompts.is_alt_lane(agent)
-                detail = ({"scope": "unit-share" if deepcov.is_unit(agent) else "lens-share", "rule": deepcov.BUDGET_RULE,
+                detail = ({"scope": "whole-share", "rule": whole.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling} if self.v16 else
+                          {"scope": "unit-share" if deepcov.is_unit(agent) else "lens-share", "rule": deepcov.BUDGET_RULE,
                            "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling} if self.v12 else
                           {"scope": "sweep-share" if sweep else "alternate-model-share" if alt
                            else "specialist-share",
@@ -706,11 +716,11 @@ class Engine:
     def omissions(self, stage: str, agent: str | None = None) -> list[str]:
         return omission_notes(self.recorder.events, stage, self.incomplete, agent)
 
-    def bounded_context(self, items: list[dict]) -> tuple[list[dict], list[str]]:
+    def bounded_context(self, items: list[dict], limit: int = CONTEXT_CHARS) -> tuple[list[dict], list[str]]:
         total, out, notes = 0, [], []
         for it in items:
             size = sum(len(x) for x in it["excerpts"])
-            if total + size > CONTEXT_CHARS:
+            if total + size > limit:
                 out.append({**it, "excerpts": [], "notice": (it["notice"] + " Excerpts omitted: request context budget.").strip()})
                 notes.append(f"{it['tool']} result {it['toolCallId']} omitted from the request (context budget)")
                 continue
@@ -730,6 +740,8 @@ class Engine:
         stage = "INVESTIGATE"
         if self.fatal:
             return self.skipped(stage)
+        if self.v16:                            # investigator.impact@v16 (reviewer.pipeline.whole)
+            return self._investigate_v16(stage, t0)
         if self.v12:                            # investigator.impact@v12 (reviewer.pipeline.deepcov)
             return self._investigate_v12(stage, t0)
         if self.specialists is not None:
@@ -777,7 +789,8 @@ class Engine:
         when exploring could leave no worst-case reservation for one final-answer call under its spend ceiling.
         False for every other chain (no change to any other version). impact@v12 (deepcov.FINAL_RULE): every v12 agent
         under its own spend ceiling."""
-        if self.v12 and stage == "INVESTIGATE" and role == "investigator" and self._spend_ceiling is not None:
+        if (self.v12 or self.v16) and stage == "INVESTIGATE" and role == "investigator" \
+                and self._spend_ceiling is not None:
             spec = self.profile["roles"]["investigator"]
             if spec["price"] is None:
                 return False
@@ -1341,6 +1354,101 @@ class Engine:
         items = prompts.context_items(logged, stage)
         return items, logged, ids
 
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v16 one whole-change reviewer
+    def _whole_context(self, stage, t0) -> tuple[list, list, dict]:
+        """impact@v16 (whole.CONTEXT_RULE): the PREPARE diff of every changed file, then the changed files' head content
+        read by the host (session whole.HEAD_AGENT, whole.head_plan and whole.read_ranges), within whole.CONTEXT_CHARS.
+        -> (context items, notes, the model-visible wholeChange block)."""
+        items = [i for i in prompts.context_items(self.recorder.events, "PREPARE") if i["tool"] == "diff"]
+        sizes = [(i["toolCallId"], sum(len(x) for x in i["excerpts"])) for i in items]
+        shown, out = whole.select_diffs(sizes)
+        name = {i["toolCallId"]: i["args"].get("path") or "(changed-path listing)" for i in items}
+        diffs = [i for i in items if i["toolCallId"] in set(shown)]
+        head = self.spec.head
+        files = [(f["path"], ls) for f in self.artifacts["PREPARE"]["payload"]["files"]
+                 if (ls := snaps.head_lines(head.root, head.manifest, f["path"]))]
+        rows = whole.head_plan([(p, [len(x) + 1 for x in ls]) for p, ls in files],
+                               whole.CONTEXT_CHARS - sum(c for k, c in sizes if k in set(shown)))
+        session = self.new_session(stage, whole.HEAD_AGENT)
+        logged, notes, read = [], [], {}
+        for (path, ls), row in zip(files, rows):
+            ranges = whole.read_ranges(ls, row["shownLines"])
+            for a, b in ranges:
+                call, why = self.tool(session, "read_file", {"side": "head", "path": path, "start_line": a,
+                                                             "end_line": b}, t0)
+                if call is None:
+                    notes.append(f"head content of {path} from line {a} not read: {why}")
+                    break
+                logged.append(self.tool_calls()[call.tool_call_id])
+                read[path] = b if (a, b) != ranges[-1] else row["shownLines"]
+                if self.fatal:
+                    break
+            if notes or self.fatal:
+                break
+        rows = [dict(r, shownLines=read.get(r["path"], 0)) for r in rows]    # what was read, not what was planned
+        ctx, more = self.bounded_context(diffs + prompts.context_items(logged, stage), whole.CONTEXT_CHARS)
+        ctx, more = self._cap_host_results(ctx, more)
+        pr = self.case["pr"]
+        block = prompts.whole_block(whole.MAX_HYPOTHESES, len(diffs),
+                                    [{"path": name[d["path"]], "chars": d["chars"]} for d in out], rows,
+                                    bool(pr["title"] or pr["body"]))
+        return ctx, notes + more, block
+
+    def _whole_chain(self, stage, t0, agent, ctx, doc):
+        """One impact@v16 reviewer chain (whole.HOPS hops, no floor) in its own session."""
+        events = self.tool_calls()
+        host = [events[c["toolCallId"]] for c in ctx]
+        session = self.new_session(stage, agent)
+        return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
+                               turns=whole.HOPS, policy=self.policy, host_events=host,
+                               unrendered=self.unrendered_ids(ctx, host)).run(
+            lambda hop, state: prompts.turn_request(self.profile, self.profile_ref, "investigator", doc, state,
+                                                    self.policy.requests_per_turn, retrieval.RETRIEVAL_VERSION,
+                                                    tools=self.retrieval_tools()))
+
+    def _investigate_v16(self, stage, t0):
+        """investigator.impact@v16 (reviewer.pipeline.whole): one whole-change reviewer under deepcov's INVESTIGATE
+        spend top, whole.READS reads and whole.HOPS hops, until the stage ceiling. A chain that ends with a
+        whole.REASK_CODES code is asked once more in a new session (whole.REASK_RULE; the first end is a note). Any other
+        end without an answer fails INVESTIGATE exactly as a v12 run without a usable lane: nothing later runs (V1).
+        The payload carries the first whole.MAX_HYPOTHESES drafts' resolved hypotheses; there is nothing to merge."""
+        agents: list = []
+        g = self.gate(stage, t0, new_agent=True)
+        if g is not None:
+            agents.append({"agentId": whole.AGENT, "specialist": whole.AGENT, "status": _agent_status(g[1]),
+                           "error": g[1]})
+            return self._v3_failed(agents, g[1], g[0])
+        ctx, notes, block = self._whole_context(stage, t0)
+        if self.fatal:                           # e.g. a snapshot tamper during a head read
+            return "failed", {"hypotheses": [], "agents": agents}, self.fatal["error"], []
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
+                                       task=prompts.V16_WHOLE_TASK)
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        doc["wholeChange"] = block
+        self._spend_ceiling = deepcov.spend_top(self.budget)
+        try:
+            for agent in (whole.AGENT, whole.AGENT + whole.REASK_SUFFIX):
+                self._tool_share = whole.READS
+                end = self._whole_chain(stage, t0, agent, ctx, doc)
+                if end.error is None and end.exhausted is None:
+                    agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                    hyps = self._hypotheses(agent, {"hypotheses": end.payload["hypotheses"][:whole.MAX_HYPOTHESES]},
+                                            end.final_call)
+                    return "completed", {"hypotheses": hyps, "agents": agents}, None, []
+                if end.error is None:            # tool calls exhausted without a final answer (as a v12 lens lane)
+                    agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                    return "partial", {"hypotheses": [], "agents": agents}, None, [
+                        self._inc_doc(stage, "tool-calls-exhausted", f"reviewer {agent}: " + self._exhausted_detail(end))]
+                err = end.error
+                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                if not (err["code"] in whole.REASK_CODES and not whole.is_reask(agent) and not self.fatal
+                        and not self.needs_reconciliation):
+                    return self._v3_failed(agents, err, end.stop[0] if end.stop else None)
+        finally:
+            self._tool_share = self._spend_ceiling = None
+
     # ------------------------------------------------------------------ INVESTIGATE: impact@v4 diff-shard sweeps
     def shard_plan(self) -> tuple[list, list, list, list]:
         """-> (reviewable [(path, chars)], shards [[(path, chars)]], excluded [{path, reason}], all changed paths),
@@ -1600,7 +1708,7 @@ class Engine:
         """-> ([(original index n, hypothesis id, draft)], {id: Hypothesis}) rebuilt from the logged successful
         investigator call and the INVESTIGATE artifact (so a resumed run needs nothing else)."""
         hyps = {h["id"]: h for h in self.artifacts["INVESTIGATE"]["payload"]["hypotheses"]}
-        if self.specialists is not None:
+        if self.specialists is not None or self.v16:      # impact@v16: the reviewer's lane (whole.AGENT or its re-ask)
             return self._v3_candidates(), hyps
         # the last usable INVESTIGATE answer that carries a role payload (a non-final Turn hop has none); with the
         # impact@v2 exploration floor, the answer its last retrieval.floor decision names (the draft when it was used)
@@ -1643,6 +1751,8 @@ class Engine:
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
                            and (src is None or e["callId"] == src)
                            and (p := terminal_payload(e)) is not None), [])
+            if self.v16:                        # impact@v16: the first whole.MAX_HYPOTHESES drafts only
+                drafts = drafts[:whole.MAX_HYPOTHESES]
             order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n))
                      if (self.five if by_value is None else by_value)
                      else range(len(drafts)))          # impact@v5 (and v12 units): a lane's most valuable first
@@ -1700,7 +1810,7 @@ class Engine:
         scaled = self.sweep or self.five
         if self.five:                                 # impact@v5: the cap scales with the extra lanes
             shards, cap = lanes.extra_lanes(self.specialists), lanes.verify_cap(len(self.specialists))
-        if self.v12:                                  # impact@v12: its own cap; one verifier session per candidate
+        if self.v12 or self.v16:                      # impact@v12 (and v16): its own cap; one verifier session each
             cap = deepcov.MAX_VERIFY
         collapsed = {m: g["keptIds"] for g in (self.artifacts["INVESTIGATE"]["payload"].get("collapses", ())
                                                if self.five else ()) for m in g["collapsedIds"]}
@@ -1732,7 +1842,7 @@ class Engine:
                         "budget-exhausted", f"VERIFY stopped starting coverage-unit candidates: {left} run tool call(s) "
                         f"left, fewer than {deepcov.VERIFY_UNIT_TOOL_MARGIN} ({deepcov.VERIFY_RULE})", stage=stage,
                         detail={"scope": "unit-tool-margin", "left": max(0, left)}))
-            if stop is None and (shards or self.v10 or self.v12) \
+            if stop is None and (shards or self.v10 or self.v12 or self.v16) \
                     and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
                 stop = ("budget", typed_error(       # impact@v4: keep the JUDGE spend reserve (sweeps.JUDGE_RESERVE_BP)
                     "budget-exhausted", "VERIFY stopped before this candidate to keep the JUDGE spend reserve "
@@ -1754,7 +1864,7 @@ class Engine:
                               "reason": {"verifier-failure": "verifier-failed"}.get(reason, reason),
                               "detail": err["message"][:500]})
                 return False
-            name = (deepcov.verifier_agent(kept - 1) if self.v12
+            name = (deepcov.verifier_agent(kept - 1) if self.v12 or self.v16
                     else sweeps.verifier_agent(kept - 1, shards) if scaled else VERIFIER_AGENT)
             if name not in sessions:
                 sessions[name] = self.new_session(stage, name)
@@ -1762,6 +1872,24 @@ class Engine:
                     unit_sessions.add(name)
             rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
             inc.extend(more)
+            if self.v16 and rec is not None and rec["verdict"] == "failed" \
+                    and rec["error"]["code"] in whole.REASK_CODES:      # whole.REASK_RULE: once more, a new session
+                why = ("a stop applies" if self.gate(stage, t0) is not None or self.fatal
+                       else "the JUDGE spend reserve" if self.run_spend() >= sweeps.judge_reserve_floor(self.budget)
+                       else None)
+                first = rec["callIds"]
+                if why is None:
+                    name += whole.REASK_SUFFIX
+                    sessions[name] = self.new_session(stage, name)
+                    rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
+                    inc.extend(more)
+                if rec is not None:
+                    rec = dict(rec, callIds=(first + rec["callIds"])[-10:]) if why is None else rec
+                    if drop is not None and drop["reason"] == "verifier-failed" \
+                            and rec["error"]["code"] in whole.REASK_CODES:
+                        drop = dict(drop, detail=(f"{whole.REASK_RULE}: " + (f"not re-asked ({why})" if why else
+                                                  "re-asked once") + f", {rec['error']['code']} (a note); "
+                                                  + drop.get("detail", ""))[:1000])
             if rec is None:
                 return False
             records.append(rec)
@@ -1774,13 +1902,15 @@ class Engine:
 
         def over_cap(hid) -> bool:
             nonlocal kept
-            if not v3:
+            if not v3 and not self.v16:
                 return False
             kept += 1
             if kept <= cap:
                 return False
             drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
-                          "detail": (f"more than {cap} distinct lens-lane and coverage-unit hypotheses "
+                          "detail": (f"more than {cap} hypotheses of the whole-change reviewer ({deepcov.VERIFY_RULE}); "
+                                     "later ones (in the reviewer's order) are not verified" if self.v16 else
+                                     f"more than {cap} distinct lens-lane and coverage-unit hypotheses "
                                      f"({deepcov.VERIFY_RULE}); later ones (the lens lanes in v3 order, then the "
                                      "units round-robin by value) are not verified" if self.v12 else
                                      f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
@@ -2065,6 +2195,10 @@ class Engine:
         if err["code"] in REPLAY_CODES:
             self.set_fatal("VERIFY", err)
             return rec, None, None, inc
+        if self.v16 and err["code"] in whole.REASK_CODES and not self.needs_reconciliation:
+            # impact@v16 (whole.REASK_RULE): re-asked once in a new session; a second such end is a note
+            return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "verifier-failed",
+                               "detail": f"{err['code']}: {err['message']}"[:1000]}, inc
         if err["code"] == "cancelled":
             reason, drop = "cancelled", "cancelled"
         elif err["code"] == "deadline-exceeded":
@@ -2209,7 +2343,7 @@ class Engine:
             drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "over-cap",
                           "detail": (f"ranked below the dynamic cap of {cap} ({deepcov.CAP_RULE}: base "
                                      f"{self.host.comment_cap}, up to {deepcov.MAX_COMMENTS} while the next comment is "
-                                     "P0/P1 with strong evidence)") if self.v12
+                                     "P0/P1 with strong evidence)") if self.v12 or self.v16
                           else f"ranked below the cap of {self.host.comment_cap}"})
         comments = []
         for f, c in top:
@@ -2228,7 +2362,7 @@ class Engine:
 
     def comment_cap(self, entries: list) -> int:
         """The JUDGE comment cap: the host's (every version but v12), or impact@v12's dynamic cap (deepcov.CAP_RULE)."""
-        return deepcov.comment_cap(entries, self.host.comment_cap) if self.v12 else self.host.comment_cap
+        return deepcov.comment_cap(entries, self.host.comment_cap) if self.v12 or self.v16 else self.host.comment_cap
 
     # ------------------------------------------------------------------ PUBLISH
     def publish(self, t0):

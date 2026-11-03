@@ -25,7 +25,8 @@ from reviewer.tools.ops import Outcome
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                       INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT,
-                      INVESTIGATOR_IMPACT_V12_PROMPT, SPECIALIST_AGENTS, V5_AGENTS, V7_AGENTS, V10_AGENTS)
+                      INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT, SPECIALIST_AGENTS, V5_AGENTS,
+                      V7_AGENTS, V10_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -81,7 +82,8 @@ class RetrievalPolicy:
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                             INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                                             INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
-                                            INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT)
+                                            INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
+                                            INVESTIGATOR_IMPACT_V16_PROMPT)
 
     @property
     def exploration_floor(self) -> bool:
@@ -131,6 +133,12 @@ class RetrievalPolicy:
         deterministic changed-file partition (reviewer.pipeline.deepcov); primary investigator model only. Its depth
         floor replaces the v2 exploration floor (exploration_floor is False)."""
         return self.investigator_prompt == INVESTIGATOR_IMPACT_V12_PROMPT
+
+    @property
+    def whole_change(self) -> bool:
+        """investigator.impact@v16: one whole-change reviewer (reviewer.pipeline.whole); primary investigator model
+        only; no exploration floor, lanes or units (specialists stays None)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V16_PROMPT
 
     @property
     def diff_sweep(self) -> bool:
