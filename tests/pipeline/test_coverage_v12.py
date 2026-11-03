@@ -774,7 +774,7 @@ class Parity(unittest.TestCase):
                           RP.repository_policy(True, impact_version=v).digest,
                           prompts.impact_template_digests(RP.IMPACT_VERSIONS[v])])
             self.assertEqual(got, PRE_V12_PINS[f"repo_v{v}"], f"v{v}")
-        self.assertEqual(sorted(RP.IMPACT_VERSIONS), [1, 2, 3, 4, 5, 7, 10, 12, 16])
+        self.assertEqual(sorted(RP.IMPACT_VERSIONS), [1, 2, 3, 4, 5, 7, 10, 12, 16, 19])
 
 
 class V3Parity(SpecRig):

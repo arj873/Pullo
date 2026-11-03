@@ -25,7 +25,8 @@ from reviewer.tools.ops import Outcome
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                       INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT,
-                      INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT, SPECIALIST_AGENTS, V5_AGENTS,
+                      INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT,
+                      SPECIALIST_AGENTS, V5_AGENTS,
                       V7_AGENTS, V10_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
@@ -83,7 +84,7 @@ class RetrievalPolicy:
                                             INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                                             INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
                                             INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
-                                            INVESTIGATOR_IMPACT_V16_PROMPT)
+                                            INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT)
 
     @property
     def exploration_floor(self) -> bool:
@@ -137,8 +138,15 @@ class RetrievalPolicy:
     @property
     def whole_change(self) -> bool:
         """investigator.impact@v16: one whole-change reviewer (reviewer.pipeline.whole); primary investigator model
-        only; no exploration floor, lanes or units (specialists stays None)."""
-        return self.investigator_prompt == INVESTIGATOR_IMPACT_V16_PROMPT
+        only; no exploration floor, lanes or units (specialists stays None). investigator.impact@v19 runs it as one agentic
+        read-only session (agentic_review)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT)
+
+    @property
+    def agentic_review(self) -> bool:
+        """investigator.impact@v19: v16's reviewer as one agentic read-only claude-cli session and the JUDGE
+        concrete-behaviour rule (reviewer.pipeline.agentic)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V19_PROMPT
 
     @property
     def diff_sweep(self) -> bool:

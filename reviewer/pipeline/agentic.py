@@ -1,0 +1,88 @@
+"""investigator.impact@v19: impact@v16 with its one reviewer run as ONE agentic read-only claude-cli session
+(claude-cli-isolated@6, reviewer.runtime.claude_agentic) and a JUDGE rule that leaves out findings without a concrete
+wrong behaviour (pure rules; the engine drives them in Engine._investigate_v16 and Engine._judge_findings).
+
+Why (held-out, one shot): v13 0.386 and v16 0.350 against comparators at 0.62-0.82; precision collapses on unseen
+repositories and the host-mediated reads (at most 12) are the suspected limit; on held-out, P2 bugs were 3 of 14 true,
+breaking-change remarks 0 of 5, performance remarks 0 of 3.
+
+Rule (BEHAVIOR):
+  session    the investigator role of a v19 profile carries params.agentic = spec() (catalog.claude_cli_agentic_spec:
+             read-only, MAX_REQUESTS relayed requests, SESSION_DEADLINE_SEC, BUDGET_USD_MICROS PACING, which the gateway
+             reserves for the call); a v19 profile needs a claude-cli investigator (refused otherwise) and the live host
+             opens the claude-cli adapter with agentic=True and the run's PR snapshot (head and base exported from the
+             pinned imports to a private directory outside home and the repository, removed after the run); the CLI
+             explores with Read/Grep/Glob only, inside its sandbox, and answers once;
+  request    v16's reviewer (agent `whole`): the PR text, the PREPARE diff of every changed file within
+             whole.CONTEXT_CHARS (largest out first, uncollected ones listed) and the wholeChange block, but NO host head
+             reads (the session reads what it needs), the agenticReview block and V19's task; one hop (the Turn request
+             is its last turn); at most whole.MAX_HYPOTHESES hypotheses; v16's schema-reask@1 re-ask (a second session);
+  VERIFY     v16's (non-agentic verifier, one vote, cap deepcov.MAX_VERIFY);
+  JUDGE      (JUDGE_RULE) the judge sees every surviving finding with prompts.V19_JUDGE_RULE appended to its task; a
+             finding its valid output leaves out is dropped as 'below-threshold' (disclosed) before v16's dynamic cap;
+             when the judge is unavailable or its output is rejected, nothing is dropped (deterministic wording, as v16);
+  ceiling    v19 Plans carry repository_profile.V19_RUN_CEILING_USD_MICROS ($10, CC_AUTH_V2), and the live hosts accept
+             exactly that for a v19 Plan (every other Plan keeps the pilot ceiling); v12's clocks (INVESTIGATE 1800 s live:
+             a 900 s session and its re-ask).
+"""
+
+from __future__ import annotations
+
+from . import deepcov, prompts, whole
+
+BEHAVIOR = "agentic-whole-review@1"
+SESSION_RULE = prompts.AGENTIC_REVIEW_VERSION
+JUDGE_RULE = prompts.JUDGE_CONCRETE_VERSION
+AGENT = whole.AGENT
+PLAN_MARKER = "agentic"
+MAX_REQUESTS = 30                 # catalog.CLAUDE_CLI_AGENTIC_MAX_REQUESTS
+SESSION_DEADLINE_SEC = 900        # catalog.CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC
+BUDGET_USD_MICROS = 5_000_000     # PACING, half of the $10 v19 ceiling: a re-ask session still fits, VERIFY + JUDGE keep room
+HOPS = 1
+
+TEXT = ("one agentic read-only claude-cli session (Read/Grep/Glob over the PR snapshot, at most MAX_REQUESTS requests "
+        "within SESSION_DEADLINE_SEC and BUDGET_USD_MICROS PACING) with v16's diff context and no host head reads, one "
+        "answer of at most whole.MAX_HYPOTHESES hypotheses, v16's re-ask; VERIFY as v16; the judge leaves out findings "
+        "without a concrete wrong behaviour and the host drops them (below-threshold) before v16's cap")
+
+
+def spec() -> dict:
+    """The params.agentic of a v19 investigator role (catalog.claude_cli_agentic_spec validates it)."""
+    return {"mode": "read-only", "maxRequests": MAX_REQUESTS, "sessionDeadlineSec": SESSION_DEADLINE_SEC,
+            "budgetUsdMicros": BUDGET_USD_MICROS}
+
+
+def plan_specialists() -> list[str]:
+    return [AGENT, PLAN_MARKER]
+
+
+def is_v19_plan(plan: dict) -> bool:
+    return plan.get("specialists") == plan_specialists()
+
+
+def is_agentic_profile(profile: dict) -> bool:
+    """A profile with at least one role in agentic mode (the live host must give the adapter a PR snapshot)."""
+    return any(isinstance(r.get("params"), dict) and "agentic" in r["params"]
+               for r in [*profile["roles"].values(), *profile.get("alternates", {}).values()])
+
+
+def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
+    """review.md disclosure of an impact@v19 run (pure): v16's lines, then the session and the JUDGE rule."""
+    lines = whole.coverage_lines(payload, events, drops)
+    lines[0] = f"- Agentic whole-change review ({BEHAVIOR}): one reviewer `{AGENT}`; " + TEXT + "."
+    calls = [e for e in events if e["type"] == "model.call" and e["stage"] == "INVESTIGATE"]
+    agentic = [e for e in calls if isinstance(e["request"].get("params"), dict) and "agentic" in e["request"]["params"]]
+    dropped = sum(1 for d in drops if d["reason"] == "below-threshold" and JUDGE_RULE in d.get("detail", ""))
+    lines.append(f"- Session ({SESSION_RULE}): {len(agentic)} agentic session(s) (claude-cli-isolated@6, read-only, at "
+                 f"most {MAX_REQUESTS} requests and {SESSION_DEADLINE_SEC} s each).")
+    lines.append(f"- JUDGE rule ({JUDGE_RULE}): {dropped} finding(s) left out by the judge as without a concrete wrong "
+                 "behaviour (dropped, not published).")
+    return lines
+
+
+def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: int) -> dict:
+    """Everything about impact@v19 that is not a template digest or v16's (bound into the config identity)."""
+    return {"behavior": BEHAVIOR, "agent": AGENT, "planMarker": PLAN_MARKER, "text": TEXT, "hops": HOPS,
+            "session": {"rule": SESSION_RULE, **spec()}, "judge": {"rule": JUDGE_RULE, "dropReason": "below-threshold"},
+            "verify": {"rule": deepcov.VERIFY_RULE, "maxVerify": deepcov.MAX_VERIFY},
+            "whole": whole.identity_doc(policy, budget, tool_max_calls, comment_cap_base)}

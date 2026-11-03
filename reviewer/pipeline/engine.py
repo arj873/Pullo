@@ -35,7 +35,7 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
 
 from . import coverage as cov_mod
 from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists,
-               sweeps, whole)
+               sweeps, agentic, whole)
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -137,7 +137,11 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                                          if deepcov.is_v12_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
                           whole_change=(whole.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
                                                              artifacts["VERIFY"]["payload"].get("drops", ()))
-                                        if whole.is_v16_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
+                                        if whole.is_v16_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        else agentic.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                                    list(artifacts["VERIFY"]["payload"].get("drops", ()))
+                                                                    + list(artifacts["JUDGE"]["payload"]["drops"]))
+                                        if agentic.is_v19_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
 
 
@@ -206,6 +210,8 @@ class Engine:
         self.v12 = bool(self.impact and self.policy.coverage_forced)
         # investigator.impact@v16: one whole-change reviewer, then v12's VERIFY and JUDGE rules (reviewer.pipeline.whole)
         self.v16 = bool(self.impact and self.policy.whole_change)
+        # investigator.impact@v19: v16's reviewer as one agentic read-only session, the JUDGE rule (reviewer.pipeline.agentic)
+        self.v19 = bool(self.impact and self.policy.agentic_review)
         self._reread: dict = {}                 # v12: `<agent>.reread` sessions that re-show earlier reads to a continuation
         self._verify_note_only = False          # v12 VERIFY of unit candidates: limit ends are coverage notes
         self._verify_slice: int | None = None   # v12: seconds into VERIFY after which no unit candidate starts
@@ -1367,11 +1373,11 @@ class Engine:
         name = {i["toolCallId"]: i["args"].get("path") or "(changed-path listing)" for i in items}
         diffs = [i for i in items if i["toolCallId"] in set(shown)]
         head = self.spec.head
-        files = [(f["path"], ls) for f in self.artifacts["PREPARE"]["payload"]["files"]
-                 if (ls := snaps.head_lines(head.root, head.manifest, f["path"]))]
+        files = [] if self.v19 else [(f["path"], ls) for f in self.artifacts["PREPARE"]["payload"]["files"]
+                                     if (ls := snaps.head_lines(head.root, head.manifest, f["path"]))]   # v19: the session reads
         rows = whole.head_plan([(p, [len(x) + 1 for x in ls]) for p, ls in files],
                                whole.CONTEXT_CHARS - sum(c for k, c in sizes if k in set(shown)))
-        session = self.new_session(stage, whole.HEAD_AGENT)
+        session = None if self.v19 else self.new_session(stage, whole.HEAD_AGENT)
         logged, notes, read = [], [], {}
         for (path, ls), row in zip(files, rows):
             ranges = whole.read_ranges(ls, row["shownLines"])
@@ -1434,14 +1440,16 @@ class Engine:
         if self.fatal:                           # e.g. a snapshot tamper during a head read
             return "failed", {"hypotheses": [], "agents": agents}, self.fatal["error"], []
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
-                                       task=prompts.V16_WHOLE_TASK)
+                                       task=prompts.V19_WHOLE_TASK if self.v19 else prompts.V16_WHOLE_TASK)
         if self.coverage_doc() is None:
             doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
                                "context below is bounded and may be truncated or omitted.")
         doc["wholeChange"] = block
+        if self.v19:                             # agentic.SESSION_RULE: the session's own caps and where the snapshots are
+            doc["agenticReview"] = prompts.agentic_block(self.profile["roles"]["investigator"]["params"]["agentic"])
         self._spend_ceiling = deepcov.spend_top(self.budget)
         try:
-            turns = whole.HOPS
+            turns = agentic.HOPS if self.v19 else whole.HOPS           # v19: one agentic call answers
             for agent in (whole.AGENT, whole.AGENT + whole.REASK_SUFFIX):
                 self._tool_share = whole.READS
                 end = self._whole_chain(stage, t0, agent, ctx, doc, turns)
@@ -2304,7 +2312,10 @@ class Engine:
         top_ids = {f["id"] for f, _ in top}
         in_play = [g for g in groups if any(i in top_ids for i in g)]
         judged = top + [(f, c) for f, c in over if any(f["id"] in g for g in in_play)]
+        if self.v19:                             # agentic.JUDGE_RULE: the judge sees every surviving finding
+            judged = list(entries)
         wording, proposed = {}, []
+        judge_ok = False                         # v19: a valid judge output, whose omissions are drops
         if judged:
             g = self.gate(stage, t0, scope="model")
             if g is not None:
@@ -2312,10 +2323,12 @@ class Engine:
                 if g[0] == "cancelled":
                     self.set_fatal(stage, g[1])
             else:
+                jtask = prompts.judge_task(self.profile["roles"]["judge"]["promptVersion"])
                 req = prompts.judge_request(self.profile, self.profile_ref, self.case,
                                             [(f, c["severity"]) for f, c in judged], in_play,
                                             coverage=self.coverage_doc(),
-                                            task=prompts.judge_task(self.profile["roles"]["judge"]["promptVersion"]))
+                                            task=(prompts.v19_judge_task(self.profile["roles"]["judge"]["promptVersion"])
+                                                  if self.v19 else jtask))
                 out, err, _ = self.model_call(stage, "judge", JUDGE_AGENT, 0, req)
                 if err is not None:
                     if err["code"] in REPLAY_CODES:
@@ -2331,6 +2344,7 @@ class Engine:
                     if problem:
                         wording, proposed = {}, []
                         inc.append(self._inc(stage, "agent-failure", f"judge output rejected: {problem}"))
+                    judge_ok = problem is None
         if self.fatal and self.fatal["status"] == "failed":
             return [], [], []
         final, away = [], set()
@@ -2347,6 +2361,11 @@ class Engine:
             away.add(members[0][0]["id"])
         for f, c in entries:
             if f["id"] in away:
+                continue
+            if self.v19 and judge_ok and f["id"] not in wording:     # agentic.JUDGE_RULE: left out by the judge
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "below-threshold",
+                              "detail": f"{agentic.JUDGE_RULE}: the judge left it out as without a concrete wrong "
+                                        "behaviour (not published)"})
                 continue
             if f["id"] in wording:
                 title, body, sug = wording[f["id"]]

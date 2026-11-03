@@ -17,13 +17,16 @@ same (no SpendBook) path in plan as in live."""
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import tempfile
 from pathlib import Path
 
 from reviewer.gateway import DisabledProvider, SpendBook
 from reviewer.gateway.errors import typed_error
 from reviewer.gateway.providers import ProviderResult
-from reviewer.pipeline import prompts
+from reviewer.contracts.snapshot import read_verified
+from reviewer.pipeline import agentic, prompts
 from reviewer.pipeline.errors import PipelineError
 from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS, claude_cli_worst_case_micros
 from reviewer.runtime.claude_cli import ClaudeCliProvider, ClaudeCliUnsupported
@@ -128,8 +131,44 @@ def open_terra_state(state_dir, handle, baseline: int) -> tuple:
     return SpendBook(handle, state / TERRA_BOOK_NAME), ledger
 
 
+AGENTIC_SNAPSHOT_SKIPPED_TOP = (".git", ".env")    # claude_agentic.Snapshot refuses either at a snapshot's top
+
+
+def export_snapshot(base, head) -> tuple:
+    """impact@v19 (reviewer.pipeline.agentic): the run's PR snapshot for an agentic claude-cli session, exported from the
+    pinned imports (`base`, `head`: SnapshotInput-like, root + manifest; every byte read through read_verified) into a
+    private 0700 directory under TMPDIR, outside home and the repository: regular and executable entries only (links are
+    left out; so are a top-level .git or .env). -> (claude_agentic.Snapshot(head, base), the directory to remove after
+    the run). A snapshot the adapter would refuse is a typed config refusal (the directory is removed first)."""
+    from reviewer.runtime.claude_agentic import Snapshot
+    parent = os.path.realpath(tempfile.mkdtemp(prefix="pullo-agentic-snapshot-"))
+    os.chmod(parent, 0o700)
+    try:
+        dirs = {}
+        for name, snap in (("head", head), ("base", base)):
+            d = dirs[name] = os.path.join(parent, name)
+            os.mkdir(d, 0o755)
+            for e in snap.manifest["entries"]:
+                if e["type"] not in ("file", "executable") or e["path"].split("/")[0] in AGENTIC_SNAPSHOT_SKIPPED_TOP:
+                    continue
+                data = read_verified(snap.root, snap.manifest, e["path"])
+                dest = os.path.join(d, *e["path"].split("/"))
+                os.makedirs(os.path.dirname(dest), mode=0o755, exist_ok=True)
+                with open(dest, "xb") as f:
+                    f.write(data)
+                os.chmod(dest, 0o755 if e["type"] == "executable" else 0o644)
+        out = Snapshot(head=dirs["head"], base=dirs["base"])
+        problems = out.problems()
+        if problems:
+            raise PipelineError("config", "agentic PR snapshot refused: " + "; ".join(problems)[:300])
+        return out, parent
+    except BaseException:
+        shutil.rmtree(parent, ignore_errors=True)
+        raise
+
+
 def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider, opencode_factory=OpenCodeFreeProvider,
-               claude_factory=ClaudeCliProvider):
+               claude_factory=ClaudeCliProvider, snapshot=None):
     """The live Terra adapter for this run (its offline CLI/prompt-isolation preflight runs here, before any output
     exists), or a DisabledProvider when no role uses openai. An unsupported CLI is a typed config refusal.
     An opencode arm gets CliProviders(DisabledProvider("openai"), OpenCodeFreeProvider) (its offline preflight - exact CLI
@@ -138,9 +177,13 @@ def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider, opencode_f
         if needs(profile, "openai") or needs(profile, "anthropic") or needs(profile, "opencode"):
             raise PipelineError("config", "live mixed claude-cli arms are not supported")
         models = sorted({s["model"] for s in [*profile["roles"].values(), *profile.get("alternates", {}).values()]})
+        # impact@v19: a role in agentic mode needs the adapter opened agentic, with the run's PR snapshot (export_snapshot)
+        kw = {"agentic": True, "agentic_snapshot": snapshot} if agentic.is_agentic_profile(profile) else {}
+        if kw and snapshot is None:
+            raise PipelineError("config", "an agentic claude-cli review needs the run's PR snapshot (benchmark host only)")
         try:
             return CliProviders(DisabledProvider("openai"), DisabledProvider("opencode"),
-                                claude_factory(enabled=True, ledger=ledger, run_scope=scope, models=models))
+                                claude_factory(enabled=True, ledger=ledger, run_scope=scope, models=models, **kw))
         except ClaudeCliUnsupported as e:
             raise PipelineError("config", f"claude-cli isolation preflight failed: {str(e)[:300]}") from e
     if needs(profile, "opencode"):

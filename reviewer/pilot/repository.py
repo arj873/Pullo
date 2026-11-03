@@ -30,7 +30,7 @@ from reviewer.gateway import AuthorizationError, DisabledProvider, SpendBook, tr
 from reviewer.historical.bridge import _check_out, _validated
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
-from reviewer.pipeline import repocov
+from reviewer.pipeline import agentic, repocov
 from reviewer.repoimport import (RepoImportError, github_remote, load_import_pins, open_import, target_dir)
 from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_USD_MICROS, load_openrouter_key
 from reviewer.runtime.catalog import worst_case_router_micros
@@ -43,7 +43,7 @@ from .launcher import PilotError, _Unused, _force_cleanup
 from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
                         open_terra_state, plan_providers, repair_bound, scrub_of, worst_case)
 from .profile import RUN_CEILING_USD_MICROS, profile_repairs
-from .repository_profile import repository_plan, repository_policy, repository_profile
+from .repository_profile import V19_RUN_CEILING_USD_MICROS, repository_plan, repository_policy, repository_profile
 
 MODES = ("plan", "live", "replay")
 CONFIG_SCHEMA = "pilot-repository-config@1"
@@ -416,7 +416,10 @@ def _check_ceiling(ledger: RuntimeLedger, plan: dict) -> None:
     t = ledger.totals()
     if t["committedUsdMicros"] + plan["budget"]["maxUsdMicros"] > TRIAL_TOTAL_USD_MICROS:
         raise RepositoryError("aggregate allowance cannot cover the run ceiling")
-    if plan["budget"]["maxUsdMicros"] != RUN_CEILING_USD_MICROS:
+    # the Plan's own reviewed ceiling: an impact@v19 Plan (exactly its specialists) needs V19_RUN_CEILING_USD_MICROS; every
+    # other Plan still needs exactly RUN_CEILING_USD_MICROS
+    reviewed = V19_RUN_CEILING_USD_MICROS if agentic.is_v19_plan(plan) else RUN_CEILING_USD_MICROS
+    if plan["budget"]["maxUsdMicros"] != reviewed:
         raise RepositoryError("run ceiling differs from the reviewed pilot ceiling")
 
 

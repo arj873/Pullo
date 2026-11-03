@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from reviewer.historical.bridge import _check_out
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
 from reviewer.pipeline import prompts, repocov
+from reviewer.pipeline.agentic import is_agentic_profile
 from reviewer.repoimport import RepoImportError, github_remote, load_import_pins, open_import, target_dir
 from reviewer.repoimport.fsio import read_nofollow
 from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_USD_MICROS, load_openrouter_key
@@ -43,7 +45,7 @@ from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gatewa
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
 from .profile import ProfileError
-from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
+from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, export_snapshot, live_arm, live_terra, needs,
                         open_terra_state, plan_providers, scrub_of, worst_case)
 from .repository_profile import (ALT_IMPACT_VERSIONS, DEFAULT_IMPACT_VERSION, IMPACT_VERSIONS, check_experiment,
                                  repository_plan, repository_policy, repository_profile)
@@ -767,7 +769,20 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
     except PipelineError as e:
         raise BenchmarkLaunchError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
-    terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat))    # CLI preflight before any output
+    snapshot = snap_dir = None
+    if is_agentic_profile(profile):              # impact@v19: the agentic session's PR snapshot, removed after the run
+        snapshot, snap_dir = export_snapshot(ing.base, ing.head)
+    try:
+        terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat), snapshot=snapshot)    # CLI preflight
+        return _live_run(o, ing, cfg, out, evr, handle, book, ledger, profile, plan, policy, terra, transport, key_loader,
+                         runner)
+    finally:
+        if snap_dir is not None:
+            shutil.rmtree(snap_dir, ignore_errors=True)
+
+
+def _live_run(o, ing, cfg, out, evr, handle, book, ledger, profile, plan, policy, terra, transport, key_loader, runner):
+    """live_mode after every launch check: output, key (an OpenRouter arm only), the run and its report."""
     runs = make_out(out)
     key = None
     try:
