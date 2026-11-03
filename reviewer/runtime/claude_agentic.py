@@ -27,12 +27,17 @@ run's PR snapshot. Two independent walls, both proved offline on the real 2.1.31
     turn's tool_use ids (text only, size-capped); (e) the session deadline has not passed; (f) PACING admission: the measured pacing of
     the responses so far + this request's worst case <= budgetUsdMicros; (g) no earlier response was served from extra usage (latched
     per request). Anything else (a compaction/summary request, a max_tokens continuation, an extra user turn, a tampered turn) is
-    refused with a 404 and the session ends. Each relay has a per-request deadline = the role timeout. The SSE tally keeps no text.
+    refused with a 404 and the session ends: EVERY refusal is terminal (gate F1: the first refusal sets `stopped`; nothing is relayed
+    after it), and from the second request a relayed turn holding a tool_use outside Read/Grep/Glob ends it too (gate F2: the
+    forwarder enforces the tool set on its own, besides the stream audit). Each relay has a per-request deadline = the role timeout.
+    The SSE tally keeps no text.
   * STREAM AUDIT (AgenticStreamAudit): as isolated@5, except that a tool_use of Read/Grep/Glob and a user event made only of
     tool_result blocks for pending ids are admitted and counted; any other tool_use (or server tool) kills the run at its block
     (tool-attempt), init must offer exactly [Glob, Grep, Read], permissionMode dontAsk, cwd /pullo/head, no MCP/skill/command.
   * The snapshot (Snapshot: head, base) is host-trusted, given to the adapter per run (agentic_snapshot=), never in a request: absolute,
-    real (no symlink component), a directory, no top-level .git or .env, not under the user home. The gateway reserves the whole
+    real (no symlink component), a directory, no top-level .git or .env, not under the user home or the reviewer repository, and
+    no regular file with more than one hard link (gate F3: a hard link would be the host file itself). export_snapshot builds one
+    FRESH from `git archive` of a full commit id (tarfile's data filter; git archive makes no hard links). The gateway reserves the whole
     budgetUsdMicros for the call; the result's usage is the session total (cross-checked against the forwarder's SSE sum)."""
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ import os
 import re
 import shutil
 import ssl
+import stat
+import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -121,7 +129,76 @@ class Snapshot:
                 out.append(f"snapshot {name} is under the user home")
             if C.under(d, str(C.REPO_ROOT)):
                 out.append(f"snapshot {name} is inside the reviewer repository")
+            n, first = _hardlinked(d)
+            if n:
+                out.append(f"snapshot {name} holds {n} regular file(s) with more than one hard link (first: {first[:120]}); a "
+                           "snapshot is extracted fresh from git archive (export_snapshot)")
         return out
+
+
+def _hardlinked(d: str) -> tuple[int, str | None]:
+    """(count, first relative path) of regular files under `d` with st_nlink > 1 (symlinks are not followed); an unwalkable
+    tree counts as (1, '<unreadable>')."""
+    n, first = 0, None
+
+    def boom(e):
+        raise e
+    try:
+        for root, _dirs, files in os.walk(d, onerror=boom, followlinks=False):
+            for f in files:
+                st = os.lstat(os.path.join(root, f))
+                if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                    n += 1
+                    first = first or os.path.relpath(os.path.join(root, f), d)
+    except OSError:
+        return 1, "<unreadable>"
+    return n, first
+
+
+def export_snapshot(repo: str, rev: str, dest: str, *, timeout: float = 600) -> dict:
+    """Gate F3 (the phase-2 snapshot builder): a FRESH snapshot of commit `rev` (full id) of git repository `repo` at `dest` (must not
+    exist): `git archive` streamed into tarfile's 'data' filter (no absolute or escaping member path, no device/fifo; hard links are
+    refused - git archive makes none). A symlink whose target leaves the snapshot is skipped and counted (inside the sandbox it
+    would point at nothing anyway). The result must pass Snapshot.problems. -> {"dest", "files", "skippedSymlinks"}."""
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", rev or ""):
+        raise ValueError("rev must be a full commit id")
+    if os.path.lexists(dest):
+        raise ValueError("snapshot destination exists (a snapshot is always extracted fresh)")
+    os.makedirs(dest, mode=0o755)
+    skipped, files = [], 0
+
+    def keep(m, path):
+        nonlocal files
+        if m.islnk() or m.ischr() or m.isblk() or m.isfifo():
+            raise ValueError(f"snapshot archive member is a hard link or device: {m.name[:120]}")
+        try:
+            out = tarfile.data_filter(m, path)
+        except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError):
+            skipped.append(m.name[:120])
+            return None
+        files += m.isreg()
+        return out
+    proc = subprocess.Popen(["git", "-C", repo, "archive", "--format=tar", rev], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        try:
+            with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
+                tf.extractall(dest, filter=keep)
+        except tarfile.TarError as e:
+            proc.wait(timeout=timeout)
+            raise ValueError("git archive gave no valid tar: " + proc.stderr.read().decode("utf-8", "replace")[:200]) from e
+        err = proc.stderr.read()
+        if proc.wait(timeout=timeout) != 0:
+            raise ValueError("git archive failed: " + err.decode("utf-8", "replace")[:200])
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    probs = Snapshot(os.path.realpath(dest)).problems()
+    if probs:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise ValueError("; ".join(probs))
+    return {"dest": os.path.realpath(dest), "files": files, "skippedSymlinks": skipped}
 
 
 def agentic_prompt(request: dict) -> str:
@@ -499,7 +576,7 @@ class AgenticSession:
     blocks: dict = field(default_factory=dict)      # type -> n (SSE, all responses)
     overage: bool = False
     rate_headers: dict = field(default_factory=dict)
-    stopped: str | None = None                      # a STOP_REASONS refusal is sticky: every later request gets it too
+    stopped: str | None = None                      # gate F1: the first refusal, terminal (every later request gets it too)
 
     def _paced(self, u, w) -> int:
         keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
@@ -531,7 +608,14 @@ class AgenticSession:
         return None
 
     def _check(self, body: dict, raw: bytes) -> str | None:
-        """Under the forwarder lock: the refusal reason, or None (then the request is counted and admitted)."""
+        """Under the forwarder lock: the refusal reason, or None (then the request is counted and admitted). Gate F1: every refusal
+        is terminal - it sets `stopped`, so every later request of the session is refused too."""
+        why = self._audit(body, raw)
+        if why:
+            self.stopped = self.stopped or why
+        return why
+
+    def _audit(self, body: dict, raw: bytes) -> str | None:
         why = self._state()
         if why:
             return why
@@ -547,6 +631,8 @@ class AgenticSession:
             if [m["role"] for m in msgs] != ["user", "system"]:
                 return "first-request-messages"
         else:
+            if any(b["type"] == "tool_use" and b.get("name") not in AGENTIC_TOOLS for b in self.last or []):
+                return "tool-outside-set"                 # gate F2: the relayed turn called a tool outside Read/Grep/Glob
             if (sys_sha, meta_sha) != (self.system_sha, self.metadata_sha):
                 return "system-or-metadata-changed"
             n = len(self.prev)
@@ -560,7 +646,6 @@ class AgenticSession:
                 return why
         worst = claude_cli_worst_case_micros(self.model, len(raw), self.max_tokens)
         if self.spent() + worst > self.budget:
-            self.stopped = "agentic-budget"
             return "agentic-budget"
         if self.prev is None:
             self.system_sha, self.metadata_sha = sys_sha, meta_sha
@@ -573,8 +658,10 @@ class AgenticSession:
     def post(self, fwd, h, slot, raw: bytes) -> None:
         with fwd._lock:
             why = self._state()
+            if why is not None:
+                self.refused.append(why)
+                self.stopped = self.stopped or why
         if why is not None:
-            self.refused.append(why)
             return h._refuse(slot, why)
         try:
             body = loads_strict(raw)
@@ -588,9 +675,9 @@ class AgenticSession:
                 if why is None:
                     slot.forwarded += 1
         if why is not None:
-            self.refused.append(why)
-            if why in STOP_REASONS:
-                self.stopped = why
+            with fwd._lock:
+                self.refused.append(why)
+                self.stopped = self.stopped or why            # gate F1: every refusal is terminal
             return h._refuse(slot, why)
         slot.attempts.append({"method": "POST", "path": C.FORWARD_PATH, "verdict": "forwarded"})
         slot.body_bytes, slot.body_sha256 = len(raw), hashlib.sha256(raw).hexdigest()

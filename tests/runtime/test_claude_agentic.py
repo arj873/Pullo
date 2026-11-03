@@ -164,6 +164,49 @@ class Settings(unittest.TestCase):
             with mock.patch.object(C, "real_home", return_value=d):
                 self.assertTrue(A.Snapshot(ok).problems())
 
+    def test_gate_f3_a_hard_link_inside_the_snapshot_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            host = Path(d, "host-secret.txt")
+            host.write_text("PULLO-HOST-SECRET")
+            for sub in ("head", "base"):
+                snap = Path(d, sub + "-snap")
+                (snap / "src").mkdir(parents=True)
+                (snap / "src/a.py").write_text("x = 1")
+                self.assertEqual(A.Snapshot(str(snap)).problems(), [])
+                os.link(host, snap / "src/linked.txt")
+                pr = A.Snapshot(str(snap)).problems() if sub == "head" else A.Snapshot(str(Path(d, "head-snap")), str(snap)).problems()
+                self.assertTrue(any("hard link" in x and "linked.txt" in x for x in pr), pr)
+
+    def test_gate_f3_export_snapshot_extracts_fresh_from_git_archive(self):
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("needs git")
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d, "repo")
+            (repo / "src").mkdir(parents=True)
+            (repo / "src/a.py").write_text("x = 1\n")
+            os.symlink("a.py", repo / "src/inside-link")
+            os.symlink("/etc/passwd", repo / "src/outside-link")
+            g = [git, "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@localhost", "-c", "commit.gpgsign=false"]
+            env = {"PATH": "/usr/bin:/bin", "HOME": d, "GIT_CONFIG_NOSYSTEM": "1"}
+            for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "c"]):
+                subprocess.run(g + cmd, check=True, env=env, capture_output=True)
+            rev = subprocess.run(g + ["rev-parse", "HEAD"], check=True, env=env, capture_output=True, text=True).stdout.strip()
+            with mock.patch.dict(os.environ, env):
+                out = A.export_snapshot(str(repo), rev, os.path.join(d, "snap"))
+                self.assertEqual((out["files"], out["skippedSymlinks"]), (1, ["src/outside-link"]))
+                snap = Path(out["dest"])
+                self.assertEqual(((snap / "src/a.py").read_text(), os.readlink(snap / "src/inside-link")), ("x = 1\n", "a.py"))
+                self.assertFalse((snap / ".git").exists() or (snap / "src/outside-link").exists())
+                self.assertEqual(A.Snapshot(out["dest"]).problems(), [])
+                with self.assertRaises(ValueError):
+                    A.export_snapshot(str(repo), rev, out["dest"])                     # never into an existing dir
+                with self.assertRaises(ValueError):
+                    A.export_snapshot(str(repo), "HEAD", os.path.join(d, "snap2"))     # a full commit id only
+                with self.assertRaises(ValueError):
+                    A.export_snapshot(str(repo), "0" * 40, os.path.join(d, "snap3"))   # unknown commit: nothing left behind
+                self.assertFalse(os.path.exists(os.path.join(d, "snap3")))
+
 
 HOSTILE = {"PATH": "/home/operator/bin:/usr/bin", "HOME": "/home/operator", "OPENROUTER_API_KEY": "sk-or-v1-" + "f4k3" * 12,
            "ANTHROPIC_API_KEY": "sk-ant-api03-x", "ANTHROPIC_BASE_URL": "http://evil", "CLAUDE_CODE_OAUTH_TOKEN": "t",
@@ -213,6 +256,23 @@ class SessionProtocol(unittest.TestCase):
             self.assertEqual(self.started()._check(b, b"x"), why, why)
         self.assertEqual(session()._check(body(FIRST + [RESULT]), b"x"), "first-request-messages")
         self.assertEqual(session(tools_sha=None)._check(body(FIRST), b"x"), "tools")      # unpinned CLI: nothing is relayed
+
+    def test_gate_f1_every_refusal_is_terminal(self):
+        for b in (body(SECOND, tool_choice={"type": "any"}), body(SECOND, tools=[]), body(SECOND[:3])):
+            s = self.started()
+            why = s._check(b, b"x")
+            self.assertTrue(why)
+            self.assertEqual((s._check(body(SECOND), b"x"), s.stopped, len(s.usages)), (why, why, 1), why)
+
+    def test_gate_f2_a_relayed_tool_outside_read_grep_glob_ends_the_session(self):
+        for name in ("Bash", "Write", "WebFetch", "Agent", "mcp__x__y"):
+            s = self.started()
+            s.last = [dict(DETAIL[0]), dict(DETAIL[1], name=name)]
+            m = copy.deepcopy(SECOND)
+            m[2]["content"][1]["name"] = name
+            self.assertEqual(s._check(body(m), b"x"), "tool-outside-set", name)
+            self.assertEqual(s._check(body(SECOND), b"x"), "tool-outside-set", name)   # and terminal
+            self.assertEqual(len(s.usages), 1)
 
     def test_cache_control_moves_and_the_env_message_form_change_are_admitted(self):
         s = self.started()
@@ -345,23 +405,39 @@ class ForwarderRoundTrip(unittest.TestCase):
         slot.agentic = session(**over)
         return slot
 
-    def test_relays_audited_turns_and_refuses_the_rest(self):
+    def test_relays_audited_turns_up_to_the_cap(self):
         self.assertEqual(os.stat(os.path.dirname(self.sock)).st_mode & 0o777, 0o700)
         slot = self.open(max_requests=2)
         status, data = self.post(slot, body(FIRST))
         self.assertEqual((status, data), (200, RESPONSE))
         self.assertEqual(slot.agentic.pending, ["toolu_1"])
-        bad = copy.deepcopy(SECOND)
-        bad[2]["content"][1]["input"] = {"file_path": "/etc/passwd"}
-        self.assertEqual(self.post(slot, body(bad))[0], 404)
         self.assertEqual(self.post(slot, body(SECOND))[0], 200)
         self.assertEqual(self.post(slot, body(SECOND))[0], 404)                       # cap 2
         f = slot.agentic.facts(slot)
         self.assertEqual((f["version"], f["requestsSent"], f["agenticRefused"], f["toolUses"], len(self.log)),
-                         ("claude-loopback-forwarder@4", 2, ["assistant-turn-tool-use", "agentic-max-requests"], {"Read": 2}, 2))
+                         ("claude-loopback-forwarder@4", 2, ["agentic-max-requests"], {"Read": 2}, 2))
         self.assertEqual(f["usageSum"], {"input_tokens": 1800, "cache_read_input_tokens": 200, "cache_creation_input_tokens": 100,
                                          "output_tokens": 80})
         self.assertNotIn("PULLO-SECRET-THOUGHT", json.dumps(f))
+
+    def test_gate_f1_a_refusal_ends_the_session_and_nothing_is_relayed_after_it(self):
+        for first_bad in ("tampered", "not-streaming", "tool_choice"):
+            slot = self.open(max_requests=6)
+            self.assertEqual(self.post(slot, body(FIRST))[0], 200)
+            n = len(self.log)
+            bad = copy.deepcopy(SECOND)
+            if first_bad == "tampered":
+                bad[2]["content"][1]["input"] = {"file_path": "/etc/passwd"}
+                b = body(bad)
+            elif first_bad == "not-streaming":
+                b = body(SECOND, stream=False)
+            else:
+                b = body(SECOND, tool_choice={"type": "any"})
+            self.assertEqual(self.post(slot, b)[0], 404)
+            self.assertEqual(self.post(slot, body(SECOND))[0], 404, first_bad)       # conforming, but the session has ended
+            self.assertEqual(self.post(slot, body(SECOND))[0], 404, first_bad)
+            r = slot.agentic.refused
+            self.assertEqual((len(self.log), slot.forwarded, len(r), len(set(r)), slot.agentic.stopped), (n, 1, 3, 1, r[0]), first_bad)
 
     def test_overage_latches_per_request_and_a_plain_slot_still_relays_one_post(self):
         self.srv.shutdown()
