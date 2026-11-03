@@ -168,6 +168,7 @@ class Rules(unittest.TestCase):
               "retryableByReask": True}
         self.assertTrue(agentic.is_tool_attempt({"code": "provider-error", "detail": ok}))
         for err in ({"code": "provider-error", "detail": dict(ok, retryableByReask=False)},
+                    {"code": "provider-error", "detail": dict(ok, reason="isolation-violation")},   # another reason
                     {"code": "provider-error", "detail": {k: v for k, v in ok.items() if k != "retryableByReask"}},
                     {"code": "schema-invalid", "detail": ok},
                     {"code": "provider-error", "detail": {"reason": "isolation-violation", "itemType": "tool-attempt"}},
