@@ -151,12 +151,16 @@ def export_snapshot(base, head) -> tuple:
         for name, snap in (("head", head), ("base", base)):
             d = dirs[name] = os.path.join(parent, name)
             os.mkdir(d, 0o755)
-            for e in snap.manifest["entries"]:
+            made = {d}
+            for e in snap.manifest["entries"]:          # one pass; each read verifies against its own pinned entry
                 if e["type"] not in ("file", "executable") or e["path"].split("/")[0] in AGENTIC_SNAPSHOT_SKIPPED_TOP:
                     continue
-                data = read_verified(snap.root, snap.manifest, e["path"])
+                data = read_verified(snap.root, {"entries": [e]}, e["path"])     # linear: no manifest scan per file
                 dest = os.path.join(d, *e["path"].split("/"))
-                os.makedirs(os.path.dirname(dest), mode=0o755, exist_ok=True)
+                parent_dir = os.path.dirname(dest)
+                if parent_dir not in made:
+                    os.makedirs(parent_dir, mode=0o755, exist_ok=True)
+                    made.add(parent_dir)
                 with open(dest, "xb") as f:
                     f.write(data)
                 os.chmod(dest, 0o755 if e["type"] == "executable" else 0o644)

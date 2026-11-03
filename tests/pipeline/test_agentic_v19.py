@@ -54,16 +54,16 @@ AUTH19 = {"schema": "spend-authorization@1", "id": "v19-test", "issuedBy": "oper
           "models": ["synthetic-fixture", CLI], "maxUsdMicrosPerRun": 10_000_000, "maxUsdMicrosTotal": 100_000_000}
 
 
-def cli(agent, ordinal, output, attempt=0):
+def cli(agent, ordinal, output, attempt=0, usage=None):
     """A scripted answer of the agentic claude-cli session (one call; it explored inside its sandbox)."""
     r = resp({"contextRequests": [], "output": output})
-    r["resolvedModel"], r["usage"] = CLI, dict(USAGE)
+    r["resolvedModel"], r["usage"] = CLI, dict(usage or USAGE)
     return entry("INVESTIGATE", "investigator", agent, ordinal, attempt, response=r)
 
 
-def cli_bad(agent, ordinal):
+def cli_bad(agent, ordinal, usage=None):
     return [entry("INVESTIGATE", "investigator", agent, ordinal, a, response=dict(
-        resp(None, status="invalid-output", raw="{half"), resolvedModel=CLI, usage=dict(USAGE))) for a in (0, 1)]
+        resp(None, status="invalid-output", raw="{half"), resolvedModel=CLI, usage=dict(usage or USAGE))) for a in (0, 1)]
 
 
 class FakeAgentic:
@@ -159,7 +159,9 @@ class Rules(unittest.TestCase):
                          prompts.judge_task(V3_PROFILE["roles"]["judge"]["promptVersion"]) + " " + prompts.V19_JUDGE_RULE)
         d = agentic.identity_doc(V19_POLICY, V19_PLAN["budget"], 50, 5)
         self.assertEqual((d["session"]["maxRequests"], d["session"]["sessionDeadlineSec"], d["session"]["budgetUsdMicros"],
-                          d["judge"]["dropReason"]), (30, 900, 5_000_000, "below-threshold"))
+                          d["judge"]["dropReason"]), (30, 900, 2_000_000, "below-threshold"))
+        self.assertEqual(agentic.session_need({"params": {"agentic": agentic.spec()}}, 1), 4_000_000)
+        self.assertEqual(agentic.session_need({"params": {}}, 1), 0)
 
     def test_live_hosts_accept_exactly_each_plans_reviewed_ceiling(self):
         class Ledger:
@@ -285,6 +287,39 @@ class EndToEnd(V19Rig):
         self.assertTrue(all(e["request"]["params"]["agentic"] == agentic.spec() for e in calls))
         self.assertEqual(len(comments_of(res)), 3)
 
+    def investigate_cost(self, res):
+        return sum(e["record"]["usdMicros"] for e in events_of(res) if e["type"] == "cost"
+                   and e["record"]["stage"] == "INVESTIGATE")
+
+    def test_b1_the_out_of_schema_scenario_keeps_investigate_under_its_top_and_verify_judge_their_room(self):
+        from reviewer.pipeline import deepcov
+        m = self.case12()
+        hl, hb, hs = self.h_lib(m), self.h_b(m), self.h_svc(m)
+        scr, ids = self.run19(m, session=[*cli_bad(A, 0), cli(R, 0, {"hypotheses": [hl, hb, hs]})])
+        res, _ = self.record_v19(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        top = deepcov.spend_top(V19_PLAN["budget"])
+        costs = [e["record"] for e in events_of(res) if e["type"] == "cost" and e["record"]["stage"] == "INVESTIGATE"]
+        self.assertEqual([c["reservedUsdMicros"] for c in costs], [agentic.BUDGET_USD_MICROS] * 3)   # call, repair, re-ask
+        self.assertLessEqual(self.investigate_cost(res), top)
+        self.assertTrue(model_calls(res, "VERIFY") and model_calls(res, "JUDGE"))
+        # two calls' worst case (2 x 4M) exceeds the 6.5M top: the re-ask is sent only while the first call spent <= 2.5M
+        self.assertEqual((top, agentic.session_need({"params": {"agentic": agentic.spec()}}, 1)), (6_500_000, 4_000_000))
+
+    def test_b1_a_re_ask_that_would_not_fit_the_top_is_a_typed_budget_stop(self):
+        rate = V19_PROFILE["roles"]["investigator"]["price"]["inputPerMTokUsdMicros"]
+        heavy = dict(USAGE, uncachedInputTokens=1_300_000 * 1_000_000 // rate)  # each session spends ~1.3M PACING micros
+        m = self.case12()
+        hl = self.h_lib(m)
+        res, _ = self.record_v19(m, script(*cli_bad(A, 0, usage=heavy), cli(R, 0, {"hypotheses": [hl]})))
+        self.assertNotIn(R, {e["agentId"] for e in inv_calls(res)})
+        err = next(e["error"] for e in events_of(res) if e["type"] == "error" and e["error"]["code"] == "budget-exhausted")
+        self.assertEqual((err["detail"]["scope"], err["detail"]["rule"], err["detail"]["sessionWorstCaseUsdMicros"]),
+                         ("agentic-session", agentic.ADMISSION_RULE, 4_000_000))
+        self.assertGreater(err["detail"]["spentUsdMicros"] + 4_000_000, err["detail"]["ceilingUsdMicros"])
+        self.assertEqual(res.status, "failed")                                   # no answer: V1, nothing later runs
+        self.assertEqual(model_calls(res, "VERIFY"), [])
+
     def test_v16_is_untouched_by_the_v19_paths(self):
         from tests.pipeline.test_whole_v16 import V16Rig as R16
         self.assertTrue(issubclass(R16, V16Rig))
@@ -329,6 +364,18 @@ class Host(V19Rig):
             self.assertEqual(Path(snap.head, "src/b.py").read_text(), "SAME = 1\n")
         finally:
             shutil.rmtree(parent)
+
+    def test_info1_the_export_is_linear_one_pinned_entry_per_verified_read(self):
+        m = self.case12()
+        seen, real = [], PV.read_verified
+
+        def spy(root, manifest, path, **kw):
+            seen.append(len(manifest["entries"]))
+            return real(root, manifest, path, **kw)
+        with mock.patch.object(PV, "read_verified", spy):
+            snap, parent = PV.export_snapshot(m.base, m.head)
+        shutil.rmtree(parent)
+        self.assertTrue(seen and set(seen) == {1})                               # no whole-manifest scan per file
 
     def test_live_terra_opens_the_adapter_agentic_with_the_snapshot_and_refuses_without_one(self):
         c = resolve_config(ROOT / "pullo-claude-cli-sj.toml").models

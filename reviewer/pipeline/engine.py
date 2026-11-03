@@ -467,6 +467,16 @@ class Engine:
         schema = request["outputSchema"]
         if self._spend_ceiling is not None and stage == "INVESTIGATE" and role == "investigator":
             spent = self.stage_spend(stage)
+            need = (agentic.session_need(request, self.profile["roles"][role]["caps"]["maxRepairs"])
+                    if self.v19 else 0)          # v19 (agentic.ADMISSION_RULE): the session and its repair must fit
+            if need and spent + need > self._spend_ceiling:
+                err = typed_error("budget-exhausted", f"reviewer {agent}: an agentic session and its repair ({need} PACING "
+                                  "micros) no longer fit the INVESTIGATE top", stage=stage,
+                                  detail={"scope": "agentic-session", "rule": agentic.ADMISSION_RULE,
+                                          "spentUsdMicros": spent, "sessionWorstCaseUsdMicros": need,
+                                          "ceilingUsdMicros": self._spend_ceiling})
+                self.recorder.append("error", error=err)
+                return None, err, []
             if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
                 sweep = self.agent_label(agent) != "specialist"
                 alt = self.cross and prompts.is_alt_lane(agent)
