@@ -163,13 +163,17 @@ class Rules(unittest.TestCase):
         self.assertEqual(agentic.session_need({"params": {"agentic": agentic.spec()}}, 1), 4_000_000)
         self.assertEqual(agentic.session_need({"params": {}}, 1), 0)
 
-    def test_is_tool_attempt_knows_both_forms(self):
-        self.assertTrue(agentic.is_tool_attempt({"code": "provider-error", "detail": {
-            "reason": "isolation-violation", "itemType": "tool-attempt"}}))
-        self.assertTrue(agentic.is_tool_attempt({"code": agentic.TOOL_ATTEMPT_CODE}))     # ccprov's distinct code
-        for err in ({"code": "provider-error", "detail": {"reason": "isolation-violation", "itemType": "forbidden-work-entry"}},
-                    {"code": "provider-error", "detail": {"itemType": "tool-attempt"}}, {"code": "schema-invalid"}, None):
-            self.assertFalse(agentic.is_tool_attempt(err))
+    def test_is_tool_attempt_keys_on_the_adapters_reason_and_retryable_by_reask(self):
+        ok = {"reason": "agentic-tool-attempt", "itemType": "tool-attempt", "attemptedTools": ["json"],
+              "retryableByReask": True}
+        self.assertTrue(agentic.is_tool_attempt({"code": "provider-error", "detail": ok}))
+        for err in ({"code": "provider-error", "detail": dict(ok, retryableByReask=False)},
+                    {"code": "provider-error", "detail": {k: v for k, v in ok.items() if k != "retryableByReask"}},
+                    {"code": "schema-invalid", "detail": ok},
+                    {"code": "provider-error", "detail": {"reason": "isolation-violation", "itemType": "tool-attempt"}},
+                    {"code": "provider-error", "detail": {"reason": "isolation-violation", "itemType": "forbidden-work-entry"}},
+                    None):
+            self.assertFalse(agentic.is_tool_attempt(err), err)
 
     def test_live_hosts_accept_exactly_each_plans_reviewed_ceiling(self):
         class Ledger:
@@ -329,11 +333,13 @@ class EndToEnd(V19Rig):
         self.assertEqual(model_calls(res, "VERIFY"), [])
 
     def tool_kill(self, agent, ordinal=0):
-        """The adapter's end of a session whose model tried a tool outside Read/Grep/Glob (today's form; nothing ran)."""
+        """The adapter's end of a session whose model tried a tool outside Read/Grep/Glob (claude_agentic ecdc1f1's shape:
+        reason agentic-tool-attempt, retryableByReask; the sentry93824 case called a `json` tool; nothing ran)."""
         return entry("INVESTIGATE", "investigator", agent, ordinal, error={
-            "code": "provider-error", "message": "isolation violation: the model attempted a tool outside Read/Grep/Glob",
+            "code": "provider-error", "message": "the model attempted a tool outside Read/Grep/Glob; re-ask in a fresh session",
             "retryable": False, "stage": "INVESTIGATE",
-            "detail": {"reason": "isolation-violation", "itemType": "tool-attempt", "requestsSent": 1}})
+            "detail": {"reason": "agentic-tool-attempt", "itemType": "tool-attempt", "attemptedTools": ["json"],
+                       "retryableByReask": True, "requestsSent": 7, "maxRequestsPerCall": 30}})
 
     def test_tool_attempt_is_re_asked_once_in_a_fresh_session_told_which_tools_exist(self):
         m = self.case12()

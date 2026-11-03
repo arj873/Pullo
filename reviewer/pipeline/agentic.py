@@ -12,9 +12,9 @@ Rule (BEHAVIOR):
              is sent only while INVESTIGATE spend so far + session_need (BUDGET_USD_MICROS x (1 + repairs)) fits deepcov's
              INVESTIGATE top (6.5M of the 10M v19 ceiling), else it is a typed budget stop; so INVESTIGATE never spends past
              the top and VERIFY + JUDGE keep at least 3.5M (the re-ask runs only while the first call spent <= 2.5M);
-  tools      (TOOL_REASK_RULE) a session the adapter ended because the model tried a tool outside Read/Grep/Glob
-             (is_tool_attempt: ccprov's TOOL_ATTEMPT_CODE, or today's provider-error whose detail is reason
-             isolation-violation, itemType tool-attempt; nothing ran) is re-asked like schema-reask@1: ONE fresh session
+  tools      (TOOL_REASK_RULE) a session the adapter ended because the model tried a tool outside Read/Grep/Glob, e.g. a
+             `json` tool to emit its answer (is_tool_attempt: provider-error whose detail.reason is TOOL_ATTEMPT_REASON with
+             retryableByReask, claude_agentic ecdc1f1; nothing ran) is re-asked like schema-reask@1: ONE fresh session
              `whole-reask` whose task ends with prompts.V19_TOOL_NOTE, under ADMISSION_RULE; the first end is a note
              (review.md counts it); a second end of any kind fails INVESTIGATE (V1);
   session    the investigator role of a v19 profile carries params.agentic = spec() (catalog.claude_cli_agentic_spec:
@@ -50,7 +50,7 @@ SESSION_DEADLINE_SEC = 900        # catalog.CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC
 BUDGET_USD_MICROS = 2_000_000     # PACING per session (gate-v19 B1): see ADMISSION_RULE
 ADMISSION_RULE = "agentic-admission@1"
 TOOL_REASK_RULE = prompts.TOOL_REASK_VERSION
-TOOL_ATTEMPT_CODE = "agentic-tool-attempt"      # ccprov's distinct code (once the contracts carry it)
+TOOL_ATTEMPT_REASON = "agentic-tool-attempt"    # claude_agentic (ecdc1f1): error.detail.reason of the kill, retryableByReask
 HOPS = 1
 
 TEXT = ("one agentic read-only claude-cli session (Read/Grep/Glob over the PR snapshot, at most MAX_REQUESTS requests "
@@ -69,12 +69,13 @@ def spec() -> dict:
 
 
 def is_tool_attempt(err: dict | None) -> bool:
-    """TOOL_REASK_RULE: the adapter ended the session because the model tried a tool outside Read/Grep/Glob (nothing ran)."""
+    """TOOL_REASK_RULE: the adapter ended the session because the model tried a tool outside Read/Grep/Glob (nothing ran;
+    claude_agentic marks the kill reason TOOL_ATTEMPT_REASON, retryableByReask)."""
     if not isinstance(err, dict):
         return False
     d = err.get("detail") if isinstance(err.get("detail"), dict) else {}
-    return err.get("code") == TOOL_ATTEMPT_CODE or (
-        err.get("code") == "provider-error" and d.get("reason") == "isolation-violation" and d.get("itemType") == "tool-attempt")
+    return (err.get("code") == "provider-error" and d.get("reason") == TOOL_ATTEMPT_REASON
+            and d.get("retryableByReask") is True)
 
 
 def session_need(request: dict, max_repairs: int) -> int:
@@ -119,8 +120,8 @@ def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: in
     """Everything about impact@v19 that is not a template digest or v16's (bound into the config identity)."""
     return {"behavior": BEHAVIOR, "agent": AGENT, "planMarker": PLAN_MARKER, "text": TEXT, "hops": HOPS,
             "session": {"rule": SESSION_RULE, **spec()}, "judge": {"rule": JUDGE_RULE, "dropReason": "below-threshold"},
-            "toolReask": {"rule": TOOL_REASK_RULE, "code": TOOL_ATTEMPT_CODE,
-                          "detail": {"reason": "isolation-violation", "itemType": "tool-attempt"}},
+            "toolReask": {"rule": TOOL_REASK_RULE, "code": "provider-error",
+                          "detail": {"reason": TOOL_ATTEMPT_REASON, "retryableByReask": True}},
             "admission": {"rule": ADMISSION_RULE, "maxAgenticCalls": 2, "sessionsPerCall": 2,
                           "investigateTopBp": deepcov.INVESTIGATE_TOP_BP},
             "verify": {"rule": deepcov.VERIFY_RULE, "maxVerify": deepcov.MAX_VERIFY},
