@@ -136,6 +136,12 @@ remote-settings / policy suppression and the token-on-fd path are unchanged.
     token estimate and no thinking text kept; a scripted tool call (also one after thinking) is reported, never executed;
     a 401 and a 404 reach upstream exactly once and latch; a subscription usage limit keeps the CLI's words and latches; an
     extra-usage answer latches and is never $0.
+AGENTIC READ-ONLY mode (claude-cli-isolated@6, reviewer.runtime.claude_agentic; root BUILD GO 2026-11-03): DEFAULT OFF. Only a
+request whose role params carry params.agentic, on an adapter opened with agentic=True, a preflight that ran the agentic capture
+proofs and the run's PR snapshot, takes that path (Read/Grep/Glob over the snapshot in a minimal-root, network-less sandbox; forwarder
+@4 audits every request). Every other call keeps everything above byte-unchanged; the hooks here are: Slot.agentic (None),
+Forwarder.unix_path() + one dispatch line in its POST handler, the provider's agentic/agentic_snapshot opt-in, one dispatch line in
+call() and request_facts(), check_cli_isolation(agentic=True) and _failure's processed_before / fields (both default off).
 Billing: claude-subscription. $0 actual (no key, no SpendBook, committed 0); the engine paces the run, and receipts carry a
 PACING estimate, at the Terra-6 list rates the opencode arm uses (catalog.CLAUDE_CLI_PACING_PRICE; estimateBasis
 pacing-terra6-list-rates), never money and never Claude's own price. Usage tokens are recorded as measured. A report that sums
@@ -803,6 +809,9 @@ def _prompt(request: dict) -> str:
 def request_facts(request: dict) -> dict:
     """Plan pin of a claude-cli call: exact CLI stdin, projected schema and the isolation identity, computed without
     executing the CLI or retaining source text."""
+    if isinstance(request.get("params"), dict) and "agentic" in request["params"]:      # AGENTIC (isolated@6)
+        from .claude_agentic import agentic_request_facts
+        return agentic_request_facts(request)
     prompt = _prompt(request).encode("utf-8")
     schema = schemas.schema_bytes(request["outputSchema"], SCHEMA_FLAVOR)
     cap = request["params"].get("maxOutputTokens")
@@ -1129,7 +1138,7 @@ def check_request_isolation(claude: str = "claude", model: str = "claude-cli/cla
 
 
 def check_cli_isolation(claude: str = "claude", runner=None, environ=None, *, models=None,
-                        capture: bool | None = None, capture_runner=None) -> dict:
+                        capture: bool | None = None, capture_runner=None, agentic: bool = False) -> dict:
     """Offline preflight (no model call): bwrap present, exact version, required flags, no managed settings and (real CLI
     by default) the loopback capture proofs per model, through the live sandbox. Unsupported => no live call."""
     run = lambda argv: _probe(argv, environ, runner, 30)[0]      # noqa: E731
@@ -1161,6 +1170,15 @@ def check_cli_isolation(claude: str = "claude", runner=None, environ=None, *, mo
                 cap = check_request_isolation(claude, m, runner=capture_runner, environ=environ, mode=mode)
                 report["requestIsolation"][f"{m}:{mode}"] = {k: cap.get(k) for k in ("supported", "posts", "tools")}
                 problems += [f"{m} ({mode}): {x}" for x in cap.get("problems", [])]
+    if agentic and (runner is None if capture is None else capture) and not problems:   # AGENTIC (isolated@6) proofs
+        from .claude_agentic import AGENTIC_PREFLIGHT_MODES, agentic_problems
+        for m in want:
+            for mode in AGENTIC_PREFLIGHT_MODES:
+                cap = check_request_isolation(claude, m, runner=capture_runner, environ=environ, mode=mode)
+                report["requestIsolation"][f"{m}:{mode}"] = {k: cap.get(k) for k in ("supported", "posts", "tools")}
+                problems += [f"{m} ({mode}): {x}" for x in cap.get("problems", [])]
+        problems += agentic_problems(claude)
+        report["agenticSupported"] = not problems
     report["problems"], report["supported"] = problems, not problems
     return report
 
@@ -1184,6 +1202,7 @@ class Slot:
     body_bytes: int | None = None
     relay_error: str | None = None
     sse: dict | None = None          # A5: upstream SSE tally of a 200 relay {"blocks": {type: n}, "outputTokens", "stopReason"}
+    agentic: object = None           # AGENTIC (isolated@6): claude_agentic.AgenticSession; None = the one-request slot
 
     def facts(self) -> dict:
         return {"version": FORWARDER_VERSION, "requestsSent": self.forwarded, "requestsAttempted": len(self.attempts),
@@ -1240,6 +1259,10 @@ class _SseTally:
 class _ForwardServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = False
+
+
+class _UnixForwardServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
 
 
 class Forwarder:
@@ -1305,6 +1328,8 @@ class Forwarder:
                 raw = self.rfile.read(n)
                 if self._rest != FORWARD_PATH:
                     return self._refuse(slot, "method-or-path")
+                if slot.agentic is not None:              # AGENTIC (isolated@6): claude_agentic's multi-request audit
+                    return slot.agentic.post(fwd, self, slot, raw)
                 try:
                     body = loads_strict(raw)
                 except (ValueError, ContractInputError):
@@ -1327,7 +1352,21 @@ class Forwarder:
 
         self._srv = _ForwardServer(("127.0.0.1", 0), Handler)
         self.port = self._srv.server_address[1]
+        self._handler, self._unix = Handler, None      # AGENTIC: the same handler on a unix socket, made on first use
         threading.Thread(target=self._srv.serve_forever, name="pullo-claude-forwarder", daemon=True).start()
+
+    def unix_path(self) -> str:
+        """AGENTIC (isolated@6): this forwarder's unix-socket listener (the same handler, so the same per-call tokens and refusals),
+        in a private 0700 dir; bind-mounted into each agentic sandbox, where claude_relay connects to it."""
+        with self._lock:
+            if self._unix is None:
+                d = tempfile.mkdtemp(prefix="rvw-claude-fwd-")
+                os.chmod(d, 0o700)
+                path = os.path.join(d, "fwd.sock")
+                srv = _UnixForwardServer(path, self._handler)
+                threading.Thread(target=srv.serve_forever, name="pullo-claude-forwarder-unix", daemon=True).start()
+                self._unix = (d, path, srv)
+            return self._unix[1]
 
     def open(self, model_cli: str, timeout: float, max_tokens: int = OUTPUT_TOKENS) -> Slot:
         slot = Slot(secrets.token_urlsafe(32), model_cli, timeout, max_tokens)
@@ -1445,7 +1484,8 @@ class ClaudeCliProvider:
     def __init__(self, *, enabled: bool, ledger: RuntimeLedger | None = None, runner=None, claude: str = "claude",
                  timeout_sec: int = DEFAULT_TIMEOUT_SEC, preflight: dict | None = None, environ=None,
                  workdir_parent=None, run_scope: str | None = None, max_calls: int = MAX_CALLS_PER_RUN,
-                 family: str = "review", models=None, token_loader=None, upstream: str | None = None, forwarder=None):
+                 family: str = "review", models=None, token_loader=None, upstream: str | None = None, forwarder=None,
+                 agentic: bool = False, agentic_snapshot=None):
         if enabled is not True:
             raise ValueError("live claude-cli adapter requires enabled=True (opt-in)")
         if family != "review":
@@ -1469,7 +1509,7 @@ class ClaudeCliProvider:
             raise ClaudeCliUnsupported("the claude binary resolves under the user home, which the sandbox masks")
         if preflight is None:
             preflight = check_cli_isolation(claude, None if runner is None else (lambda a, e, c: runner(a, b"", e, c, 30)),
-                                            environ, models=sorted(self._allowed))
+                                            environ, models=sorted(self._allowed), agentic=agentic)
         if not preflight.get("supported"):
             raise ClaudeCliUnsupported("; ".join(preflight.get("problems", ["unsupported"])) or "unsupported")
         self._max_calls, self._lock, self._models = max_calls, threading.Lock(), {}
@@ -1483,6 +1523,10 @@ class ClaudeCliProvider:
         self.calls = 0
         self.disabled_reason: str | None = None
         self.latched: dict | None = None         # the first LATCH_TYPES error of this run (its words), else None
+        # AGENTIC (isolated@6, claude_agentic): only with agentic=True AND a preflight that ran the agentic capture proofs; the
+        # run's PR snapshot (claude_agentic.Snapshot) is host-trusted and never part of a request
+        self.agentic_ok = agentic is True and preflight.get("agenticSupported") is True
+        self.agentic_snapshot = agentic_snapshot
 
     def _err(self, code, msg, outcome, *, retryable=False, **detail):
         return ProviderResult(None, typed_error(code, msg, retryable=retryable,
@@ -1519,6 +1563,9 @@ class ClaudeCliProvider:
                 return self._err("provider-error", "claude-cli call cap reached", "not-sent", reason="call-cap")
             self.calls += 1
         ck = self.scope + "|" + "|".join(str(x) for x in key)
+        if isinstance(request.get("params"), dict) and "agentic" in request["params"]:   # AGENTIC (isolated@6)
+            from .claude_agentic import call_agentic
+            return call_agentic(self, request, ck)
         why = self._refusal(request)
         if why is not None:
             return self._err("provider-error", why, "not-sent", reason="request-refused")
@@ -1663,8 +1710,10 @@ class ClaudeCliProvider:
     def _fwd_error(iso):
         return (iso.get("forwarder") or {}).get("upstreamError")
 
-    def _failure(self, ck, t0, res, audit, iso, *, timed_out=False):
-        """A CLI/provider failure with the CLI's own words (the result text, else the stderr tail)."""
+    def _failure(self, ck, t0, res, audit, iso, *, timed_out=False, processed_before=False, fields=None):
+        """A CLI/provider failure with the CLI's own words (the result text, else the stderr tail). AGENTIC (isolated@6) only:
+        `processed_before` (an earlier request of the session was processed: the outcome is never rejected-before-processing) and
+        `fields` (e.g. the session's usage, merged into the ledger row); both default off = isolated@5 unchanged."""
         r = audit.result or {}
         a = _assistant_error(res.stdout) or {}
         if res.aborted == "cli-retry" and audit.retries:     # killed when scheduled: the retry event's own facts
@@ -1686,7 +1735,7 @@ class ClaudeCliProvider:
         # processing. A timeout or anything else: outcome unknown.
         if sent == 0:
             outcome = "not-sent"
-        elif not timed_out and type(status) is int and 400 <= status < 500:
+        elif not timed_out and not processed_before and type(status) is int and 400 <= status < 500:
             outcome = "rejected-before-processing"
         else:
             outcome = "unknown"
@@ -1714,7 +1763,7 @@ class ClaudeCliProvider:
             requestsAttempted=f.get("requestsAttempted"), requestsSeen=iso.get("requestsSeen"),
             retryRequestSent=(sent > 1) if retry_kill else None, retries=audit.retries or None,
             exitCode=res.returncode, terminalReason=r.get("terminal_reason"), stderrTail=tail,
-            latched=etype in LATCH_TYPES or None), errorKind=reason, isolation=iso, note=note)
+            latched=etype in LATCH_TYPES or None), errorKind=reason, isolation=iso, note=note, **(fields or {}))
 
     def _interpret(self, res: RunResult, audit: StreamAudit, ck, t0, out_name, model, cap, iso) -> ProviderResult:
         iso = dict(iso)

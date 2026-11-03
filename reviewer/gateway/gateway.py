@@ -102,6 +102,21 @@ def _claude_cli_model(model) -> bool:
     return model in CLAUDE_CLI_MODELS
 
 
+def _call_reservation(spec: dict, req: dict) -> int:
+    """A live call's reservation: the request's input estimate plus the role's output cap at the role price; an AGENTIC claude-cli
+    call (isolated@6) reserves (at least) its whole session PACING budget, which its forwarder enforces per relayed request
+    (measured pacing so far + the next request's worst case <= budget)."""
+    amount = reservation(spec["price"], estimate_input_tokens(req), spec["caps"]["maxOutputTokens"])
+    agentic = _claude_cli_agentic(req) if req.get("provider") == "claude-cli" else None
+    return max(amount, agentic["budgetUsdMicros"]) if isinstance(agentic, dict) else amount
+
+
+def _claude_cli_agentic(req) -> dict | None | str:
+    """AGENTIC (claude-cli-isolated@6): a request's validated params.agentic, None (no agentic mode) or a refusal string."""
+    from reviewer.runtime.catalog import claude_cli_agentic_spec   # lazy, as above
+    return claude_cli_agentic_spec(req.get("params") if isinstance(req, dict) else None)
+
+
 class Gateway:
     def __init__(self, *, mode: str, profile: dict, budget: dict, run_id: str,
                  providers: dict | None = None, authorization: AuthorizationHandle | None = None,
@@ -429,6 +444,14 @@ class Gateway:
                 v = params.get(k)
                 if v is not None and (type(v) is not int or v > spec["caps"]["maxOutputTokens"]):
                     return bad(f"params.{k} exceeds the role output cap")
+            if "agentic" in params:                  # AGENTIC (claude-cli-isolated@6): claude-cli review roles only, exact spec
+                a = _claude_cli_agentic(req)
+                if self.family != "review" or req["provider"] != "claude-cli" or not _claude_cli_model(req["model"]):
+                    return bad("params.agentic is a claude-cli review mode only")
+                if not isinstance(a, dict):
+                    return bad(a)
+                if a != (spec["params"] or {}).get("agentic"):
+                    return bad("params.agentic differs from the profile role (the trusted session caps)")
         return None
 
     def _attempt(self, stage, role, agent_id, ordinal, attempt, request, repair_of, retry_of=None) -> dict:
@@ -503,7 +526,7 @@ class Gateway:
         if unbound is not None:
             return unbound
         spec = self._spec(c["role"], req)
-        amount = reservation(spec["price"], estimate_input_tokens(req), spec["caps"]["maxOutputTokens"])
+        amount = _call_reservation(spec, req)
         rkey = scoped_key(self.run_id, c["cid"])
         with self._lock:
             reused = c["cid"] in self._used_calls

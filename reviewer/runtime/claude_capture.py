@@ -346,6 +346,10 @@ def _hostname() -> str:
 def main() -> int:
     spec = json.loads(sys.stdin.read())
     model, mode = spec["model"], spec.get("mode", "answer")
+    from .claude_agentic import AGENTIC_CAPTURE_MODES, capture_main
+    if model in CLAUDE_CLI_MODELS and mode in AGENTIC_CAPTURE_MODES:      # AGENTIC (isolated@6) proofs
+        print(json.dumps(capture_main(spec)))
+        return 0
     if model not in CLAUDE_CLI_MODELS or mode not in C.CAPTURE_MODES:
         print(json.dumps({"error": "bad spec"}))
         return 2
@@ -429,6 +433,9 @@ def main() -> int:
 
 def analyse(out: dict, model: str, mode: str) -> dict:
     """Problems in a capture result (pure; runs outside the namespace)."""
+    from . import claude_agentic as A
+    if mode in A.AGENTIC_CAPTURE_MODES:                                    # AGENTIC (isolated@6) proofs
+        return A.analyse(out, model, mode)
     problems = []
     if not isinstance(out, dict) or out.get("model") != model or out.get("mode") != mode:
         return {"supported": False, "problems": ["capture result is not for this model/mode"]}

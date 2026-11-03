@@ -229,6 +229,34 @@ def claude_cli_worst_case_micros(model: str, request_bytes: int, max_output_toke
             + _ceil_cost(max_output_tokens, p["output"]))
 
 
+# AGENTIC READ-ONLY mode (claude-cli-isolated@6; root BUILD GO 2026-11-03T16:10Z; reviewer.runtime.claude_agentic): a profile role
+# opts in with params.agentic (default off: every role without it keeps claude-cli-isolated@5 byte-unchanged). The ONE call then is
+# a bounded CLI session with ONLY Read / Grep / Glob over the run's PR snapshot (head, + base), up to maxRequests relayed requests
+# within sessionDeadlineSec, each admitted by the forwarder against budgetUsdMicros (PACING; the gateway reserves exactly that).
+CLAUDE_CLI_AGENTIC_ISOLATION_VERSION = "claude-cli-isolated@6"
+CLAUDE_CLI_AGENTIC_KEYS = frozenset({"mode", "maxRequests", "sessionDeadlineSec", "budgetUsdMicros"})
+CLAUDE_CLI_AGENTIC_MAX_REQUESTS = 30           # root: N cap per session
+CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC = 900      # root: session deadline 15 min
+CLAUDE_CLI_AGENTIC_MAX_BUDGET = 10_000_000     # root: the $10 PACING ceiling (CC_AUTH_V2)
+
+
+def claude_cli_agentic_spec(params) -> dict | None | str:
+    """params.agentic of a claude-cli request: None (no agentic mode), the validated spec, or a refusal string."""
+    if not isinstance(params, dict) or "agentic" not in params:
+        return None
+    a = params["agentic"]
+    if not isinstance(a, dict) or set(a) != CLAUDE_CLI_AGENTIC_KEYS or a.get("mode") != "read-only":
+        return "params.agentic must be exactly {mode: read-only, maxRequests, sessionDeadlineSec, budgetUsdMicros}"
+    n, d, b = a["maxRequests"], a["sessionDeadlineSec"], a["budgetUsdMicros"]
+    if type(n) is not int or not 2 <= n <= CLAUDE_CLI_AGENTIC_MAX_REQUESTS:
+        return f"params.agentic.maxRequests must be an integer in 2..{CLAUDE_CLI_AGENTIC_MAX_REQUESTS}"
+    if type(d) is not int or not 60 <= d <= CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC:
+        return f"params.agentic.sessionDeadlineSec must be an integer in 60..{CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC}"
+    if type(b) is not int or not 1 <= b <= CLAUDE_CLI_AGENTIC_MAX_BUDGET:
+        return f"params.agentic.budgetUsdMicros must be an integer in 1..{CLAUDE_CLI_AGENTIC_MAX_BUDGET} (PACING micros)"
+    return dict(a)
+
+
 def claude_cli_pacing_micros(model: str, uncached: int, cached: int, write: int, output: int) -> int:
     """Pacing-rate arithmetic for measured claude-cli usage (receipts only; the actual charge is $0)."""
     p = _claude_cli_rates(model)
