@@ -34,6 +34,14 @@ Rule (BEHAVIOR):
   ceiling    v19 Plans carry repository_profile.V19_RUN_CEILING_USD_MICROS ($10, CC_AUTH_V2), and the live hosts accept
              exactly that for a v19 Plan (every other Plan keeps the pilot ceiling); v12's clocks (INVESTIGATE 1800 s live:
              a 900 s session and its re-ask).
+
+investigator.impact@v20 (BROAD_RULE) is v19 with ONE change: the reviewer's task is prompts.V20_WHOLE_TASK, v16's broad
+task (every issue a senior reviewer would raise: defects, API/contract, missing tests, performance, documentation; up to
+whole.MAX_HYPOTHESES, each with severity, a changed-line location and a concrete reason) plus "use the read tools to
+confirm each claim against the code before reporting it". Why (11 tuning PRs x 2): v19 had the best precision (.50/.67)
+but proposed 21-23 hypotheses against v16's 58-62, so it was too conservative at generation. The session, admission,
+re-asks, VERIFY, the JUDGE rule and the $10 ceiling are v19's (same Plan); review.md and the config identity say which
+task ran.
 """
 
 from __future__ import annotations
@@ -52,6 +60,7 @@ ADMISSION_RULE = "agentic-admission@1"
 TOOL_REASK_RULE = prompts.TOOL_REASK_VERSION
 TOOL_ATTEMPT_REASON = "agentic-tool-attempt"    # claude_agentic (ecdc1f1): error.detail.reason of the kill, retryableByReask
 HOPS = 1
+BROAD_RULE = prompts.AGENTIC_BROAD_VERSION       # investigator.impact@v20 only: the broad task with the confirm rule
 
 TEXT = ("one agentic read-only claude-cli session (Read/Grep/Glob over the PR snapshot, at most MAX_REQUESTS requests "
         "within SESSION_DEADLINE_SEC and BUDGET_USD_MICROS PACING) with v16's diff context and no host head reads; at most "
@@ -107,8 +116,13 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
     agentic = [e for e in calls if isinstance(e["request"].get("params"), dict) and "agentic" in e["request"]["params"]]
     dropped = sum(1 for d in drops if d["reason"] == "below-threshold" and JUDGE_RULE in d.get("detail", ""))
     tools = sum(1 for a in payload.get("agents", []) if is_tool_attempt(a.get("error")))
+    broad = any(e["request"].get("promptVersion") == prompts.INVESTIGATOR_IMPACT_V20_PROMPT for e in agentic)
     lines.append(f"- Session ({SESSION_RULE}): {len(agentic)} agentic session(s) (claude-cli-isolated@6, read-only, at "
                  f"most {MAX_REQUESTS} requests and {SESSION_DEADLINE_SEC} s each).")
+    if broad:                                    # impact@v20 only => v19's review.md is unchanged
+        lines.append(f"- Task ({BROAD_RULE}): the reviewer was asked for every issue a senior reviewer would raise "
+                     "(defects, API and contract, missing tests, performance, documentation) and to confirm each claim "
+                     "against the code with the read tools before reporting it.")
     lines.append(f"- Tool re-ask ({TOOL_REASK_RULE}): {tools} session(s) ended because the model tried a tool outside "
                  "Read/Grep/Glob (nothing ran); each first one is re-asked once in a fresh session told which tools exist.")
     lines.append(f"- JUDGE rule ({JUDGE_RULE}): {dropped} finding(s) left out by the judge as without a concrete wrong "
@@ -117,8 +131,9 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
 
 
 def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: int) -> dict:
-    """Everything about impact@v19 that is not a template digest or v16's (bound into the config identity)."""
-    return {"behavior": BEHAVIOR, "agent": AGENT, "planMarker": PLAN_MARKER, "text": TEXT, "hops": HOPS,
+    """Everything about impact@v19 that is not a template digest or v16's (bound into the config identity); impact@v20
+    adds its task rule (absent for v19 => v19 run ids are unchanged)."""
+    doc = {"behavior": BEHAVIOR, "agent": AGENT, "planMarker": PLAN_MARKER, "text": TEXT, "hops": HOPS,
             "session": {"rule": SESSION_RULE, **spec()}, "judge": {"rule": JUDGE_RULE, "dropReason": "below-threshold"},
             "toolReask": {"rule": TOOL_REASK_RULE, "code": "provider-error",
                           "detail": {"reason": TOOL_ATTEMPT_REASON, "retryableByReask": True}},
@@ -126,3 +141,6 @@ def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: in
                           "investigateTopBp": deepcov.INVESTIGATE_TOP_BP},
             "verify": {"rule": deepcov.VERIFY_RULE, "maxVerify": deepcov.MAX_VERIFY},
             "whole": whole.identity_doc(policy, budget, tool_max_calls, comment_cap_base)}
+    if policy.broad_agentic:
+        doc["task"] = {"rule": BROAD_RULE, "prompt": prompts.INVESTIGATOR_IMPACT_V20_PROMPT}
+    return doc

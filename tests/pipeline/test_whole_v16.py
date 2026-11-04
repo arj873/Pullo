@@ -534,7 +534,7 @@ class V12Parity(unittest.TestCase):
 
     def test_versions(self):
         from reviewer.pilot import repository_profile as RP
-        self.assertEqual(sorted(RP.IMPACT_VERSIONS), [1, 2, 3, 4, 5, 7, 10, 12, 16, 19])
+        self.assertEqual(sorted(RP.IMPACT_VERSIONS), [1, 2, 3, 4, 5, 7, 10, 12, 16, 19, 20])
         self.assertEqual(RP.DEFAULT_IMPACT_VERSION, 2)
 
 

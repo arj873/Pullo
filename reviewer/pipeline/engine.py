@@ -1450,7 +1450,8 @@ class Engine:
         if self.fatal:                           # e.g. a snapshot tamper during a head read
             return "failed", {"hypotheses": [], "agents": agents}, self.fatal["error"], []
         doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
-                                       task=prompts.V19_WHOLE_TASK if self.v19 else prompts.V16_WHOLE_TASK)
+                                       task=((prompts.V20_WHOLE_TASK if self.policy.broad_agentic   # v20 (BROAD_RULE)
+                                              else prompts.V19_WHOLE_TASK) if self.v19 else prompts.V16_WHOLE_TASK))
         if self.coverage_doc() is None:
             doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
                                "context below is bounded and may be truncated or omitted.")

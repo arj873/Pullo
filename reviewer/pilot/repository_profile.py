@@ -32,6 +32,9 @@ investigator model, v12's VERIFY and JUDGE rules, v12's clocks and tool cap, the
 investigator role carries params.agentic = agentic.spec(); a claude-cli investigator is required) and the JUDGE
 concrete-behaviour rule (reviewer.pipeline.agentic); v16's clocks and tool cap; its Plan carries V19_RUN_CEILING_USD_MICROS
 ($10, CC_AUTH_V2) and lists `whole`, `agentic`.
+20 (explicit only) is investigator.impact@v20: v19 with the reviewer's task replaced by v16's broad task plus "use the read
+tools to confirm each claim against the code before reporting it" (agentic.BROAD_RULE); everything else, the Plan included
+(the $10 ceiling, `whole`, `agentic`), is v19's, except its Plan reason names v20.
 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
@@ -48,6 +51,7 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
                                        INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
                                        INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
                                        INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT, SPECIALIST_AGENTS,
+                                       INVESTIGATOR_IMPACT_V20_PROMPT, AGENTIC_PROMPTS,
                                        V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
@@ -74,7 +78,8 @@ def check_experiment(experiment: str, retrieval: bool) -> None:
 IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROMPT, 3: INVESTIGATOR_IMPACT_V3_PROMPT,
                    4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT,
                    10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT,
-                   16: INVESTIGATOR_IMPACT_V16_PROMPT, 19: INVESTIGATOR_IMPACT_V19_PROMPT}
+                   16: INVESTIGATOR_IMPACT_V16_PROMPT, 19: INVESTIGATOR_IMPACT_V19_PROMPT,
+                   20: INVESTIGATOR_IMPACT_V20_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -155,9 +160,9 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
     if experiment == EXPERIMENT_CONTEXT_CHECK:
         profile["roles"]["verifier"]["promptVersion"] = VERIFIER_CONTEXT_CHECK_PROMPT
         profile["roles"]["judge"]["promptVersion"] = JUDGE_FACT_WORDING_PROMPT
-    if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V19_PROMPT:   # agentic.SESSION_RULE
+    if profile["roles"]["investigator"]["promptVersion"] in AGENTIC_PROMPTS:   # agentic.SESSION_RULE (v19, v20)
         if profile["roles"]["investigator"]["provider"] != "claude-cli":
-            raise ProfileError("investigator.impact@v19 needs a claude-cli investigator (its agentic read-only session is "
+            raise ProfileError(f"{profile['roles']['investigator']['promptVersion']} needs a claude-cli investigator (its agentic read-only session is "
                                "claude-cli-isolated@6 only)")
         profile["roles"]["investigator"]["params"] = dict(profile["roles"]["investigator"]["params"],
                                                           agentic=agentic.spec())
@@ -193,7 +198,7 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     specialist investigators as Plan.specialists, an impact@v4 profile the specialists plus the diff-shard sweep
     marker and the V4_* budget scaling (every other profile keeps the one generalist, same Plan bytes)."""
     inv = profile["roles"]["investigator"]["promptVersion"]
-    if inv in (INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT):   # v12's clocks and tool cap (V12_*)
+    if inv in (INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS):   # v12's clocks and tool cap (V12_*)
         if "alternates" in profile:
             raise ProfileError(f"{inv} runs on the primary investigator model only (no alternates)")
         plan = live_plan(profile, **({"stage_ceilings_sec": V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
@@ -207,10 +212,10 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
                            "investigator.impact@v16: one whole-change reviewer (the whole diff and the changed files' "
                            f"head content, at most {whole.MAX_HYPOTHESES} hypotheses), then v12's VERIFY and JUDGE "
                            "(primary investigator model only)"]
-        if inv == INVESTIGATOR_IMPACT_V19_PROMPT:      # impact@v19: one agentic session, the JUDGE rule, the $10 ceiling
+        if inv in AGENTIC_PROMPTS:                     # impact@v19/v20: one agentic session, the JUDGE rule, the $10 ceiling
             plan["specialists"] = agentic.plan_specialists()
             plan["budget"] = dict(plan["budget"], maxUsdMicros=V19_RUN_CEILING_USD_MICROS)
-            plan["reasons"][1] = ("investigator.impact@v19: one agentic read-only claude-cli reviewer session (at most "
+            plan["reasons"][1] = (f"{inv}: one agentic read-only claude-cli reviewer session (at most "
                                   f"{agentic.MAX_REQUESTS} requests, {agentic.SESSION_DEADLINE_SEC} s), then v16's VERIFY "
                                   "and JUDGE with the concrete-behaviour rule (primary investigator model only)")
         return plan
@@ -306,7 +311,7 @@ def repository_policy(retrieval: bool, experiment: str = EXPERIMENT_BASELINE,
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V7_MAX_TOOL_CALLS)
     if inv == INVESTIGATOR_IMPACT_V10_PROMPT:        # and v10
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V10_MAX_TOOL_CALLS)
-    if inv in (INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT,     # and v12, v16, v19 (v12's cap)
-               INVESTIGATOR_IMPACT_V19_PROMPT):
+    if inv in (INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT,     # and v12, v16, v19, v20 (v12's cap)
+               *AGENTIC_PROMPTS):
         return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver, run_tool_calls=V12_MAX_TOOL_CALLS)
     return RetrievalPolicy(investigator_prompt=inv, verifier_prompt=ver)
