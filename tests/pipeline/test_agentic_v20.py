@@ -22,7 +22,8 @@ from reviewer.pilot.profile import RUN_CEILING_USD_MICROS
 from reviewer.pipeline import RetrievalPolicy, agentic, identity, prompts, whole
 
 from tests.pipeline.helpers import events_of, judge, model_calls, script
-from tests.pipeline.test_agentic_v19 import (A, R, V19_PLAN, V19_POLICY, V19_PROFILE, V19Rig, cli, cli_bad, EndToEnd as E19)
+from tests.pipeline import test_agentic_v19 as T19      # the module, not its TestCases (no second collection)
+from tests.pipeline.test_agentic_v19 import A, R, V19_PLAN, V19_POLICY, V19_PROFILE, V19Rig, cli, cli_bad
 from tests.pipeline.test_coverage_v12 import ROOT, hid, inv_calls, md_of, payload, vdone
 from tests.pipeline.test_impact_pipeline import doc_of, w
 from tests.pipeline.test_whole_v16 import comments_of
@@ -185,7 +186,7 @@ class EndToEnd(V19Rig):
     def test_the_tool_re_ask_appends_the_tool_note_to_the_broad_task(self):
         m = self.case12()
         hl, hb, hs = self.h_lib(m), self.h_b(m), self.h_svc(m)
-        scr, _ = self.run19(m, session=[E19.tool_kill(self, A), cli(R, 0, {"hypotheses": [hl, hb, hs]})])
+        scr, _ = self.run19(m, session=[T19.EndToEnd.tool_kill(self, A), cli(R, 0, {"hypotheses": [hl, hb, hs]})])
         res, _ = self.record_v20(m, scr)
         self.assertEqual(res.status, "completed", res.incomplete)
         self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
