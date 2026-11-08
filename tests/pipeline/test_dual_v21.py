@@ -328,6 +328,20 @@ class Passes(V21Rig):
                          prompts.V20_WHOLE_TASK + " " + prompts.V19_TOOL_NOTE)
         self.assertIn("1 reviewer session(s) ended by a tool outside Read/Grep/Glob", md_of(res))
 
+    def test_the_agentic_pass_is_one_hop_a_context_request_is_re_asked_for_its_answer(self):
+        m = self.case12()
+        hl, hs = self.h_lib(m), self.h_svc(m)
+        ask = cli(G, 0, None)
+        ask["response"]["output"] = {"contextRequests": [rf("src/use.py", 1, 7)], "output": None}
+        scr, _ = self.run21(m, ag=[ask, cli(GR, 0, {"hypotheses": [hl, hs]})], judged=())
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(len(inv_calls(res, G)), 1)                              # one hop: its request is the last turn
+        self.assertTrue(doc_of(inv_calls(res, G)[0]["request"])["retrieval"]["lastTurn"])
+        self.assertFalse([t for t in tool_calls(res) if t["stage"] == "INVESTIGATE" and t["agentId"] == G])
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(P, "completed"), (G, "failed"), (GR, "completed")])
+
     def test_a_second_agentic_tool_attempt_is_a_note_when_v16_answers(self):
         m = self.case12()
         scr, ids = self.run21(m, ag=[T19.EndToEnd.tool_kill(self, G), T19.EndToEnd.tool_kill(self, GR)],
@@ -413,13 +427,44 @@ class Verify(V21Rig):
         self.assertIn("Verify admission (agentic-verify-admission@1): 2 candidate(s)", md_of(res))
         self.assertTrue(model_calls(res, "JUDGE"))                                # JUDGE keeps its reserve
 
-    def test_admission_bound_also_holds_inside_model_call(self):
+    def test_admission_stops_before_a_candidate_starts(self):
         m = self.case12()
         scr, ids = self.run21(m, verifiers=[], judged=())
         with mock.patch.object(Engine, "_v21_verify_room", lambda eng: False):
             res, _ = self.record_v21(m, scr)
         self.assertEqual(model_calls(res, "VERIFY"), [])
-        self.assertEqual({self.drop_of(res, ids[k])["reason"] for k in ("l", "b", "s")}, {"budget"})
+        self.assertFalse([t for t in tool_calls(res) if t["stage"] == "VERIFY"])  # stopped before its host reads too
+        for k in ("l", "b", "s"):
+            d = self.drop_of(res, ids[k])
+            self.assertEqual(d["reason"], "budget")
+            self.assertIn("VERIFY stopped before this candidate", d["detail"])
+
+    def test_admission_bound_also_holds_inside_model_call(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[], judged=())
+        answers = iter([True])                   # the candidate's start check passes; the call itself no longer fits
+        with mock.patch.object(Engine, "_v21_verify_room", lambda eng: next(answers, False)):
+            res, _ = self.record_v21(m, scr)
+        self.assertEqual(model_calls(res, "VERIFY"), [])                         # nothing reached the gateway
+        d = self.drop_of(res, ids["l"])
+        self.assertEqual(d["reason"], "budget")
+        self.assertIn("verifier verifier-01: an agentic verifier session and its repair", d["detail"])
+        self.assertIn("agentic-verify-admission@1", d["detail"])
+
+    def test_admission_no_verifier_re_ask_past_the_bound(self):
+        m = self.case12()
+        bad = [cc(x) for x in bad_turn("verifier-01", 0, "VERIFY", "verifier")]
+        scr, ids = self.run21(m, verifiers=bad, judged=())
+        floor = sweeps.judge_reserve_floor(V21_PLAN["budget"])
+        real = Engine.run_spend
+
+        def spend(eng):                          # after verifier-01's call no second session fits (the reserve still does)
+            hit = any(e["type"] == "model.call" and e["agentId"] == "verifier-01" for e in eng.recorder.events)
+            return real(eng) + (floor - real(eng) - dual.session_need(1) + 1 if hit else 0)
+        with mock.patch.object(Engine, "run_spend", spend):
+            res, _ = self.record_v21(m, scr)
+        self.assertNotIn("verifier-01-reask", {e["agentId"] for e in model_calls(res, "VERIFY")})
+        self.assertIn("not re-asked (the agentic verifier admission)", self.drop_of(res, ids["l"])["detail"])
 
     def jump_after(self, agent, seconds):
         """Advance the host clock by `seconds` right after `agent`'s first VERIFY model call returns."""
