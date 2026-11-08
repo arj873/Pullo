@@ -30,7 +30,7 @@ from reviewer.gateway import AuthorizationError, DisabledProvider, SpendBook, tr
 from reviewer.historical.bridge import _check_out, _validated
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
-from reviewer.pipeline import agentic, repocov
+from reviewer.pipeline import agentic, dual, repocov
 from reviewer.repoimport import (RepoImportError, github_remote, load_import_pins, open_import, target_dir)
 from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_USD_MICROS, load_openrouter_key
 from reviewer.runtime.catalog import worst_case_router_micros
@@ -418,7 +418,8 @@ def _check_ceiling(ledger: RuntimeLedger, plan: dict) -> None:
         raise RepositoryError("aggregate allowance cannot cover the run ceiling")
     # the Plan's own reviewed ceiling: an impact@v19 Plan (exactly its specialists) needs V19_RUN_CEILING_USD_MICROS; every
     # other Plan still needs exactly RUN_CEILING_USD_MICROS
-    reviewed = V19_RUN_CEILING_USD_MICROS if agentic.is_v19_plan(plan) else RUN_CEILING_USD_MICROS
+    reviewed = (V19_RUN_CEILING_USD_MICROS if agentic.is_v19_plan(plan) or dual.is_v21_plan(plan)   # v19/v20, v21
+                else RUN_CEILING_USD_MICROS)
     if plan["budget"]["maxUsdMicros"] != reviewed:
         raise RepositoryError("run ceiling differs from the reviewed pilot ceiling")
 

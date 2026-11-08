@@ -465,6 +465,7 @@ def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMP
                  else IMPACT_V16_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V16_PROMPT
                  else IMPACT_V19_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V19_PROMPT
                  else IMPACT_V20_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V20_PROMPT
+                 else IMPACT_V21_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V21_PROMPT
                  else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
@@ -968,8 +969,29 @@ V20_WHOLE_TASK = (
 )
 V20_TEMPLATES = {**V19_TEMPLATES, "task": V20_WHOLE_TASK, "taskVersion": AGENTIC_BROAD_VERSION}
 IMPACT_V20_TEMPLATES = {**IMPACT_V16_TEMPLATES, "agenticReview": V20_TEMPLATES}
-# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19 and its broad-task variant v20
-AGENTIC_PROMPTS = (INVESTIGATOR_IMPACT_V19_PROMPT, INVESTIGATOR_IMPACT_V20_PROMPT)
+
+# investigator.impact@v21 (reviewer.pipeline.dual): v16's whole pass (no tools) AND v20's agentic pass, a claim-aware union,
+# and an AGENTIC verifier per candidate (read-only Read/Grep/Glob session) that must confirm the claim against the code,
+# refute-first; JUDGE is v20's. Every v1-v20 text above is unchanged; these are bound through impact_template_digests(V21).
+INVESTIGATOR_IMPACT_V21_PROMPT = "investigator.impact@v21"
+AGENTIC_VERIFY_VERSION = "agentic-verify@1"
+V21_VERIFY_RULE = (
+    "You also have read-only tools (Read, Grep, Glob) over the head snapshot of the repository, which is your working "
+    "directory, and over the base snapshot (agenticReview says where); you answer in one turn. Try to REFUTE the claim "
+    "first: open the cited code, its callers and callees and the tests that cover it, and check the claim against what "
+    "the code actually does. Confirm ONLY if you can cite a concrete failure: the input, state or configuration, the "
+    "changed line that mishandles it, and the wrong result next to the expected one, each supported by head lines you "
+    "read (code citations whose excerpt is the exact text of those lines). For a missing or ineffective test, confirm "
+    "only if you can name the concrete regression in the changed behaviour that the test suite would now let through. "
+    "For a documentation, comment or naming claim, confirm only if you can quote the exact misleading text and cite the "
+    "line whose behaviour contradicts it. A claim that is true but describes no wrong behaviour, a style or cleanup "
+    "wish, or a scenario that needs inputs the code cannot receive is not confirmed: answer refuted with the citation "
+    "that shows why, or uncertain if you cannot tell. Leave contextRequests empty and give your verdict in `output`."
+)
+V21_TEMPLATES = {"verifyRule": V21_VERIFY_RULE, "verifyVersion": AGENTIC_VERIFY_VERSION, "toolNote": V19_TOOL_NOTE}
+IMPACT_V21_TEMPLATES = {**IMPACT_V20_TEMPLATES, "dualPass": V21_TEMPLATES}
+# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19, its broad-task variant v20 and v21
+AGENTIC_PROMPTS = (INVESTIGATOR_IMPACT_V19_PROMPT, INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT)
 
 
 def agentic_block(spec: dict) -> dict:

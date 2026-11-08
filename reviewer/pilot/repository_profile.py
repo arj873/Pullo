@@ -35,6 +35,9 @@ concrete-behaviour rule (reviewer.pipeline.agentic); v16's clocks and tool cap; 
 20 (explicit only) is investigator.impact@v20: v19 with the reviewer's task replaced by v16's broad task plus "use the read
 tools to confirm each claim against the code before reporting it" (agentic.BROAD_RULE); everything else, the Plan included
 (the $10 ceiling, `whole`, `agentic`), is v19's, except its Plan reason names v20.
+21 (explicit only) is investigator.impact@v21: v16's whole pass and v20's agentic pass, a claim-aware union and an agentic
+read-only verifier per candidate (the verifier role carries params.agentic = dual.verifier_spec(); a claude-cli verifier is
+required); v20's JUDGE; the $10 ceiling; its Plan lists `whole`, `whole-agentic`, `agentic` and carries the V21_* clocks.
 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
@@ -44,14 +47,14 @@ from __future__ import annotations
 from reviewer.pipeline import RetrievalPolicy
 import copy
 
-from reviewer.pipeline import agentic, deepcov, lanes, whole
+from reviewer.pipeline import agentic, deepcov, dual, lanes, whole
 from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_CHECK, EXPERIMENTS,
                                        INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                        INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                                        INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
                                        INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
                                        INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT, SPECIALIST_AGENTS,
-                                       INVESTIGATOR_IMPACT_V20_PROMPT, AGENTIC_PROMPTS,
+                                       INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT, AGENTIC_PROMPTS,
                                        V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
@@ -79,7 +82,7 @@ IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROM
                    4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT,
                    10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT,
                    16: INVESTIGATOR_IMPACT_V16_PROMPT, 19: INVESTIGATOR_IMPACT_V19_PROMPT,
-                   20: INVESTIGATOR_IMPACT_V20_PROMPT}
+                   20: INVESTIGATOR_IMPACT_V20_PROMPT, 21: INVESTIGATOR_IMPACT_V21_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -136,6 +139,11 @@ V12_LEGACY_STAGE_CEILINGS_SEC = {"INVESTIGATE": 280}     # 3 x 40 s lens lanes +
 # session's PACING budget (agentic.BUDGET_USD_MICROS, reserved whole by the gateway), its re-ask, VERIFY and JUDGE fit. Every
 # other Plan keeps profile.RUN_CEILING_USD_MICROS, and the live hosts accept exactly this ceiling for a v19 Plan only.
 V19_RUN_CEILING_USD_MICROS = 10_000_000
+# investigator.impact@v21 only (reviewer.pipeline.dual): live clocks for v16's pass + a 900 s agentic session and its re-ask
+# (INVESTIGATE 2100 s) and up to dual.MAX_VERIFY verifier sessions of dual.VERIFIER_DEADLINE_SEC (VERIFY 1380 s, the last
+# dual.VERIFY_MARGIN_SEC start nothing); the run deadlines keep v12's margins (sum 3880 + 720; soft 600 s before hard).
+V21_LIVE_STAGE_CEILINGS_SEC = {"INVESTIGATE": 2100, "VERIFY": 1380, "JUDGE": 400}
+V21_LIVE_WALL_CLOCK_SEC, V21_LIVE_SOFT_DEADLINE_SEC = 4_600, 4_000
 
 
 def _prompts(impact: bool, impact_version: int = DEFAULT_IMPACT_VERSION) -> tuple[str, str]:
@@ -166,6 +174,12 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
                                "claude-cli-isolated@6 only)")
         profile["roles"]["investigator"]["params"] = dict(profile["roles"]["investigator"]["params"],
                                                           agentic=agentic.spec())
+    if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V21_PROMPT:   # dual.VERIFY_RULE
+        if profile["roles"]["verifier"]["provider"] != "claude-cli":
+            raise ProfileError("investigator.impact@v21 needs a claude-cli verifier (its agentic read-only verifier "
+                               "session is claude-cli-isolated@6 only)")
+        profile["roles"]["verifier"]["params"] = dict(profile["roles"]["verifier"]["params"],
+                                                      agentic=dual.verifier_spec())
     if profile["roles"]["investigator"]["promptVersion"] in ALT_IMPACT_VERSIONS.values():
         alt = None if models is None else models.investigator_alt
         if alt is None:
@@ -201,9 +215,11 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     if inv in (INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS):   # v12's clocks and tool cap (V12_*)
         if "alternates" in profile:
             raise ProfileError(f"{inv} runs on the primary investigator model only (no alternates)")
-        plan = live_plan(profile, **({"stage_ceilings_sec": V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
-                                      "wall_clock_sec": V12_LIVE_WALL_CLOCK_SEC,
-                                      "soft_deadline_sec": V12_LIVE_SOFT_DEADLINE_SEC}
+        v21 = inv == INVESTIGATOR_IMPACT_V21_PROMPT
+        plan = live_plan(profile, **({"stage_ceilings_sec": V21_LIVE_STAGE_CEILINGS_SEC if v21
+                                      else V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
+                                      "wall_clock_sec": V21_LIVE_WALL_CLOCK_SEC if v21 else V12_LIVE_WALL_CLOCK_SEC,
+                                      "soft_deadline_sec": V21_LIVE_SOFT_DEADLINE_SEC if v21 else V12_LIVE_SOFT_DEADLINE_SEC}
                                      if live_stage_timing else {"stage_ceilings_sec": V12_LEGACY_STAGE_CEILINGS_SEC}))
         plan["budget"] = dict(plan["budget"], maxToolCalls=V12_MAX_TOOL_CALLS,
                               maxToolCallsPerAgent=MAX_TOOL_CALLS_PER_AGENT)
@@ -218,6 +234,12 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
             plan["reasons"][1] = (f"{inv}: one agentic read-only claude-cli reviewer session (at most "
                                   f"{agentic.MAX_REQUESTS} requests, {agentic.SESSION_DEADLINE_SEC} s), then v16's VERIFY "
                                   "and JUDGE with the concrete-behaviour rule (primary investigator model only)")
+        if v21:                                        # impact@v21: two passes, the agentic verifier
+            plan["specialists"] = dual.plan_specialists()
+            plan["reasons"][1] = (f"{inv}: v16's whole-change pass and v20's agentic pass, a claim-aware union (at most "
+                                  f"{dual.MAX_VERIFY} candidates), one agentic read-only verifier session per candidate "
+                                  f"(at most {dual.VERIFIER_MAX_REQUESTS} requests, {dual.VERIFIER_DEADLINE_SEC} s), "
+                                  "then JUDGE with the concrete-behaviour rule (primary models only)")
         return plan
     if inv == INVESTIGATOR_IMPACT_V12_PROMPT:    # the v12 scaling (V12_*); primary model only
         if "alternates" in profile:

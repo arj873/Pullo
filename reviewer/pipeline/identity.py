@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import agentic, deepcov, lanes, prompts, repocov, retrieval, specialists, sweeps, whole
+from . import agentic, deepcov, dual, lanes, prompts, repocov, retrieval, specialists, sweeps, whole
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -99,6 +99,8 @@ def plan_specialists(spec) -> list[str]:
     """The Plan.specialists the selected investigator needs: the v3 specialist ids (impact@v4: followed by the
     diff-shard sweep marker), else the one generalist."""
     pol = retrieval_policy(spec)
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.dual_pass and "investigator" in turn_roles(spec.profile):
+        return dual.plan_specialists()           # impact@v21: the two passes and the agentic marker
     if isinstance(pol, retrieval.RetrievalPolicy) and pol.agentic_review and "investigator" in turn_roles(spec.profile):
         return agentic.plan_specialists()        # impact@v19: the agentic reviewer and its marker
     if isinstance(pol, retrieval.RetrievalPolicy) and pol.whole_change and "investigator" in turn_roles(spec.profile):
@@ -169,6 +171,8 @@ def config_snapshot_id(spec) -> str:
         if pol.agentic_review:                   # investigator.impact@v19 only => v1-v16 run ids are unchanged
             extra["impact"]["agentic"] = agentic.identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                               spec.host.comment_cap)
+        if pol.dual_pass:                        # investigator.impact@v21 only => v1-v20 run ids are unchanged
+            extra["impact"]["dual"] = dual.identity_doc(pol, spec.plan["budget"], lim.max_calls, spec.host.comment_cap)
         if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
             extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                   spec.host.comment_cap)

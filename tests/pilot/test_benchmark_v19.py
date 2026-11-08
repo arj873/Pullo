@@ -94,6 +94,24 @@ class V19BenchmarkHost(TBH.Base):
         self.assertEqual((inv["promptVersion"], inv["params"]["agentic"]),
                          (prompts.INVESTIGATOR_IMPACT_V20_PROMPT, agentic.spec()))
 
+    def test_a_v21_launch_opens_agentic_with_an_agentic_verifier_at_ten_dollars(self):
+        from reviewer.pipeline import dual, prompts
+        rep = B.run_benchmark(self.w.options(config=str(SJ_VARIANT), impact_version=21), key_loader=self.boom)
+        self.assertEqual((rep["status"], rep["plan"]["runCeilingUsdMicros"]), ("planned", V19_RUN_CEILING_USD_MICROS), rep)
+        rep, specs = self.launch(21)
+        self.assertEqual((rep["status"], rep["error"]["message"]), ("pipeline-refused", "config: " + STOP), rep)
+        (seen,) = self.seen
+        self.assertTrue(seen["agentic"])
+        self.assertEqual(seen["problems"], [])
+        self.assertFalse(seen["head"].parent.exists())
+        (spec,) = specs
+        self.assertTrue(dual.is_v21_plan(spec.plan))
+        self.assertEqual(spec.plan["budget"]["maxUsdMicros"], V19_RUN_CEILING_USD_MICROS)
+        roles = spec.profile["roles"]
+        self.assertEqual((roles["investigator"]["promptVersion"], roles["investigator"]["params"]["agentic"],
+                          roles["verifier"]["params"]["agentic"]),
+                         (prompts.INVESTIGATOR_IMPACT_V21_PROMPT, agentic.spec(), dual.verifier_spec()))
+
     def test_a_v16_launch_opens_the_adapter_exactly_as_before(self):
         rep, specs = self.launch(16)                          # the v16 Plan is 4M, inside the 10M authorization
         self.assertEqual(rep["status"], "pipeline-refused", rep)
