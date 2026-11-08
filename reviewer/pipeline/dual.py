@@ -37,9 +37,12 @@ Rule (BEHAVIOR):
   unverified (UNVERIFIED_RULE) a session that ends WITHOUT a verdict or answer because the adapter stopped it at its
              agentic cap (AGENTIC_STOP_REASONS: request cap, session deadline, session budget), or an upstream HTTP 5xx
              (at most SERVER_ERROR_NOTES per run; a later one keeps its incomplete entry, so an outage stays partial),
+             or (@2) an agentic isolation kill of an ISOLATION_NOTE_ITEMS kind (the CLI's extra user turn after its
+             tool results: the work-dir audit, forwarder cap and refusals already passed, the output is discarded, the
+             adapter stays enabled; at most ISOLATION_NOTES per run, a later one keeps its incomplete entry),
              is a disclosed note, never an incomplete entry: a verifier session's candidate is DROPPED (verdict failed,
              drop verifier-failed; fail closed for precision); the agentic INVESTIGATE pass contributes no candidates and
-             v16's pass still counts (with no answer at all INVESTIGATE ends as before); isolation kills, replay,
+             v16's pass still counts (with no answer at all INVESTIGATE ends as before); other isolation kills, replay,
              cancel, internal and limit/latch ends keep their handling;
   JUDGE      v20's (judge-concrete@1, v16's dynamic cap).
 """
@@ -54,9 +57,12 @@ MERGE_RULE = lanes.CROSS_MERGE_RULE
 VERIFY_RULE = prompts.AGENTIC_VERIFY_VERSION
 VERIFY_ADMISSION_RULE = "agentic-verify-admission@1"
 CLOCK_RULE = "verify-clock@1"
-UNVERIFIED_RULE = "verify-unverified@1"
+UNVERIFIED_RULE = "verify-unverified@2"   # @2: + ISOLATION_NOTE_ITEMS
 AGENTIC_STOP_REASONS = ("agentic-max-requests", "agentic-deadline", "agentic-budget")   # runtime.claude_agentic.STOP_REASONS
 SERVER_ERROR_NOTES = 1                        # upstream HTTP 5xx session ends per run that are notes (UNVERIFIED_RULE)
+ISOLATION_NOTE_ITEMS = ("extra-turn",)        # agentic isolation kills that are notes (UNVERIFIED_RULE @2); never
+                                              # forbidden-work-entry (adapter disabled), extra-request, init-surface, forwarder:*
+ISOLATION_NOTES = 1                           # such kills per run that are notes; a later one keeps its incomplete entry
 V16_AGENT = whole.AGENT                       # v16's pass (plain requests)
 AGENTIC_AGENT = whole.AGENT + "-agentic"      # v20's pass (the investigator role's params.agentic)
 PASSES = (V16_AGENT, AGENTIC_AGENT)           # run order
@@ -75,8 +81,9 @@ TEXT = ("v16's whole-change reviewer (host context, no tools, plain requests) th
         "read-only verifier session (VERIFIER_MAX_REQUESTS requests, VERIFIER_DEADLINE_SEC, VERIFIER_BUDGET_USD_MICROS "
         "PACING) that tries to refute it and confirms only with a cited concrete failure; a verifier session starts only "
         "while it fits below the JUDGE reserve; nothing new starts in VERIFY's last VERIFY_MARGIN_SEC and what the VERIFY "
-        "clock cuts is a note; a session the adapter stopped at its cap without a verdict (or one upstream 5xx per run) "
-        "is a note: the candidate is dropped, an agentic pass adds nothing; JUDGE as v20")
+        "clock cuts is a note; a session the adapter stopped at its cap without a verdict (or one upstream 5xx, or one "
+        "agentic extra-turn isolation kill, per run) is a note: the candidate is dropped, an agentic pass adds nothing; "
+        "JUDGE as v20")
 
 
 def verifier_spec() -> dict:
@@ -87,8 +94,10 @@ def verifier_spec() -> dict:
 
 def unverified_end(err) -> str | None:
     """UNVERIFIED_RULE: 'stop' for a provider-error the adapter typed as an agentic cap stop (AGENTIC_STOP_REASONS),
-    'server-error' for a claude-cli upstream HTTP 5xx (errorType claude.server-error), else None. Pure; the per-run
-    SERVER_ERROR_NOTES count is the engine's."""
+    'server-error' for a claude-cli upstream HTTP 5xx (errorType claude.server-error), 'isolation' for an agentic
+    isolation-violation of an ISOLATION_NOTE_ITEMS kind that stayed within its request cap (integer requestsSent <=
+    maxRequestsPerCall, as claude_agentic's violation() always reports), else None. Pure; the per-run
+    SERVER_ERROR_NOTES / ISOLATION_NOTES counts are the engine's."""
     if not isinstance(err, dict) or err.get("code") != "provider-error":
         return None
     d = err.get("detail") if isinstance(err.get("detail"), dict) else {}
@@ -97,6 +106,10 @@ def unverified_end(err) -> str | None:
     s = d.get("httpStatus")
     if d.get("errorType") == "claude.server-error" and type(s) is int and 500 <= s <= 599:
         return "server-error"
+    n, cap = d.get("requestsSent"), d.get("maxRequestsPerCall")
+    if (d.get("reason") == "isolation-violation" and d.get("itemType") in ISOLATION_NOTE_ITEMS
+            and type(n) is int and type(cap) is int and 0 <= n <= cap):
+        return "isolation"
     return None
 
 
@@ -190,5 +203,6 @@ def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: in
             "verify": {"rule": VERIFY_RULE, **verifier_spec(), "hops": agentic.HOPS},
             "admission": {"rule": VERIFY_ADMISSION_RULE, "sessionsPerCall": 2, "judgeReserveBp": sweeps.JUDGE_RESERVE_BP},
             "clock": {"rule": CLOCK_RULE, "marginSec": VERIFY_MARGIN_SEC, "marginBp": VERIFY_MARGIN_BP},
-            "unverified": {"rule": UNVERIFIED_RULE, "stops": list(AGENTIC_STOP_REASONS), "serverErrorNotes": SERVER_ERROR_NOTES},
+            "unverified": {"rule": UNVERIFIED_RULE, "stops": list(AGENTIC_STOP_REASONS), "serverErrorNotes": SERVER_ERROR_NOTES,
+                           "isolationItems": list(ISOLATION_NOTE_ITEMS), "isolationNotes": ISOLATION_NOTES},
             "investigateTopBp": deepcov.INVESTIGATE_TOP_BP}

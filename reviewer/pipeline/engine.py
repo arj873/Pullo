@@ -220,7 +220,7 @@ class Engine:
         self.v21 = bool(self.impact and self.policy.dual_pass)
         self._last_stop: str | None = None      # v21: the stop code of the latest gate check (None when it allowed work)
         self._verifier_note: str | None = None  # v21: the tool note appended to a verifier re-ask's task
-        self._v21_server_notes = 0              # v21: upstream 5xx ends taken as notes so far (dual.SERVER_ERROR_NOTES)
+        self._v21_capped_notes = {"server-error": 0, "isolation": 0}   # v21: capped note kinds taken so far (dual.*_NOTES)
         self.plain_profile = None               # v21: the profile view of v16's pass (investigator without params.agentic)
         if self.v21:
             self.plain_profile = copy.deepcopy(spec.profile)
@@ -1629,15 +1629,17 @@ class Engine:
         return self.v21 and self._last_stop == "stage-deadline"
 
     def _v21_unverified(self, err) -> str | None:
-        """dual.UNVERIFIED_RULE: the kind ('stop' | 'server-error') of a v21 session end without a verdict that is a note,
-        else None. A 'server-error' answer counts against dual.SERVER_ERROR_NOTES, so call it once per end."""
+        """dual.UNVERIFIED_RULE: the kind ('stop' | 'server-error' | 'isolation') of a v21 session end without a verdict
+        that is a note, else None. A 'server-error' / 'isolation' answer counts against dual.SERVER_ERROR_NOTES /
+        dual.ISOLATION_NOTES, so call it once per end."""
         if not self.v21 or self.needs_reconciliation or self.fatal:
             return None
         kind = dual.unverified_end(err)
-        if kind == "server-error":
-            if self._v21_server_notes >= dual.SERVER_ERROR_NOTES:
+        cap = {"server-error": dual.SERVER_ERROR_NOTES, "isolation": dual.ISOLATION_NOTES}.get(kind)
+        if cap is not None:
+            if self._v21_capped_notes[kind] >= cap:
                 return None
-            self._v21_server_notes += 1
+            self._v21_capped_notes[kind] += 1
         return kind
 
     def _v21_tool(self, err) -> bool:

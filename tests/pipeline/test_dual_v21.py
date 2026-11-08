@@ -539,18 +539,21 @@ def server_error(stage, role, agent, status=502, ordinal=0):
                                    "exitCode": 1, "providerOutcome": "unknown"}})
 
 
-def isolation_kill(stage, role, agent, item="extra-turn", ordinal=0):
-    """claude_agentic's isolation violation (output discarded): never a note."""
+def isolation_kill(stage, role, agent, item="forbidden-work-entry", ordinal=0, sent=6):
+    """claude_agentic's isolation violation (output discarded; violation() always reports requestsSent and
+    maxRequestsPerCall). Only an ISOLATION_NOTE_ITEMS kind (extra-turn) can be a note."""
     return entry(stage, role, agent, ordinal, error={
         "code": "provider-error", "message": f"isolation audit failed ({item}); output discarded", "retryable": False,
-        "stage": stage, "detail": {"reason": "isolation-violation", "itemType": item, "providerOutcome": "unknown"}})
+        "stage": stage, "detail": {"reason": "isolation-violation", "itemType": item, "providerOutcome": "unknown",
+                                   "requestsSent": sent, "maxRequestsPerCall": 8}})
 
 
-# ---------------------------------------------------------------- 5. verify-unverified@1 (a session end without a verdict)
+# ---------------------------------------------------------------- 5. verify-unverified@2 (a session end without a verdict)
 
 class Unverified(V21Rig):
-    """dual.UNVERIFIED_RULE: an agentic cap stop (request cap, deadline, budget) or ONE upstream 5xx per run ends a
-    session without a verdict as a note: the verifier's candidate is dropped, the agentic pass adds nothing."""
+    """dual.UNVERIFIED_RULE: an agentic cap stop (request cap, deadline, budget), ONE upstream 5xx per run or (@2) ONE
+    agentic extra-turn isolation kill per run ends a session without a verdict as a note: the verifier's candidate is
+    dropped, the agentic pass adds nothing."""
 
     def verifier_ids(self, res):
         return [e["agentId"] for e in model_calls(res, "VERIFY")]
@@ -584,15 +587,83 @@ class Unverified(V21Rig):
         self.assertEqual(rep.status, "completed", rep.incomplete)
         self.assertEqual(rep.receipt["artifactDigests"], res.receipt["artifactDigests"])
 
-    def test_an_isolation_kill_is_never_a_note(self):
+    def isolation_partial(self, item, sent=6):
         m = self.case12()
-        scr, ids = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01"),
+        scr, ids = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01", item, sent=sent),
                                             vcc("verifier-02", m, path="src/handlers/b.py", line=2),
                                             vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
         res, _ = self.record_v21(m, scr)
         self.assertEqual(res.status, "partial")
         self.assertIn("verifier-failure", [i["reason"] for i in res.incomplete])
         self.assertNotIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["l"])["detail"])
+
+    def test_a_forbidden_work_entry_is_never_a_note(self):
+        self.isolation_partial("forbidden-work-entry")
+
+    def test_an_extra_request_is_never_a_note(self):
+        self.isolation_partial("extra-request", sent=9)
+
+    def test_an_extra_turn_past_the_cap_is_never_a_note(self):
+        self.isolation_partial("extra-turn", sent=9)
+
+    def test_one_extra_turn_per_run_is_a_note(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01", "extra-turn"),
+                                            vcc("verifier-02", m, path="src/handlers/b.py", line=2),
+                                            vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        d = self.drop_of(res, ids["l"])
+        self.assertEqual(d["reason"], "verifier-failed")
+        self.assertTrue(d["detail"].startswith("verify-unverified@2: no verdict (isolation), dropped (a note); "
+                                               "provider-error: isolation audit failed (extra-turn)"), d["detail"])
+        self.assertNotIn(ids["l"], [f["id"] for f in payload(res, "VERIFY")["findings"]])       # fail closed
+        self.assertEqual(self.verifier_ids(res), ["verifier-01", "verifier-02", "verifier-03"])  # no re-ask
+        self.assertEqual(len(comments_of(res)), 2)
+        rep = self.replay_v21(m, res)
+        self.assertEqual(rep.status, "completed", rep.incomplete)
+        self.assertEqual(rep.receipt["artifactDigests"], res.receipt["artifactDigests"])
+
+    def test_a_second_extra_turn_keeps_its_incomplete_entry(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01", "extra-turn"),
+                                            isolation_kill("VERIFY", "verifier", "verifier-02", "extra-turn"),
+                                            vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("s",))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "VERIFY"], ["verifier-failure"])
+        self.assertIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["l"])["detail"])
+        self.assertNotIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["b"])["detail"])
+
+    def test_an_extra_turn_and_a_5xx_each_take_their_own_note(self):
+        m = self.case12()
+        scr, _ = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01", "extra-turn"),
+                                          server_error("VERIFY", "verifier", "verifier-02"),
+                                          agentic_stop("VERIFY", "verifier", "verifier-03")], judged=())
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(payload(res, "VERIFY")["findings"], [])
+
+    def test_an_agentic_pass_extra_turn_adds_nothing_and_v16_counts(self):
+        m = self.case12()
+        scr, ids = self.run21(m, ag=[isolation_kill("INVESTIGATE", "investigator", G, "extra-turn")],
+                              verifiers=[vcc("verifier-01", m, path="src/lib.py", line=1),
+                                         vcc("verifier-02", m, path="src/handlers/b.py", line=2)], judged=("pl", "b"))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(P, "completed"), (G, "failed")])
+        self.assertEqual(len(comments_of(res)), 2)
+
+    def test_an_agentic_pass_extra_turn_takes_the_runs_one_isolation_note(self):
+        m = self.case12()
+        scr, ids = self.run21(m, ag=[isolation_kill("INVESTIGATE", "investigator", G, "extra-turn")],
+                              verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01", "extra-turn"),
+                                         vcc("verifier-02", m, path="src/handlers/b.py", line=2)], judged=("b",))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "partial")
+        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "VERIFY"], ["verifier-failure"])
+        self.assertNotIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["pl"])["detail"])
 
     def test_one_upstream_5xx_per_run_is_a_note(self):
         m = self.case12()
@@ -653,8 +724,17 @@ class Unverified(V21Rig):
 
     def test_identity_binds_the_rule_and_other_versions_are_untouched(self):
         d = dual.identity_doc(V21_POLICY, V21_PLAN["budget"], 50, 5)
-        self.assertEqual(d["unverified"], {"rule": "verify-unverified@1", "stops": list(dual.AGENTIC_STOP_REASONS),
-                                           "serverErrorNotes": 1})
+        self.assertEqual(d["unverified"], {"rule": "verify-unverified@2", "stops": list(dual.AGENTIC_STOP_REASONS),
+                                           "serverErrorNotes": 1, "isolationItems": ["extra-turn"], "isolationNotes": 1})
+        iso = lambda item, n=6, cap=8: {"code": "provider-error", "detail": {     # noqa: E731
+            "reason": "isolation-violation", "itemType": item, **({} if n is None else {"requestsSent": n}),
+            **({} if cap is None else {"maxRequestsPerCall": cap})}}
+        self.assertEqual(dual.unverified_end(iso("extra-turn")), "isolation")
+        self.assertEqual([dual.unverified_end(e) for e in (
+            iso("extra-turn", n=None), iso("extra-turn", cap=None), iso("extra-turn", 9), iso("extra-turn", True),
+            iso("extra-turn", "6"), iso("forbidden-work-entry"), iso("extra-request"), iso("init-surface:model"),
+            iso("forwarder:upstream-404"), iso("upstream-block:server_tool_use"), iso("tool-attempt"),
+            {"code": "schema-invalid", "detail": iso("extra-turn")["detail"]})], [None] * 12)
         self.assertEqual((dual.unverified_end({"code": "provider-error", "detail": {"reason": "agentic-tool-attempt"}}),
                           dual.unverified_end({"code": "provider-error", "detail": {"errorType": "claude.rate-limit",
                                                                                      "httpStatus": 529}}),
@@ -666,9 +746,10 @@ class Unverified(V21Rig):
         scr, _ = self.run21(m)
         backend, _ = self.record_backend(scr)
         c21 = identity.config_snapshot_id(self.spec(m, backend, profile=V21_PROFILE, plan=V21_PLAN, retrieval=V21_POLICY))
-        with mock.patch.object(dual, "SERVER_ERROR_NOTES", 0):
-            self.assertNotEqual(c21, identity.config_snapshot_id(
-                self.spec(m, backend, profile=V21_PROFILE, plan=V21_PLAN, retrieval=V21_POLICY)))
+        for name, val in (("SERVER_ERROR_NOTES", 0), ("ISOLATION_NOTES", 0), ("ISOLATION_NOTE_ITEMS", ())):
+            with self.subTest(name=name), mock.patch.object(dual, name, val):
+                self.assertNotEqual(c21, identity.config_snapshot_id(
+                    self.spec(m, backend, profile=V21_PROFILE, plan=V21_PLAN, retrieval=V21_POLICY)))
 
 
 class V20Parity(unittest.TestCase):
