@@ -34,6 +34,13 @@ Rule (BEHAVIOR):
   clock      (CLOCK_RULE) no candidate or re-ask starts in VERIFY's last VERIFY_MARGIN_SEC (one verifier session; at most
              VERIFY_MARGIN_BP of the ceiling); what the VERIFY stage clock cuts is a disclosed note ('deadline'), so the run
              completes instead of going partial; the run's soft and hard deadlines and a cancellation keep v12's handling;
+  unverified (UNVERIFIED_RULE) a session that ends WITHOUT a verdict or answer because the adapter stopped it at its
+             agentic cap (AGENTIC_STOP_REASONS: request cap, session deadline, session budget), or an upstream HTTP 5xx
+             (at most SERVER_ERROR_NOTES per run; a later one keeps its incomplete entry, so an outage stays partial),
+             is a disclosed note, never an incomplete entry: a verifier session's candidate is DROPPED (verdict failed,
+             drop verifier-failed; fail closed for precision); the agentic INVESTIGATE pass contributes no candidates and
+             v16's pass still counts (with no answer at all INVESTIGATE ends as before); isolation kills, replay,
+             cancel, internal and limit/latch ends keep their handling;
   JUDGE      v20's (judge-concrete@1, v16's dynamic cap).
 """
 
@@ -47,6 +54,9 @@ MERGE_RULE = lanes.CROSS_MERGE_RULE
 VERIFY_RULE = prompts.AGENTIC_VERIFY_VERSION
 VERIFY_ADMISSION_RULE = "agentic-verify-admission@1"
 CLOCK_RULE = "verify-clock@1"
+UNVERIFIED_RULE = "verify-unverified@1"
+AGENTIC_STOP_REASONS = ("agentic-max-requests", "agentic-deadline", "agentic-budget")   # runtime.claude_agentic.STOP_REASONS
+SERVER_ERROR_NOTES = 1                        # upstream HTTP 5xx session ends per run that are notes (UNVERIFIED_RULE)
 V16_AGENT = whole.AGENT                       # v16's pass (plain requests)
 AGENTIC_AGENT = whole.AGENT + "-agentic"      # v20's pass (the investigator role's params.agentic)
 PASSES = (V16_AGENT, AGENTIC_AGENT)           # run order
@@ -65,13 +75,29 @@ TEXT = ("v16's whole-change reviewer (host context, no tools, plain requests) th
         "read-only verifier session (VERIFIER_MAX_REQUESTS requests, VERIFIER_DEADLINE_SEC, VERIFIER_BUDGET_USD_MICROS "
         "PACING) that tries to refute it and confirms only with a cited concrete failure; a verifier session starts only "
         "while it fits below the JUDGE reserve; nothing new starts in VERIFY's last VERIFY_MARGIN_SEC and what the VERIFY "
-        "clock cuts is a note; JUDGE as v20")
+        "clock cuts is a note; a session the adapter stopped at its cap without a verdict (or one upstream 5xx per run) "
+        "is a note: the candidate is dropped, an agentic pass adds nothing; JUDGE as v20")
 
 
 def verifier_spec() -> dict:
     """The params.agentic of a v21 verifier role (catalog.claude_cli_agentic_spec validates it)."""
     return {"mode": "read-only", "maxRequests": VERIFIER_MAX_REQUESTS, "sessionDeadlineSec": VERIFIER_DEADLINE_SEC,
             "budgetUsdMicros": VERIFIER_BUDGET_USD_MICROS}
+
+
+def unverified_end(err) -> str | None:
+    """UNVERIFIED_RULE: 'stop' for a provider-error the adapter typed as an agentic cap stop (AGENTIC_STOP_REASONS),
+    'server-error' for a claude-cli upstream HTTP 5xx (errorType claude.server-error), else None. Pure; the per-run
+    SERVER_ERROR_NOTES count is the engine's."""
+    if not isinstance(err, dict) or err.get("code") != "provider-error":
+        return None
+    d = err.get("detail") if isinstance(err.get("detail"), dict) else {}
+    if d.get("reason") in AGENTIC_STOP_REASONS:
+        return "stop"
+    s = d.get("httpStatus")
+    if d.get("errorType") == "claude.server-error" and type(s) is int and 500 <= s <= 599:
+        return "server-error"
+    return None
 
 
 def plan_specialists() -> list[str]:
@@ -164,4 +190,5 @@ def identity_doc(policy, budget: dict, tool_max_calls: int, comment_cap_base: in
             "verify": {"rule": VERIFY_RULE, **verifier_spec(), "hops": agentic.HOPS},
             "admission": {"rule": VERIFY_ADMISSION_RULE, "sessionsPerCall": 2, "judgeReserveBp": sweeps.JUDGE_RESERVE_BP},
             "clock": {"rule": CLOCK_RULE, "marginSec": VERIFY_MARGIN_SEC, "marginBp": VERIFY_MARGIN_BP},
+            "unverified": {"rule": UNVERIFIED_RULE, "stops": list(AGENTIC_STOP_REASONS), "serverErrorNotes": SERVER_ERROR_NOTES},
             "investigateTopBp": deepcov.INVESTIGATE_TOP_BP}

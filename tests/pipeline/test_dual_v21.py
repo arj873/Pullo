@@ -1,7 +1,8 @@
 """V21 DUAL: investigator.impact@v21 = v16's whole pass (plain claude-cli requests, host head reads) + v20's agentic pass
 (`whole-agentic`), a claim-aware union (both passes first, then P0/P1, cap 16), ONE agentic read-only verifier session per
 candidate (refute-first, cites code, single vote; admission below the JUDGE reserve; the VERIFY clock degrades to notes),
-and v20's JUDGE. reviewer.pipeline.dual.
+and v20's JUDGE; a session end without a verdict at an agentic cap (or one upstream 5xx per run) is a note
+(verify-unverified@1). reviewer.pipeline.dual.
 
 The v19 rig (invented fixtures; a scripted fake claude-cli adapter that serves plain and agentic requests, the investigator
 AND the verifier, standing in for ccprov's runtime; the real engine, contracts, gateway and tools). No network, key, state,
@@ -520,6 +521,154 @@ class Verify(V21Rig):
 
 # impact@v20 recordings (e2e, schema re-ask, tool re-ask) made on the PRE-CHANGE source b55df4c
 PRE_V21_V20_PINS = json.loads('{"e2e": {"INVESTIGATE": "sha256:9fea9a392c4e2079e921f4074013979ba541a3fbec2ada6ff2b8f47fecfeedae", "PUBLISH": "sha256:90ccb2cf714453a5e060c13b5f5027f9e89431a2a6ea897a8143b3330e466a2e", "VERIFY": "sha256:7d8f236a741dfbda62223a4aa93c8638d1bf68b795cf7ad23e9f4bb71f9d1a71", "cfg": "sha256:7b5b35817ecfcdc3b8f988a70a6e6af908cc88aa3f4479211392d3079aae2a4d", "requests": ["sha256:6cbef9af6a77af0f70f79d399eec0a1832335f25ed2cc44c141b7f0cafe5a87a", "sha256:8509717d1077e9a1566fbd2f47ad0b9e163dee62b5f317052547124607cf8b10", "sha256:7f965a73f4f31cbf7b828bd38f3336a7b81ae7f76a708166de3b939a00af5ae1", "sha256:3914c2de10447086c6939c06eb8b0ae217d2faffd3a6cc3a49776adf246b11ee", "sha256:930f1f5026979035e59d3b80aadc5ae6dcae6dd9b8abe90be613b069e09a1b4f"], "trace": "sha256:76b8ed0fbe06a9e317caf047789ca2d9b129aa30146374d022fff0a09dfa0516"}, "schema_reask": {"INVESTIGATE": "sha256:abaee6b50a7cc3f580c78158fdd0bafec3c46258eb04ef6413eb700eab6a9ac8", "PUBLISH": "sha256:bef98210592c86f576616be07291817b793d50544aafd513f91dae7dd69fa2a8", "VERIFY": "sha256:f3ef367020518d5b13e534742a94d5d762c93569db179e6d03c4a710e70b6548", "cfg": "sha256:7b5b35817ecfcdc3b8f988a70a6e6af908cc88aa3f4479211392d3079aae2a4d", "requests": ["sha256:6cbef9af6a77af0f70f79d399eec0a1832335f25ed2cc44c141b7f0cafe5a87a", "sha256:72ae535a726cdd9ca2f558e80bf96beaee5552b5a5021af837abf1160fef0afc", "sha256:6cbef9af6a77af0f70f79d399eec0a1832335f25ed2cc44c141b7f0cafe5a87a", "sha256:cedb3b5e9f5c46817be94de320e47794a1d870360506da3ddcc8f38343d35af9", "sha256:9ecc11bb31877237bf1c9ae0f0a4a5c2afda49ea5a4a45c02b3bb641a16b509b", "sha256:3603b17f9deb02d5e4533912087025bcfa176eb7e336474b8eece39b0e35100f", "sha256:c6ec9c3db1fe3544f56e1f1e62fd08c540a8487c7b3b1508f65675b9f48241d8"], "trace": "sha256:2ad728b982d56d131c65dcdd931bd77ef37a9807339a9808a8c568446d5e15d0"}, "tool_reask": {"INVESTIGATE": "sha256:d06950abd0a08d9a3edc59a1d896be16f04eac7b030d5d821062b317cd98ec97", "PUBLISH": "sha256:26fd200b91a9b5e3ad7f2752f3650f929a9ccf5242f7d0c2b21edfe5b7cc8f21", "VERIFY": "sha256:86182844f450a064781703098e89e864167866854ffd301ef6fa032400d25a92", "cfg": "sha256:7b5b35817ecfcdc3b8f988a70a6e6af908cc88aa3f4479211392d3079aae2a4d", "requests": ["sha256:6cbef9af6a77af0f70f79d399eec0a1832335f25ed2cc44c141b7f0cafe5a87a", "sha256:a516af20e31088e84ea9bb76144069bc682883c313cdf0bf4851b88170f74c0f", "sha256:cedb3b5e9f5c46817be94de320e47794a1d870360506da3ddcc8f38343d35af9", "sha256:9ecc11bb31877237bf1c9ae0f0a4a5c2afda49ea5a4a45c02b3bb641a16b509b", "sha256:3603b17f9deb02d5e4533912087025bcfa176eb7e336474b8eece39b0e35100f", "sha256:c6ec9c3db1fe3544f56e1f1e62fd08c540a8487c7b3b1508f65675b9f48241d8"], "trace": "sha256:06760c83ce534e81db53dfe6c19a356b497afa8b7f2d31a4d9cc48a5bdb18499"}}')
+
+
+def agentic_stop(stage, role, agent, reason="agentic-max-requests", ordinal=0):
+    """claude_agentic's end of a session the adapter stopped at its cap (_stop: provider-error, outcome unknown)."""
+    return entry(stage, role, agent, ordinal, error={
+        "code": "provider-error", "message": "the agentic session reached its request cap (8) without a final answer",
+        "retryable": False, "stage": stage,
+        "detail": {"reason": reason, "requestsSent": 8, "maxRequests": 8, "providerOutcome": "unknown"}})
+
+
+def server_error(stage, role, agent, status=502, ordinal=0):
+    """claude_cli._failure of a call that ended on an upstream HTTP 5xx (claude.server-error, outcome unknown)."""
+    return entry(stage, role, agent, ordinal, error={
+        "code": "provider-error", "message": f"claude.server-error {status}: API Error: {status}", "retryable": False,
+        "stage": stage, "detail": {"errorType": "claude.server-error", "httpStatus": status, "cliError": "server_error",
+                                   "exitCode": 1, "providerOutcome": "unknown"}})
+
+
+def isolation_kill(stage, role, agent, item="extra-turn", ordinal=0):
+    """claude_agentic's isolation violation (output discarded): never a note."""
+    return entry(stage, role, agent, ordinal, error={
+        "code": "provider-error", "message": f"isolation audit failed ({item}); output discarded", "retryable": False,
+        "stage": stage, "detail": {"reason": "isolation-violation", "itemType": item, "providerOutcome": "unknown"}})
+
+
+# ---------------------------------------------------------------- 5. verify-unverified@1 (a session end without a verdict)
+
+class Unverified(V21Rig):
+    """dual.UNVERIFIED_RULE: an agentic cap stop (request cap, deadline, budget) or ONE upstream 5xx per run ends a
+    session without a verdict as a note: the verifier's candidate is dropped, the agentic pass adds nothing."""
+
+    def verifier_ids(self, res):
+        return [e["agentId"] for e in model_calls(res, "VERIFY")]
+
+    def test_a_verifier_stopped_at_its_cap_is_dropped_and_the_run_completes(self):
+        for reason in dual.AGENTIC_STOP_REASONS:
+            with self.subTest(reason=reason):
+                m = self.case12()
+                scr, ids = self.run21(m, verifiers=[agentic_stop("VERIFY", "verifier", "verifier-01", reason),
+                                                    vcc("verifier-02", m, path="src/handlers/b.py", line=2),
+                                                    vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
+                res, _ = self.record_v21(m, scr)
+                self.assertEqual(res.status, "completed", res.incomplete)
+                self.assertEqual(self.verifier_ids(res), ["verifier-01", "verifier-02", "verifier-03"])   # no re-ask
+                d = self.drop_of(res, ids["l"])
+                self.assertEqual(d["reason"], "verifier-failed")
+                self.assertTrue(d["detail"].startswith(dual.UNVERIFIED_RULE + ": no verdict (stop), dropped (a note); "
+                                                       "provider-error: "), d["detail"])
+                rec = next(v for v in payload(res, "VERIFY")["verifications"] if v["hypothesisId"] == ids["l"])
+                self.assertEqual(rec["verdict"], "failed")
+                self.assertNotIn(ids["l"], [f["id"] for f in payload(res, "VERIFY")["findings"]])   # fail closed
+                self.assertEqual(len(comments_of(res)), 2)
+
+    def test_the_rule_survives_strict_replay(self):
+        m = self.case12()
+        scr, _ = self.run21(m, verifiers=[agentic_stop("VERIFY", "verifier", "verifier-01"),
+                                          vcc("verifier-02", m, path="src/handlers/b.py", line=2),
+                                          vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
+        res, _ = self.record_v21(m, scr)
+        rep = self.replay_v21(m, res)
+        self.assertEqual(rep.status, "completed", rep.incomplete)
+        self.assertEqual(rep.receipt["artifactDigests"], res.receipt["artifactDigests"])
+
+    def test_an_isolation_kill_is_never_a_note(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[isolation_kill("VERIFY", "verifier", "verifier-01"),
+                                            vcc("verifier-02", m, path="src/handlers/b.py", line=2),
+                                            vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "partial")
+        self.assertIn("verifier-failure", [i["reason"] for i in res.incomplete])
+        self.assertNotIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["l"])["detail"])
+
+    def test_one_upstream_5xx_per_run_is_a_note(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[server_error("VERIFY", "verifier", "verifier-01"),
+                                            vcc("verifier-02", m, path="src/handlers/b.py", line=2),
+                                            vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("b", "s"))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertIn("no verdict (server-error), dropped (a note)", self.drop_of(res, ids["l"])["detail"])
+
+    def test_a_second_upstream_5xx_keeps_its_incomplete_entry(self):
+        m = self.case12()
+        scr, ids = self.run21(m, verifiers=[server_error("VERIFY", "verifier", "verifier-01"),
+                                            server_error("VERIFY", "verifier", "verifier-02", 503),
+                                            vcc("verifier-03", m, path="src/svc.py", line=2)], judged=("s",))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "partial")                                  # an outage stays visible
+        self.assertEqual([i["reason"] for i in res.incomplete if i["stage"] == "VERIFY"], ["verifier-failure"])
+        self.assertIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["l"])["detail"])
+        self.assertNotIn(dual.UNVERIFIED_RULE, self.drop_of(res, ids["b"])["detail"])
+        self.assertEqual(self.drop_of(res, ids["b"])["reason"], "verifier-failed")
+        self.assertEqual(self.verifier_ids(res), ["verifier-01", "verifier-02", "verifier-03"])
+
+    def test_a_stop_and_a_5xx_together_complete(self):
+        m = self.case12()
+        scr, _ = self.run21(m, verifiers=[agentic_stop("VERIFY", "verifier", "verifier-01"),
+                                          server_error("VERIFY", "verifier", "verifier-02"),
+                                          agentic_stop("VERIFY", "verifier", "verifier-03", "agentic-deadline")], judged=())
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual(payload(res, "VERIFY")["findings"], [])
+        self.assertEqual(model_calls(res, "JUDGE"), [])                          # nothing confirmed: nothing to judge
+
+    def test_an_agentic_pass_stopped_at_its_cap_adds_nothing_and_v16_counts(self):
+        m = self.case12()
+        scr, ids = self.run21(m, ag=[agentic_stop("INVESTIGATE", "investigator", G)],
+                              verifiers=[vcc("verifier-01", m, path="src/lib.py", line=1),
+                                         vcc("verifier-02", m, path="src/handlers/b.py", line=2)], judged=("pl", "b"))
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "completed", res.incomplete)
+        self.assertEqual([(a["agentId"], a["status"]) for a in payload(res, "INVESTIGATE")["agents"]],
+                         [(P, "completed"), (G, "failed")])                       # no re-ask of a cap stop
+        self.assertEqual([e["request"]["hypothesisId"] for e in model_calls(res, "VERIFY")], [ids["pl"], ids["b"]])
+        self.assertEqual(len(comments_of(res)), 2)
+
+    def v1_fails_at_once(self, v16, ag, ran):
+        m = self.case12()
+        scr, _ = self.run21(m, v16=v16, ag=ag, verifiers=[], judged=())
+        res, _ = self.record_v21(m, scr)
+        self.assertEqual(res.status, "failed")                                   # fails INVESTIGATE at once
+        self.assertEqual([e["agentId"] for e in inv_calls(res)], ran)
+
+    def test_v1_unchanged_for_v16s_plain_pass(self):
+        self.v1_fails_at_once([agentic_stop("INVESTIGATE", "investigator", P)], None, [P])
+
+    def test_v1_unchanged_for_an_agentic_pass_isolation_kill(self):
+        self.v1_fails_at_once(None, [isolation_kill("INVESTIGATE", "investigator", G)], [P, P, G])   # v16: a read turn + its answer
+
+    def test_identity_binds_the_rule_and_other_versions_are_untouched(self):
+        d = dual.identity_doc(V21_POLICY, V21_PLAN["budget"], 50, 5)
+        self.assertEqual(d["unverified"], {"rule": "verify-unverified@1", "stops": list(dual.AGENTIC_STOP_REASONS),
+                                           "serverErrorNotes": 1})
+        self.assertEqual((dual.unverified_end({"code": "provider-error", "detail": {"reason": "agentic-tool-attempt"}}),
+                          dual.unverified_end({"code": "provider-error", "detail": {"errorType": "claude.rate-limit",
+                                                                                     "httpStatus": 529}}),
+                          dual.unverified_end({"code": "provider-error", "detail": {"errorType": "claude.server-error",
+                                                                                     "httpStatus": 429}}),
+                          dual.unverified_end({"code": "schema-invalid", "detail": {"reason": "agentic-max-requests"}})),
+                         (None, None, None, None))
+        m = self.case12()
+        scr, _ = self.run21(m)
+        backend, _ = self.record_backend(scr)
+        c21 = identity.config_snapshot_id(self.spec(m, backend, profile=V21_PROFILE, plan=V21_PLAN, retrieval=V21_POLICY))
+        with mock.patch.object(dual, "SERVER_ERROR_NOTES", 0):
+            self.assertNotEqual(c21, identity.config_snapshot_id(
+                self.spec(m, backend, profile=V21_PROFILE, plan=V21_PLAN, retrieval=V21_POLICY)))
 
 
 class V20Parity(unittest.TestCase):

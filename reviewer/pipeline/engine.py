@@ -220,6 +220,7 @@ class Engine:
         self.v21 = bool(self.impact and self.policy.dual_pass)
         self._last_stop: str | None = None      # v21: the stop code of the latest gate check (None when it allowed work)
         self._verifier_note: str | None = None  # v21: the tool note appended to a verifier re-ask's task
+        self._v21_server_notes = 0              # v21: upstream 5xx ends taken as notes so far (dual.SERVER_ERROR_NOTES)
         self.plain_profile = None               # v21: the profile view of v16's pass (investigator without params.agentic)
         if self.v21:
             self.plain_profile = copy.deepcopy(spec.profile)
@@ -1583,7 +1584,8 @@ class Engine:
                     answered = True
                 elif kind == "failed" and (got["code"] in REPLAY_CODES or got["code"] in ("cancelled", "internal")
                                            or self.needs_reconciliation or self.fatal
-                                           or (v3_stops_later_specialists(got) and not agentic.is_tool_attempt(got))):
+                                           or (v3_stops_later_specialists(got) and not agentic.is_tool_attempt(got)
+                                               and not (base == dual.AGENTIC_AGENT and self._v21_unverified(got)))):
                     return self._v3_failed(agents, got, reason)  # V1: nothing later runs
                 ends.append((kind, got, reason))
         finally:
@@ -1625,6 +1627,18 @@ class Engine:
         """dual.CLOCK_RULE: the latest gate stop was the VERIFY stage clock (its margin or ceiling), not the run's soft or
         hard deadline or a cancellation: what it cut is a note and the run completes."""
         return self.v21 and self._last_stop == "stage-deadline"
+
+    def _v21_unverified(self, err) -> str | None:
+        """dual.UNVERIFIED_RULE: the kind ('stop' | 'server-error') of a v21 session end without a verdict that is a note,
+        else None. A 'server-error' answer counts against dual.SERVER_ERROR_NOTES, so call it once per end."""
+        if not self.v21 or self.needs_reconciliation or self.fatal:
+            return None
+        kind = dual.unverified_end(err)
+        if kind == "server-error":
+            if self._v21_server_notes >= dual.SERVER_ERROR_NOTES:
+                return None
+            self._v21_server_notes += 1
+        return kind
 
     def _v21_tool(self, err) -> bool:
         """v21 VERIFY: a verifier session the adapter ended for a tool attempt (agentic.TOOL_REASK_RULE)."""
@@ -2410,6 +2424,11 @@ class Engine:
         if err["code"] in REPLAY_CODES:
             self.set_fatal("VERIFY", err)
             return rec, None, None, inc
+        kind = self._v21_unverified(err)
+        if kind is not None:                     # dual.UNVERIFIED_RULE: no verdict; the candidate is dropped, a note
+            return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "verifier-failed",
+                               "detail": f"{dual.UNVERIFIED_RULE}: no verdict ({kind}), dropped (a note); "
+                                         f"{err['code']}: {err['message']}"[:1000]}, inc
         if self.v16 and (err["code"] in whole.REASK_CODES or self._v21_tool(err)) and not self.needs_reconciliation:
             # impact@v16 (whole.REASK_RULE): re-asked once in a new session; a second such end is a note
             return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "verifier-failed",
