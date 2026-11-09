@@ -677,6 +677,12 @@ class Spill(unittest.TestCase):
             (self.tr / n).write_bytes(data)
         return w
 
+    def relink(self, path, outside):
+        dst = outside / ("copy-" + path.name)
+        (shutil.copytree if path.is_dir() else shutil.copy)(path, dst)
+        (shutil.rmtree if path.is_dir() else os.remove)(path)
+        os.symlink(dst, path)
+
     def audit(self, w, sid=SID, ids=("toolu_cap000", "toolu_cap001", "toolu_cap002"), needle=TOKEN.encode()):
         seen = {}
 
@@ -728,9 +734,13 @@ class Spill(unittest.TestCase):
             "other-project-key": lambda w: (P(w) / "-home-operator").mkdir(),
             "file-in-projects": lambda w: (P(w) / "x").write_text("x"),
             "file-in-session": lambda w: (self.tr.parent / "subagents").mkdir(),
-            "tool-results-symlink": lambda w: (shutil.rmtree(self.tr), os.symlink(outside, self.tr)),
-            "session-symlink": lambda w: (shutil.rmtree(self.tr.parent), os.symlink(outside, self.tr.parent)),
-            "projects-symlink": lambda w: (shutil.rmtree(P(w)), os.symlink(outside, P(w))),
+            "renamed-key": lambda w: os.rename(P(w) / A.PROJECT_KEY, P(w) / "-home-operator"),
+            # a link to a copy of the VALID layout: only the no-follow checks can refuse it
+            "tool-results-symlink": lambda w: self.relink(self.tr, outside),
+            "session-symlink": lambda w: self.relink(self.tr.parent, outside),
+            "key-symlink": lambda w: self.relink(self.tr.parent.parent, outside),
+            "projects-symlink": lambda w: self.relink(P(w), outside),
+            "file-symlink-to-valid": lambda w: self.relink(self.tr / "toolu_cap000.txt", outside),
         }
         for name, mutate in cases.items():
             w = self.work()
