@@ -182,7 +182,7 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
                  "session(s) ended by a tool outside Read/Grep/Glob (re-asked once).")
     lines.append(f"- Union ({UNION_RULE}): {merged} restatement(s) of an earlier candidate dropped as merged; candidates "
                  f"found by both passes first, then P0/P1; at most {MAX_VERIFY} verified.")
-    lines.append(f"- Agentic verify ({VERIFY_RULE}): {len(sessions)} verifier session(s) (claude-cli-isolated@6, read-only, "
+    lines.append(f"- Agentic verify ({VERIFY_RULE}): {len(sessions)} verifier session(s) ({agentic.ISOLATION}, read-only, "
                  f"at most {VERIFIER_MAX_REQUESTS} requests and {VERIFIER_DEADLINE_SEC} s each), refute-first, single vote; "
                  f"{vtools} verifier session end(s) by a tool attempt (re-asked once with the tool note).")
     lines.append(f"- Verify admission ({VERIFY_ADMISSION_RULE}): {admit} candidate(s) not verified because a verifier "

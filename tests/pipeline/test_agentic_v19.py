@@ -226,7 +226,7 @@ class EndToEnd(V19Rig):
         self.assertEqual(sorted(c["findingIds"][0] for c in comments_of(res)), sorted(ids[:2]))
         md = md_of(res)
         self.assertIn("Agentic whole-change review (agentic-whole-review@1)", md)
-        self.assertIn("1 agentic session(s) (claude-cli-isolated@6", md)
+        self.assertIn("1 agentic session(s) (claude-cli-isolated@7", md)
         self.assertIn("JUDGE rule (judge-concrete@1): 1 finding(s) left out", md)
 
     def test_the_judge_sees_every_finding_even_beyond_the_cap_and_the_cap_applies_after_its_drops(self):

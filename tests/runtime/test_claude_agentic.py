@@ -1,7 +1,8 @@
-"""AGENTIC READ-ONLY claude-cli mode (claude-cli-isolated@6; reviewer.runtime.claude_agentic), offline: the spec, argv, env and
+"""AGENTIC READ-ONLY claude-cli mode (claude-cli-isolated@7; reviewer.runtime.claude_agentic), offline: the spec, argv, env and
 minimal-root sandbox; the forwarder @4 per-request protocol (unit and through the REAL Forwarder's unix socket against a loopback
 upstream); the SSE detail tally and the stream audit; the in-sandbox relay; refusals before any spawn; the gateway's session
-reservation; isolated@5 left unchanged; and RealCliAgenticProof: every agentic capture mode on the REAL claude 2.1.317 against a
+reservation; isolated@5 left unchanged; SPILL (@7: the CLI's own tool-results spill admitted, nothing else; the extra-turn shape);
+and RealCliAgenticProof: every agentic capture mode on the REAL claude 2.1.317 against a
 loopback fake Anthropic endpoint inside a network-less namespace (a dummy token; no inference)."""
 
 import copy
@@ -112,7 +113,7 @@ class Settings(unittest.TestCase):
         self.assertNotIn("agentic", f)
         g = C.request_facts(areq())
         self.assertEqual((g["isolationVersion"], g["agentic"], g["worstCaseApiEquivalentUsdMicros"], g["sandbox"]),
-                         ("claude-cli-isolated@6", SPEC, SPEC["budgetUsdMicros"], "claude-bwrap-minroot@1"))
+                         ("claude-cli-isolated@7", SPEC, SPEC["budgetUsdMicros"], "claude-bwrap-minroot@1"))
         self.assertEqual(g["toolsSha256"], A.AGENTIC_TOOLS_SHA[CLAUDE_CLI_VERSION])
         self.assertNotEqual(g["argvSha256"], f["argvSha256"])
         self.assertEqual(C.Slot("t", "m", 1).agentic, None)
@@ -655,6 +656,149 @@ class ToolAttempt(unittest.TestCase):
         m = copy.deepcopy(SECOND)
         m[2]["content"][1]["name"] = "json"
         self.assertEqual((post(body(m)), post(body(SECOND)), len(log), slot.forwarded), (404, 404, 1, 1))
+
+
+SID = "1a30d063-cbfa-4d39-a836-e4324b5ac863"
+TOKEN = F.dummy_token().secret.reveal()
+
+
+class Spill(unittest.TestCase):
+    """SPILL (isolated@7, root runtime card 2026-11-09T01:02Z): exactly the real 2.1.317 layout of a tool-results spill (proved by
+    capture agentic-spill) is admitted; every other shape under <home>/.claude/projects keeps forbidden-work-entry."""
+
+    def work(self, files=(("toolu_cap000.txt", b"x" * 900), ("toolu_cap001.json", b"[]"))):
+        w = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, w, True)
+        A.make_work(str(w))
+        (w / "cwd").mkdir()
+        self.tr = w / "home/.claude/projects" / A.PROJECT_KEY / SID / A.SPILL_DIR
+        self.tr.mkdir(parents=True)
+        for n, data in files:
+            (self.tr / n).write_bytes(data)
+        return w
+
+    def audit(self, w, sid=SID, ids=("toolu_cap000", "toolu_cap001", "toolu_cap002"), needle=TOKEN.encode()):
+        seen = {}
+
+        def ok(d):
+            seen["spill"] = A.spill_only(d, sid, list(ids), needle)
+            return seen["spill"] is not None
+        after = C.audit_work_after(str(w), F.dummy_token().secret, projects_ok=ok)
+        return after, seen.get("spill")
+
+    def test_the_real_layout_is_admitted_with_counts_only(self):
+        w = self.work()
+        after, spill = self.audit(w)
+        self.assertEqual((after["ok"], after["forbidden"], spill), (True, [], {"rule": A.SPILL_RULE, "files": 2, "bytes": 902}))
+        self.assertNotIn("x" * 20, json.dumps([after, spill]))
+        self.assertEqual(A.spill_only(w / "home/.claude/projects", SID, []), None)          # no audited id = no admission
+        self.work(files=())                                                                # an empty tool-results dir
+        self.assertEqual(A.spill_only(self.tr.parent.parent.parent, SID, []), {"rule": A.SPILL_RULE, "files": 0, "bytes": 0})
+
+    def test_isolated_5_and_a_call_without_the_hook_still_refuse_projects(self):
+        w = self.work()
+        self.assertEqual(C.audit_work_after(str(w), F.dummy_token().secret)["forbidden"], ["home/.claude/projects"])
+
+    def test_the_layout_anywhere_else_is_still_forbidden(self):
+        for where in ("home/xdg/state/projects", "home/projects", "home/.claude/x/projects"):
+            w = self.work()
+            dst = w / where
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(w / "home/.claude/projects", dst)
+            shutil.rmtree(w / "home/.claude/projects")
+            self.assertEqual(self.audit(w)[0]["forbidden"], [where], where)
+
+    def test_every_other_shape_under_projects_is_forbidden(self):
+        P = lambda w: w / "home/.claude/projects"                                        # noqa: E731
+        outside = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "secret.txt").write_text("s")
+        cases = {
+            "unknown-id": lambda w: (self.tr / "toolu_other.txt").write_text("x"),
+            "bad-name": lambda w: (self.tr / "toolu_cap002.log").write_text("x"),
+            "hidden-name": lambda w: (self.tr / ".toolu_cap002.txt").write_text("x"),
+            "symlink-file": lambda w: os.symlink(outside / "secret.txt", self.tr / "toolu_cap002.txt"),
+            "symlink-to-sibling": lambda w: os.symlink(self.tr / "toolu_cap000.txt", self.tr / "toolu_cap002.txt"),
+            "dir-in-tool-results": lambda w: (self.tr / "toolu_cap002.txt").mkdir(),
+            "fifo": lambda w: os.mkfifo(self.tr / "toolu_cap002.txt"),
+            "hard-link": lambda w: os.link(self.tr / "toolu_cap000.txt", outside / "h"),
+            "token-in-spill": lambda w: (self.tr / "toolu_cap002.txt").write_text("a " + TOKEN + " b"),
+            "transcript-beside-session": lambda w: (P(w) / A.PROJECT_KEY / f"{SID}.jsonl").write_text("{}"),
+            "second-session": lambda w: (P(w) / A.PROJECT_KEY / "2b30d063-cbfa-4d39-a836-e4324b5ac863").mkdir(),
+            "other-project-key": lambda w: (P(w) / "-home-operator").mkdir(),
+            "file-in-projects": lambda w: (P(w) / "x").write_text("x"),
+            "file-in-session": lambda w: (self.tr.parent / "subagents").mkdir(),
+            "tool-results-symlink": lambda w: (shutil.rmtree(self.tr), os.symlink(outside, self.tr)),
+            "session-symlink": lambda w: (shutil.rmtree(self.tr.parent), os.symlink(outside, self.tr.parent)),
+            "projects-symlink": lambda w: (shutil.rmtree(P(w)), os.symlink(outside, P(w))),
+        }
+        for name, mutate in cases.items():
+            w = self.work()
+            mutate(w)
+            after, spill = self.audit(w)
+            self.assertEqual((after["ok"], spill), (False, None), name)
+            self.assertIn("home/.claude/projects", after["forbidden"], name)
+        for name, kw in {"no-init": {"sid": None}, "other-session": {"sid": "2b30d063-cbfa-4d39-a836-e4324b5ac863"},
+                         "not-a-uuid": {"sid": "../x"}, "id-not-audited": {"ids": ("toolu_cap000",)}}.items():
+            after, spill = self.audit(self.work(), **kw)
+            self.assertEqual((after["ok"], spill), (False, None), name)
+        with mock.patch.object(A, "MAX_SPILL_FILE_BYTES", 899):
+            self.assertEqual(self.audit(self.work())[1], None, "file cap")
+        with mock.patch.object(A, "MAX_SPILL_BYTES", 901):
+            self.assertEqual(self.audit(self.work())[1], None, "total cap")
+
+    def test_other_forbidden_entries_still_refuse_beside_an_admitted_spill(self):
+        for rel in ("home/.claude/todos", "home/.claude/settings.json", "home/xdg/config/.credentials.json", "cwd/pwned"):
+            w = self.work()
+            (w / rel).write_text("x")
+            after, spill = self.audit(w)
+            self.assertEqual((after["ok"], after["forbidden"], spill["files"]), (False, ["cwd/*" if rel.startswith("cwd/") else rel], 2), rel)
+
+    def test_identity_and_modes(self):
+        from reviewer.pipeline import agentic as PA
+        self.assertEqual((A.ISOLATION_VERSION, PA.ISOLATION), ("claude-cli-isolated@7", "claude-cli-isolated@7"))   # review.md names it
+        self.assertEqual(A.isolation_identity(F.MODEL)["spill"], A.SPILL_RULE)
+        self.assertEqual(A.AGENTIC_PREFLIGHT_MODES, tuple(m for m in A.AGENTIC_CAPTURE_MODES if m != "agentic-spill-plant"))
+        self.assertIn("agentic-spill", A.AGENTIC_PREFLIGHT_MODES)
+
+
+class ExtraTurnShape(unittest.TestCase):
+    """@7: an extra-turn kill records the user event's shape (types, ids, lengths, a notice class), never its text."""
+
+    def feed(self, *events):
+        a = A.AgenticStreamAudit(model=F.MODEL, max_requests=6, base=True)
+        for e in events:
+            a.feed(json.dumps(e).encode())
+        return a
+
+    def test_the_shape_names_types_ids_and_lengths_only(self):
+        use = {"type": "assistant", "message": {"id": "m1", "content": [TOOL_USE, dict(TOOL_USE, id="toolu_2")]}}
+        res = {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "x"}]}}
+        extra = {"type": "user", "isSynthetic": True, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "SECRET-RESULT"}]},
+            {"type": "tool_result", "tool_use_id": "toolu_9; rm", "content": "y"},
+            {"type": "text", "text": "[Truncated: PARTIAL view SECRET-NOTICE"}, {"type": "text", "text": "SECRET-OTHER"}]}}
+        a = self.feed(use, res, extra)
+        self.assertEqual(a.reason, "extra-turn")
+        self.assertEqual(a.extra_turn, {
+            "keys": ["isSynthetic", "message", "type"], "flags": {"isSynthetic": True}, "messageKeys": ["content", "role"],
+            "role": "user", "contentKind": "list", "blockCount": 4, "blocks": [
+                {"type": "tool_result", "id": "toolu_1", "state": "answered", "isError": False, "contentTypes": ["text"]},
+                {"type": "tool_result", "id": "<other>", "state": "unknown", "isError": False, "contentTypes": "str"},
+                {"type": "text", "chars": 38, "class": "partial-view"}, {"type": "text", "chars": 12, "class": "other"}]})
+        self.assertNotIn("SECRET", json.dumps(a.extra_turn))
+        self.assertEqual(A._agentic_facts(a, session())["extraTurn"], a.extra_turn)
+        b = self.feed({"type": "user", "message": {"content": C.CONTINUATION_PREFIX + " go"}})
+        self.assertEqual((b.continuation, b.extra_turn["contentKind"], b.extra_turn["blocks"][0]["class"]), (True, "str", "continuation"))
+
+    def test_no_shape_without_an_extra_turn(self):
+        a = self.feed({"type": "assistant", "message": {"id": "m1", "content": [TOOL_USE]}},
+                      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "x"}]}})
+        self.assertEqual((a.reason, a.extra_turn, a.tool_ids), (None, None, ["toolu_1"]))
+        self.assertNotIn("extraTurn", A._agentic_facts(a, session()))
+        c = self.feed({"type": "assistant", "message": {"id": "m1", "content": [dict(TOOL_USE, name="Bash")]}},
+                      {"type": "user", "message": {"content": "x"}})
+        self.assertEqual((c.reason, c.extra_turn), ("tool-attempt", None))             # the first kill's cause is kept
 
 
 class GatewaySession(unittest.TestCase):

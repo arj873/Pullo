@@ -1,5 +1,5 @@
 """investigator.impact@v19: impact@v16 with its one reviewer run as ONE agentic read-only claude-cli session
-(claude-cli-isolated@6, reviewer.runtime.claude_agentic) and a JUDGE rule that leaves out findings without a concrete
+(claude-cli-isolated@7, reviewer.runtime.claude_agentic) and a JUDGE rule that leaves out findings without a concrete
 wrong behaviour (pure rules; the engine drives them in Engine._investigate_v16 and Engine._judge_findings).
 
 Why (held-out, one shot): v13 0.386 and v16 0.350 against comparators at 0.62-0.82; precision collapses on unseen
@@ -50,6 +50,7 @@ from . import deepcov, prompts, whole
 
 BEHAVIOR = "agentic-whole-review@1"
 SESSION_RULE = prompts.AGENTIC_REVIEW_VERSION
+ISOLATION = "claude-cli-isolated@7"   # = runtime.catalog.CLAUDE_CLI_AGENTIC_ISOLATION_VERSION (SPILL @7; tested), named in review.md
 JUDGE_RULE = prompts.JUDGE_CONCRETE_VERSION
 AGENT = whole.AGENT
 PLAN_MARKER = "agentic"
@@ -117,7 +118,7 @@ def coverage_lines(payload: dict, events: list, drops: list) -> list[str]:
     dropped = sum(1 for d in drops if d["reason"] == "below-threshold" and JUDGE_RULE in d.get("detail", ""))
     tools = sum(1 for a in payload.get("agents", []) if is_tool_attempt(a.get("error")))
     broad = any(e["request"].get("promptVersion") == prompts.INVESTIGATOR_IMPACT_V20_PROMPT for e in agentic)
-    lines.append(f"- Session ({SESSION_RULE}): {len(agentic)} agentic session(s) (claude-cli-isolated@6, read-only, at "
+    lines.append(f"- Session ({SESSION_RULE}): {len(agentic)} agentic session(s) ({ISOLATION}, read-only, at "
                  f"most {MAX_REQUESTS} requests and {SESSION_DEADLINE_SEC} s each).")
     if broad:                                    # impact@v20 only => v19's review.md is unchanged
         lines.append(f"- Task ({BROAD_RULE}): the reviewer was asked for every issue a senior reviewer would raise "

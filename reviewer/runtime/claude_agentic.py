@@ -1,4 +1,4 @@
-"""provider=claude-cli, AGENTIC READ-ONLY review calls (claude-cli-isolated@6; root BUILD GO 2026-11-03T16:10Z).
+"""provider=claude-cli, AGENTIC READ-ONLY review calls (claude-cli-isolated@7; root BUILD GO 2026-11-03T16:10Z; @7 = SPILL).
 
 Default OFF. A profile role opts in with params.agentic = {mode: read-only, maxRequests (2..30), sessionDeadlineSec (60..900),
 budgetUsdMicros (<= $10 PACING)} (catalog.claude_cli_agentic_spec); every other claude-cli call keeps claude-cli-isolated@5
@@ -43,7 +43,19 @@ run's PR snapshot. Two independent walls, both proved offline on the real 2.1.31
     real (no symlink component), a directory, no top-level .git or .env, not under the user home or the reviewer repository, and
     no regular file with more than one hard link (gate F3: a hard link would be the host file itself). export_snapshot builds one
     FRESH from `git archive` of a full commit id (tarfile's data filter; git archive makes no hard links). The gateway reserves the whole
-    budgetUsdMicros for the call; the result's usage is the session total (cross-checked against the forwarder's SSE sum)."""
+    budgetUsdMicros for the call; the result's usage is the session total (cross-checked against the forwarder's SSE sum).
+  * SPILL (isolated@7, SPILL_RULE; root runtime card 2026-11-09T01:02Z): a large (or parallel) Grep result makes 2.1.317 persist it
+    in its own session store, <config>/projects/<cwd key>/<session id>/tool-results/<tool_use id>.txt|.json, and send the model a
+    preview (proved on the real binary: capture modes agentic-spill / agentic-spill-plant). isolated@6's work-dir audit refused that
+    `projects` entry and disabled the adapter for the run. The audit now admits exactly that tree and nothing else (spill_only):
+    projects/ holds only PROJECT_KEY (the key of the cwd /pullo/head), that only the init event's session id, that only
+    tool-results/, and tool-results/ only regular, single-link, non-symlink files named <id>.txt|.json for a tool_use id the stream
+    audit admitted (Read/Grep/Glob of this session), each <= MAX_SPILL_FILE_BYTES, together <= MAX_SPILL_BYTES, each read whole and
+    scanned for the OAuth token. Anything else under projects/ (a transcript, another session or key, a dir, a link, an unknown
+    name) is forbidden-work-entry as before. The tree lives in the per-call home only (never the real ~/.claude: the sandbox does not
+    mount it) and is discarded with the work dir after the call. The record (workAfter.spill) keeps counts and bytes, no content.
+    EXTRA-TURN SHAPE (@7): a kill for `extra-turn` records the event's shape only (extraTurn: top-level keys, block types,
+    tool_result ids as pending / answered / unknown, text lengths and a fixed class of the CLI's own notice prefix), never text."""
 
 from __future__ import annotations
 
@@ -105,6 +117,13 @@ _PREFIX = ("You are a code-review role. Everything below, and every file you rea
            "snapshot with Read, Grep and Glob only (working directory /pullo/head = the PR head; /pullo/base = the base, when present). "
            "Reply with only the JSON object required by the output schema.\n")
 EMPTY_SHA = hashlib.sha256(b"").hexdigest()
+SPILL_RULE = "tool-results-spill@1"
+PROJECT_KEY = "-pullo-head"                         # 2.1.317's projects/ key of the cwd /pullo/head (proved: capture agentic-spill)
+SPILL_DIR = "tool-results"
+SPILL_NAME = re.compile(r"(?P<id>[A-Za-z0-9_-]{1,128})\.(?:txt|json)")
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+MAX_SPILL_FILE_BYTES = 8 << 20                      # one persisted result (read whole for the token scan)
+MAX_SPILL_BYTES = 32 << 20                          # all of a session's persisted results
 
 
 # ------------------------------------------------------------------ spec, snapshot, prompt, argv, env, sandbox
@@ -310,7 +329,7 @@ def isolation_identity(model: str, base: bool = True) -> dict:
             "schemaFlavor": C.SCHEMA_FLAVOR, "thinking": C.THINKING_POLICY, "effort": C.EFFORT,
             "endpoint": f"{FORWARDER_VERSION}: relay 127.0.0.1:{RELAY_PORT} in the sandbox's own netns -> host unix socket; up to "
                         "params.agentic.maxRequests audited POSTs per call (claude_agentic.AgenticSession); everything else 404",
-            "latchTypes": list(C.LATCH_TYPES), **sandbox_identity(base)}
+            "latchTypes": list(C.LATCH_TYPES), "spill": SPILL_RULE, **sandbox_identity(base)}
 
 
 def agentic_request_facts(request: dict) -> dict:
@@ -822,6 +841,8 @@ class AgenticStreamAudit(C.StreamAudit):
     result_errors: int = 0
     denials: int = 0
     tool_attempts: list = field(default_factory=list)   # names (tool_name) of tool_use blocks outside the set: the kill's cause
+    tool_ids: list = field(default_factory=list)        # SPILL: every admitted Read/Grep/Glob tool_use id, in order
+    extra_turn: dict | None = None                      # @7: the shape (never text) of the user event killed as extra-turn
 
     def feed(self, line: bytes) -> str | None:
         try:
@@ -859,6 +880,7 @@ class AgenticStreamAudit(C.StreamAudit):
                 elif ct == "tool_use" and c.get("name") in AGENTIC_TOOLS and isinstance(c.get("id"), str):
                     self.tool_uses[c["name"]] = self.tool_uses.get(c["name"], 0) + 1
                     self.pending.append(c["id"])
+                    self.tool_ids.append(c["id"])
                 elif ct in ("tool_use", "server_tool_use") or (isinstance(ct, str) and ct.endswith("tool_use")):
                     self.tool_attempts.append(tool_name(c.get("name")))
                     self._abort("tool-attempt")
@@ -883,9 +905,87 @@ class AgenticStreamAudit(C.StreamAudit):
                 if isinstance(content, list) else [content] if isinstance(content, str) else []
             if self.reason is None and len(texts) == 1 and isinstance(texts[0], str) and texts[0].startswith(C.CONTINUATION_PREFIX):
                 self.continuation = True
+            if self.reason is None and self.extra_turn is None:
+                self.extra_turn = turn_shape(ev, self.pending, self.tool_ids)
             self._abort("extra-turn")
             return self.reason
         return super().feed(line)
+
+
+# CLI-authored notice prefixes an extra-turn shape may name (a fixed class label; the text itself is never kept)
+NOTICE_CLASSES = (("continuation", C.CONTINUATION_PREFIX), ("partial-view", "[Truncated: PARTIAL view"),
+                  ("system-reminder", "<system-reminder>"))
+_IDENT = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def turn_shape(ev: dict, pending, admitted) -> dict:
+    """@7 EXTRA-TURN SHAPE: content types, ids and lengths of a stream-json user event, never its text. A tool_result id is kept
+    only when it is a plain identifier, with its state: pending (unanswered), answered (an admitted id already answered) or unknown."""
+    msg = ev.get("message") if isinstance(ev.get("message"), dict) else {}
+    content = msg.get("content")
+    blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content if isinstance(content, list) else []
+    out = []
+    for b in blocks[:16]:
+        if not isinstance(b, dict):
+            out.append({"type": "<non-object>"})
+            continue
+        d = {"type": str(b.get("type"))[:30]}
+        if b.get("type") == "tool_result":
+            i = b.get("tool_use_id")
+            d["id"] = i if isinstance(i, str) and _IDENT.fullmatch(i) else "<other>"
+            d["state"] = "pending" if i in pending else "answered" if i in admitted else "unknown"
+            d["isError"] = b.get("is_error") is True
+            c = b.get("content")
+            d["contentTypes"] = "str" if isinstance(c, str) else sorted({str(x.get("type"))[:30] if isinstance(x, dict) else "<non-object>"
+                                                                         for x in c}) if isinstance(c, list) else "other"
+        elif isinstance(b.get("text"), str):
+            d["chars"] = len(b["text"])
+            d["class"] = next((k for k, pre in NOTICE_CLASSES if b["text"].startswith(pre)), "other")
+        out.append(d)
+    return {"keys": sorted(str(k)[:40] for k in ev)[:16], "flags": {str(k)[:40]: v for k, v in ev.items() if isinstance(v, bool)},
+            "messageKeys": sorted(str(k)[:40] for k in msg)[:16], "role": str(msg.get("role"))[:20],
+            "contentKind": "str" if isinstance(content, str) else "list" if isinstance(content, list) else "other",
+            "blockCount": len(blocks), "blocks": out}
+
+
+def spill_only(d, session_id, tool_ids, needle: bytes | None = None) -> dict | None:
+    """SPILL (isolated@7): {rule, files, bytes} when `d` (<home>/.claude/projects) holds exactly the CLI's tool-results spill of
+    THIS session (module docstring, SPILL), else None (the caller keeps forbidden-work-entry). Nothing is followed: every entry is
+    lstat'ed, every file opened O_NOFOLLOW, read whole and scanned for `needle` (the OAuth token bytes)."""
+    def only(path, name):
+        if not stat.S_ISDIR(os.lstat(path).st_mode) or os.listdir(path) != [name]:
+            return None
+        return os.path.join(path, name)
+    try:
+        if not isinstance(session_id, str) or not SESSION_ID.fullmatch(session_id):
+            return None
+        ids, cur = {i for i in tool_ids if isinstance(i, str)}, str(d)
+        for name in (PROJECT_KEY, session_id, SPILL_DIR):
+            cur = only(cur, name)
+            if cur is None:
+                return None
+        if not stat.S_ISDIR(os.lstat(cur).st_mode):
+            return None
+        files = total = 0
+        for n in sorted(os.listdir(cur)):
+            m = SPILL_NAME.fullmatch(n)
+            if m is None or m["id"] not in ids:
+                return None
+            fp = os.path.join(cur, n)
+            st = os.lstat(fp)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_SPILL_FILE_BYTES:
+                return None
+            total += st.st_size
+            if total > MAX_SPILL_BYTES:
+                return None
+            with os.fdopen(os.open(fp, os.O_RDONLY | os.O_NOFOLLOW), "rb") as f:
+                data = f.read(MAX_SPILL_FILE_BYTES + 1)
+            if len(data) != st.st_size or (needle is not None and needle in data):
+                return None
+            files += 1
+        return {"rule": SPILL_RULE, "files": files, "bytes": total}
+    except OSError:
+        return None
 
 
 # ------------------------------------------------------------------ the call
@@ -980,8 +1080,17 @@ def call_agentic(prov, request: dict, ck: str) -> ProviderResult:
             return prov._done(ck, t0, outcome, _err(prov, "provider-error", crash[0], outcome, reason=crash[1], requestsSent=sent),
                               isolation=iso)
         iso["requestsSeen"] = len([r for r in audit.requests if r])
-        after = C.audit_work_after(work, token.secret)
+        spill = {}
+
+        def projects_ok(d):                      # SPILL (isolated@7): this session's tool-results only
+            f = spill_only(d, (audit.init or {}).get("session_id"), audit.tool_ids,
+                           None if token.secret is None else token.secret.reveal().encode("ascii"))
+            spill.update(f or {})
+            return f is not None
+        after = C.audit_work_after(work, token.secret, projects_ok=projects_ok)
         iso["workAfter"] = {k: after[k] for k in ("ok", "forbidden", "entries")}
+        if spill:
+            iso["workAfter"]["spill"] = spill
         if not after["ok"]:
             with prov._lock:
                 prov.disabled_reason = "forbidden-work-entry"
@@ -998,7 +1107,7 @@ def _agentic_facts(audit: AgenticStreamAudit, sess: AgenticSession) -> dict:
     return {"requestsRelayed": len(sess.usages), "maxRequests": sess.max_requests, "toolUses": dict(audit.tool_uses),
             "toolUsesSse": dict(sess.tool_uses), "toolResults": audit.results, "toolResultErrors": audit.result_errors,
             "permissionDenials": audit.denials, "budgetUsdMicros": sess.budget, "pacedUsdMicros": sess.spent(),
-            "refused": list(sess.refused)}
+            "refused": list(sess.refused), **({"extraTurn": audit.extra_turn} if audit.extra_turn is not None else {})}
 
 
 def _usage_of(prov, model, sess, think):
@@ -1160,8 +1269,12 @@ def _cut(prov, ck, t0, audit, iso, model, sess, think) -> ProviderResult:
 # ------------------------------------------------------------------ offline capture proofs (run by claude_capture.main)
 
 AGENTIC_CAPTURE_MODES = ("agentic-answer", "agentic-escape", "agentic-weak", "agentic-forbidden", "agentic-loop", "agentic-budget",
-                         "agentic-overage", "agentic-max_tokens")
-AGENTIC_PREFLIGHT_MODES = AGENTIC_CAPTURE_MODES
+                         "agentic-overage", "agentic-max_tokens", "agentic-spill", "agentic-spill-plant")
+# SPILL: agentic-spill (the real CLI spills three parallel Grep results; the session completes) runs in every agentic preflight;
+# agentic-spill-plant (the same session, then one file planted beside the real spill: refused) is a capture-only negative proof.
+AGENTIC_PREFLIGHT_MODES = tuple(m for m in AGENTIC_CAPTURE_MODES if m != "agentic-spill-plant")
+SPILL_LINES = (600, 150, 150)                      # src/big{i}.py line counts (~100 KB, ~25 KB, ~25 KB): each Grep result spills
+SPILL_PLANT = "transcript.jsonl"                   # planted in projects/<key>/ beside the real session dir by agentic-spill-plant
 # Each mode runs the REAL CLI through the live agentic path (minimal-root sandbox, relay, forwarder @4) against a loopback fake
 # Anthropic endpoint inside `bwrap --unshare-net` (claude_capture.capture_argv). The snapshot carries planted instruction files
 # (AGENTS.md, CLAUDE.md, .claude/settings.json hooks, .mcp.json, commands, skills) and a prompt-injection README, an outside secret
@@ -1192,6 +1305,8 @@ def _capture_tree(root: str) -> dict:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
     os.symlink(os.path.join(out, "secret.txt"), os.path.join(head, "link-out"))
+    for i, n in enumerate(SPILL_LINES):                # SPILL: Grep matches PULLO-SPILL on every line
+        Path(head, f"src/big{i}.py").write_text("".join(f"x_{i}_{k} = 'PULLO-SPILL {'y' * 150}'\n" for k in range(n)))
     return {"head": head, "base": base, "secret": os.path.join(out, "secret.txt")}
 
 
@@ -1221,6 +1336,12 @@ def _script(mode: str, k: int, tree: dict):
         return [tool(0, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", False
     if mode == "agentic-overage":
         return ([tool(0, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", True) if k == 0 else (answer, "end_turn", False)
+    if mode in ("agentic-spill", "agentic-spill-plant"):
+        if k == 0:
+            return ([tool(i, "Grep", {"pattern": "PULLO-SPILL", "path": f"{HEAD}/src/big{i}.py", "output_mode": "content",
+                                      "head_limit": 0}) for i in range(len(SPILL_LINES))]
+                    + [tool(9, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", False)
+        return answer, "end_turn", False
     if mode == "agentic-max_tokens":
         if k == 0:
             return [tool(0, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", False
@@ -1310,6 +1431,8 @@ class _CaptureAgentic(C.ClaudeCliProvider):
     capture_permission_mode = PERMISSION_MODE
     sandbox_argv = None
     marks: list = []
+    plant = False
+    spill_tree: list = []
 
     def _agentic_argv(self, model, base):
         if not self.weak:
@@ -1330,6 +1453,13 @@ class _CaptureAgentic(C.ClaudeCliProvider):
         def run(argv, stdin, env, cwd, timeout, **kw):
             res = real(argv, stdin, env, cwd, timeout, **kw)
             self.marks = sorted(str(p.relative_to(cwd)) for p in Path(cwd).rglob("*") if p.name.startswith(MARK))
+            proj = Path(cwd, "home/.claude/projects")       # SPILL: what the real CLI left there (names masked, no content)
+            self.spill_tree = sorted((re.sub(SESSION_ID.pattern, "<session>", str(x.relative_to(proj))),
+                                      "link" if x.is_symlink() else "dir" if x.is_dir() else "file" if x.is_file() else "other",
+                                      x.lstat().st_size if x.is_file() and not x.is_symlink() else 0)
+                                     for x in proj.rglob("*")) if proj.is_dir() else []
+            if self.plant and Path(proj, PROJECT_KEY).is_dir():
+                Path(proj, PROJECT_KEY, SPILL_PLANT).write_text("{}\n")
             return res
         self._run = run
 
@@ -1386,6 +1516,7 @@ def capture_main(spec: dict) -> dict:
                                    token_loader=lambda: token, upstream=f"http://127.0.0.1:{srv.server_address[1]}",
                                    agentic=True, agentic_snapshot=Snapshot(tree["head"], tree["base"]))
             prov.weak = mode == "agentic-weak"
+            prov.plant = mode == "agentic-spill-plant"
             prov.capture_permission_mode = "bypassPermissions" if prov.weak else PERMISSION_MODE
             prov.wrap_runner()
             req = probe_request(model, "answer")
@@ -1408,7 +1539,8 @@ def capture_main(spec: dict) -> dict:
             first_row = next(({**{k: r.get(k) for k in ("outcome", "billingKind", "costBasis", "errorKind", "note")},
                                "agentic": (r.get("isolation") or {}).get("agentic"),
                                "thinking": (r.get("isolation") or {}).get("thinking"), "usage": r.get("usage"),
-                               "forwarder": (r.get("isolation") or {}).get("forwarder")}
+                               "forwarder": (r.get("isolation") or {}).get("forwarder"),
+                               "workAfter": (r.get("isolation") or {}).get("workAfter")}
                               for r in rows if r.get("type") == "result"), None)
             kept = json.dumps(rows) + json.dumps(res.response) + json.dumps(res.error)
             time.sleep(0.5)
@@ -1437,7 +1569,7 @@ def capture_main(spec: dict) -> dict:
                 "bodies": [_scrub(x["body"], prompt) for x in posts], "bearerIsDummy": [x["bearerIsDummy"] for x in posts],
                 "apiKeyHeader": [x["apiKeyHeader"] for x in posts], "betas": [x["beta"] for x in posts][:1], "verdict": verdict,
                 "disabled": prov.disabled_reason, "latched": (prov.latched or {}).get("errorType"), "second": second,
-                "executed": prov.marks, "firstRow": first_row, "thinkLeak": "PULLO-CAPTURE-THINKING-TEXT" in kept,
+                "executed": prov.marks, "firstRow": first_row, "spillTree": [list(t) for t in prov.spill_tree], "thinkLeak": "PULLO-CAPTURE-THINKING-TEXT" in kept,
                 "forwarder": {k: ((first_row or {}).get("forwarder") or {}).get(k) for k in (
                     "version", "requestsSent", "requestsAttempted", "refused", "agenticRefused", "toolUses", "sseBlocks", "overage")},
                 "sandbox": {"bwrap": bool(box) and os.path.basename(box[0]) == "bwrap", "unshareNet": "--unshare-net" in box,
@@ -1537,6 +1669,25 @@ def analyse(out: dict, model: str, mode: str) -> dict:
             problems.append(f"extra usage on an agentic request did not stop the session and latch: {v}, {sec}")
         if (row.get("billingKind"), row.get("costBasis")) != ("claude-extra-usage", "extra-usage-charge-unknown"):
             problems.append("the extra-usage session was not booked as extra usage")
+    elif mode in ("agentic-spill", "agentic-spill-plant"):
+        tree = [tuple(t) for t in out.get("spillTree") or []]
+        ids = [f"toolu_cap0{i:02d}" for i in range(len(SPILL_LINES))]
+        want = sorted([(PROJECT_KEY, "dir"), (f"{PROJECT_KEY}/<session>", "dir"), (f"{PROJECT_KEY}/<session>/{SPILL_DIR}", "dir")]
+                      + [(f"{PROJECT_KEY}/<session>/{SPILL_DIR}/{i}.txt", "file") for i in ids])
+        if sorted(t[:2] for t in tree) != want or not all(t[2] > 0 for t in tree if t[1] == "file"):
+            problems.append(f"the real CLI did not spill exactly the three Grep results into its session's tool-results: {tree}")
+        last = bodies[-1]["messages"][-1]["results"] if bodies and bodies[-1].get("messages") else []
+        if out.get("posts") != 2 or sorted(r["id"] for r in last) != sorted(ids + ["toolu_cap009"]) or any(r["isError"] for r in last):
+            problems.append(f"the spilled session did not send its four tool results: posts {out.get('posts')}, {last}")
+        spill = (row.get("workAfter") or {}).get("spill")
+        if mode == "agentic-spill":
+            if v.get("status") != "ok" or not v.get("outputOk") or out.get("disabled") \
+                    or (spill or {}).get("rule") != SPILL_RULE or (spill or {}).get("files") != len(ids):
+                problems.append(f"the spill was not admitted (the session must complete, adapter enabled): {v}, {spill}, "
+                                f"disabled {out.get('disabled')}")
+        elif (v.get("reason"), v.get("itemType"), out.get("disabled")) != ("isolation-violation", "forbidden-work-entry",
+                                                                           "forbidden-work-entry") or spill:
+            problems.append(f"a file planted beside the real spill was not refused as forbidden-work-entry: {v}, {spill}")
     elif mode == "agentic-max_tokens":
         if (v.get("outcome"), v.get("status")) != ("processed", "invalid-output") or "max-output-tokens" not in str(row.get("note")):
             problems.append(f"a cut final answer was not an invalid-output cut: {v}")

@@ -233,7 +233,10 @@ def claude_cli_worst_case_micros(model: str, request_bytes: int, max_output_toke
 # opts in with params.agentic (default off: every role without it keeps claude-cli-isolated@5 byte-unchanged). The ONE call then is
 # a bounded CLI session with ONLY Read / Grep / Glob over the run's PR snapshot (head, + base), up to maxRequests relayed requests
 # within sessionDeadlineSec, each admitted by the forwarder against budgetUsdMicros (PACING; the gateway reserves exactly that).
-CLAUDE_CLI_AGENTIC_ISOLATION_VERSION = "claude-cli-isolated@6"
+# @7 (SPILL, root runtime card 2026-11-09T01:02Z): + the CLI's own tool-results spill admitted, exactly <home>/.claude/projects/-pullo-head/
+# <the init session id>/tool-results/<an audited tool_use id>.txt|.json, regular single-link files, size-capped, token-scanned
+# (claude_agentic.spill_only, SPILL_RULE); @6: the agentic mode as built.
+CLAUDE_CLI_AGENTIC_ISOLATION_VERSION = "claude-cli-isolated@7"
 CLAUDE_CLI_AGENTIC_KEYS = frozenset({"mode", "maxRequests", "sessionDeadlineSec", "budgetUsdMicros"})
 CLAUDE_CLI_AGENTIC_MAX_REQUESTS = 30           # root: N cap per session
 CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC = 900      # root: session deadline 15 min

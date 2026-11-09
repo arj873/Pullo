@@ -171,13 +171,13 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
     if profile["roles"]["investigator"]["promptVersion"] in AGENTIC_PROMPTS:   # agentic.SESSION_RULE (v19, v20)
         if profile["roles"]["investigator"]["provider"] != "claude-cli":
             raise ProfileError(f"{profile['roles']['investigator']['promptVersion']} needs a claude-cli investigator (its agentic read-only session is "
-                               "claude-cli-isolated@6 only)")
+                               f"{agentic.ISOLATION} only)")
         profile["roles"]["investigator"]["params"] = dict(profile["roles"]["investigator"]["params"],
                                                           agentic=agentic.spec())
     if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V21_PROMPT:   # dual.VERIFY_RULE
         if profile["roles"]["verifier"]["provider"] != "claude-cli":
             raise ProfileError("investigator.impact@v21 needs a claude-cli verifier (its agentic read-only verifier "
-                               "session is claude-cli-isolated@6 only)")
+                               f"session is {agentic.ISOLATION} only)")
         profile["roles"]["verifier"]["params"] = dict(profile["roles"]["verifier"]["params"],
                                                       agentic=dual.verifier_spec())
     if profile["roles"]["investigator"]["promptVersion"] in ALT_IMPACT_VERSIONS.values():

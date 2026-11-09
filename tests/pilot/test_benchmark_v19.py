@@ -61,7 +61,7 @@ class V19BenchmarkHost(TBH.Base):
         self.assertEqual(rep["status"], "planned", rep)
         self.assertEqual(rep["plan"]["runCeilingUsdMicros"], V19_RUN_CEILING_USD_MICROS)
         first = rep["plan"]["firstRequest"]
-        self.assertEqual((first["provider"], first["isolationVersion"]), ("claude-cli", "claude-cli-isolated@6"))
+        self.assertEqual((first["provider"], first["isolationVersion"]), ("claude-cli", "claude-cli-isolated@7"))
 
     def test_a_v19_live_launch_exports_the_snapshot_opens_agentic_and_cleans_up(self):
         rep, specs = self.launch(19)

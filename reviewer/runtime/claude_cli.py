@@ -897,11 +897,13 @@ def builtin_plugin_store_only(d: Path) -> bool:
         return False
 
 
-def audit_work_after(work: str, secret: Secret | None = None) -> dict:
+def audit_work_after(work: str, secret: Secret | None = None, projects_ok=None) -> dict:
     """By entry NAME: a credential/settings/extension name anywhere under the per-call home, or anything written into the
     cwd, is an isolation failure; the one exception is <home>/.claude/plugins holding only the admitted builtin plugins' own
     state files (builtin_plugin_store_only; CLI317). With `secret`, every file the CLI left in the work dir is also scanned for
-    the OAuth token bytes (2.1.309 and 2.1.317 persist none: proved offline): a hit means the token reached disk."""
+    the OAuth token bytes (2.1.309 and 2.1.317 persist none: proved offline): a hit means the token reached disk.
+    SPILL (claude-cli-isolated@7 only): `projects_ok` (a callable on the <home>/.claude/projects path; None = this audit exactly as
+    before: what isolated@5 runs is unchanged) may admit that one entry (claude_agentic.spill_only)."""
     p, forbidden, entries = Path(work), [], []
     if secret is not None:
         needle, budget = secret.reveal().encode("ascii"), 64 << 20
@@ -924,7 +926,8 @@ def audit_work_after(work: str, secret: Secret | None = None) -> dict:
             for n in dirs + files:
                 rel = str(Path(root, n).relative_to(p))
                 entries.append(rel[:80])
-                if n in FORBIDDEN_HOME_NAMES and not (rel == "home/.claude/plugins" and builtin_plugin_store_only(Path(root, n))):
+                if n in FORBIDDEN_HOME_NAMES and not (rel == "home/.claude/plugins" and builtin_plugin_store_only(Path(root, n))) \
+                        and not (projects_ok is not None and rel == "home/.claude/projects" and projects_ok(Path(root, n))):
                     forbidden.append(rel[:80])
             if depth >= 5:
                 dirs[:] = []
