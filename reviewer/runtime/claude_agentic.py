@@ -55,7 +55,18 @@ run's PR snapshot. Two independent walls, both proved offline on the real 2.1.31
     name) is forbidden-work-entry as before. The tree lives in the per-call home only (never the real ~/.claude: the sandbox does not
     mount it) and is discarded with the work dir after the call. The record (workAfter.spill) keeps counts and bytes, no content.
     EXTRA-TURN SHAPE (@7): a kill for `extra-turn` records the event's shape only (extraTurn: top-level keys, block types,
-    tool_result ids as pending / answered / unknown, text lengths and a fixed class of the CLI's own notice prefix), never text."""
+    tool_result ids as pending / answered / unknown, text lengths and a fixed class of the CLI's own notice prefix), never text.
+  * PARTIAL VIEW (@7, PARTIAL_VIEW_RULE; root runtime card 2 2026-11-09T02:00Z): a Read over the CLI's 25k-token cap returns the
+    first page and 2.1.317 appends ONE role "system" message after that turn's tool_results, made only of its fixed notice
+    "[Truncated: PARTIAL view — <path>: showing lines ...]" per truncated file, joined by a blank line (proved on the real binary:
+    capture agentic-partial-view). Forwarder @4 refused it (messages-not-an-extension). Now exactly that third message is admitted
+    (_notice_problem): one text block, every part a full match of NOTICE_RE, each path the file_path of a distinct Read tool_use of
+    the turn just relayed, at most MAX_NOTICE_BYTES. Nothing else changes: any other trailing message, block, text, path or a
+    second trailing message is still refused, and the notice then stays part of the history every later request must extend.
+  * LABEL PRECEDENCE (@7, gate M-1): an `extra-turn` kill is reported as extra-turn ONLY when nothing else is wrong - a forwarder
+    refusal (forwarder:*), an off-surface upstream block or tool (upstream-block:*), a malformed or unknown stream event
+    (malformed-jsonl / unknown-event:*) and an oversize output all take precedence (the max_tokens continuation cut keeps its own
+    earlier path)."""
 
 from __future__ import annotations
 
@@ -124,6 +135,16 @@ SPILL_NAME = re.compile(r"(?P<id>[A-Za-z0-9_-]{1,128})\.(?:txt|json)")
 SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_SPILL_FILE_BYTES = 8 << 20                      # one persisted result (read whole for the token scan)
 MAX_SPILL_BYTES = 32 << 20                          # all of a session's persisted results
+PARTIAL_VIEW_RULE = "read-partial-view@1"
+# 2.1.317's notice after a Read truncated at its token cap (one per file; parts joined by "\n\n"; proved: capture agentic-partial-view)
+NOTICE_RE = re.compile(
+    r"\[Truncated: PARTIAL view \u2014 (?P<path>/pullo/(?:head|base)/[^\n\]]{1,4096}?): showing lines \d{1,9}-\d{1,9} of \d{1,9} total "
+    r"\(\d{1,12} tokens, cap \d{1,12}\)\. Call Read with offset=\d{1,9} limit=\d{1,9} for the next page, or Grep to find a specific "
+    r"section\. To read it anyway, up to what still fits in your context, call Read again with allow_large: true \u2014 only if you "
+    r"genuinely need all of it or the user asked for the whole file\. Do NOT answer from this page alone if the answer may be "
+    r"further in the file\.\]")
+MAX_NOTICE_BYTES = 64 << 10
+LABEL_RULE = "extra-turn-last@1"                    # gate M-1: forwarder / upstream / stream faults win over an extra-turn kill
 
 
 # ------------------------------------------------------------------ spec, snapshot, prompt, argv, env, sandbox
@@ -329,7 +350,8 @@ def isolation_identity(model: str, base: bool = True) -> dict:
             "schemaFlavor": C.SCHEMA_FLAVOR, "thinking": C.THINKING_POLICY, "effort": C.EFFORT,
             "endpoint": f"{FORWARDER_VERSION}: relay 127.0.0.1:{RELAY_PORT} in the sandbox's own netns -> host unix socket; up to "
                         "params.agentic.maxRequests audited POSTs per call (claude_agentic.AgenticSession); everything else 404",
-            "latchTypes": list(C.LATCH_TYPES), "spill": SPILL_RULE, **sandbox_identity(base)}
+            "latchTypes": list(C.LATCH_TYPES), "spill": SPILL_RULE, "partialView": PARTIAL_VIEW_RULE,
+            "labels": LABEL_RULE, **sandbox_identity(base)}
 
 
 def agentic_request_facts(request: dict) -> dict:
@@ -581,6 +603,26 @@ def _tool_results_problem(blocks: list, pending: list) -> str | None:
     return None
 
 
+def _notice_problem(msg: dict, last: list) -> str | None:
+    """PARTIAL VIEW: None when `msg` (a request's one message after the tool_results) is exactly the CLI's truncated-Read notice
+    for Read calls of the turn just relayed (`last`, the forwarder's SSE detail), else the refusal reason."""
+    c = msg.get("content")
+    if msg.get("role") != "system" or not isinstance(c, list) or len(c) != 1 or set(c[0]) != {"type", "text"} \
+            or c[0]["type"] != "text" or not isinstance(c[0]["text"], str) or len(c[0]["text"].encode()) > MAX_NOTICE_BYTES:
+        return "trailing-message"
+    reads = [b["input"].get("file_path") for b in last
+             if b["type"] == "tool_use" and b.get("name") == "Read" and isinstance(b.get("input"), dict)]
+    paths = []
+    for part in c[0]["text"].split("\n\n"):
+        m = NOTICE_RE.fullmatch(part)
+        if m is None:
+            return "partial-view-text"
+        paths.append(m["path"])
+    if len(set(paths)) != len(paths) or any(reads.count(x) < 1 for x in paths):
+        return "partial-view-paths"
+    return None
+
+
 @dataclass
 class AgenticSession:
     """The forwarder's per-call state for an agentic slot (claude_cli.Slot.agentic); see the module docstring (FORWARDER @4)."""
@@ -606,6 +648,7 @@ class AgenticSession:
     overage: bool = False
     rate_headers: dict = field(default_factory=dict)
     stopped: str | None = None                      # gate F1: the first refusal, terminal (every later request gets it too)
+    notices: int = 0                                # PARTIAL VIEW: admitted truncated-Read notices (files)
 
     def _paced(self, u, w) -> int:
         keys = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")
@@ -665,12 +708,13 @@ class AgenticSession:
             if (sys_sha, meta_sha) != (self.system_sha, self.metadata_sha):
                 return "system-or-metadata-changed"
             n = len(self.prev)
-            if len(msgs) != n + 2 or msgs[:n] != self.prev:
-                return "messages-not-an-extension"
+            if len(msgs) not in (n + 2, n + 3) or msgs[:n] != self.prev or (len(msgs) == n + 3 and msgs[-1]["role"] != "system"):
+                return "messages-not-an-extension"                          # PARTIAL VIEW: + at most one trailing system message
             a, u = msgs[n], msgs[n + 1]
             if a["role"] != "assistant" or u["role"] != "user":
                 return "turn-roles"
-            why = _assistant_problem(a["content"], self.last or []) or _tool_results_problem(u["content"], self.pending)
+            why = _assistant_problem(a["content"], self.last or []) or _tool_results_problem(u["content"], self.pending) \
+                or (_notice_problem(msgs[n + 2], self.last or []) if len(msgs) == n + 3 else None)
             if why:
                 return why
         worst = claude_cli_worst_case_micros(self.model, len(raw), self.max_tokens)
@@ -678,6 +722,8 @@ class AgenticSession:
             return "agentic-budget"
         if self.prev is None:
             self.system_sha, self.metadata_sha = sys_sha, meta_sha
+        elif len(msgs) == len(self.prev) + 3:
+            self.notices += msgs[-1]["content"][0]["text"].count("[Truncated: PARTIAL view ")
         self.prev, self.pending, self.last = msgs, [], None
         self.worst.append(worst)
         self.usages.append(None)
@@ -1107,7 +1153,8 @@ def _agentic_facts(audit: AgenticStreamAudit, sess: AgenticSession) -> dict:
     return {"requestsRelayed": len(sess.usages), "maxRequests": sess.max_requests, "toolUses": dict(audit.tool_uses),
             "toolUsesSse": dict(sess.tool_uses), "toolResults": audit.results, "toolResultErrors": audit.result_errors,
             "permissionDenials": audit.denials, "budgetUsdMicros": sess.budget, "pacedUsdMicros": sess.spent(),
-            "refused": list(sess.refused), **({"extraTurn": audit.extra_turn} if audit.extra_turn is not None else {})}
+            "refused": list(sess.refused), **({"extraTurn": audit.extra_turn} if audit.extra_turn is not None else {}),
+            **({"partialViewNotices": sess.notices} if sess.notices else {})}
 
 
 def _usage_of(prov, model, sess, think):
@@ -1159,7 +1206,7 @@ def _interpret(prov, res, audit: AgenticStreamAudit, ck, t0, out_name, model, ca
     if (res.aborted == "extra-turn" and audit.continuation and sent >= 1 and sess.stops and sess.stops[-1] == "max_tokens"
             and audit.init is not None and not audit.unknown and not audit.bad and not bad_sse):
         return _cut(prov, ck, t0, audit, iso, model, sess, think)
-    if res.aborted in ("init-surface", "extra-request", "extra-turn"):
+    if res.aborted in ("init-surface", "extra-request"):
         item = res.aborted if res.aborted != "init-surface" else \
             "init-surface:" + ",".join(init_problems(audit.init or {}, model, audit.base, audit.permission_mode))[:80]
         return violation(item, f"isolation audit failed ({item}); output discarded; requests relayed: {sent}")
@@ -1173,6 +1220,9 @@ def _interpret(prov, res, audit: AgenticStreamAudit, ck, t0, out_name, model, ca
     if bad_sse:
         return violation("upstream-block:" + ",".join(sorted(bad_sse))[:40], "the upstream answered with a block or tool outside "
                                                                             "the agentic surface; output discarded")
+    if res.aborted == "extra-turn":                    # gate M-1: the label means a stray user event with NOTHING else wrong
+        item = "malformed-jsonl" if audit.bad else ("unknown-event:" + audit.unknown[0]) if audit.unknown else "extra-turn"
+        return violation(item, f"isolation audit failed ({item}); output discarded; requests relayed: {sent}")
     if res.timed_out:
         return _stop(prov, ck, t0, iso, sess, audit, model, think, "agentic-deadline",
                      f"the agentic session exceeded its deadline; requests relayed: {sent}")
@@ -1269,12 +1319,13 @@ def _cut(prov, ck, t0, audit, iso, model, sess, think) -> ProviderResult:
 # ------------------------------------------------------------------ offline capture proofs (run by claude_capture.main)
 
 AGENTIC_CAPTURE_MODES = ("agentic-answer", "agentic-escape", "agentic-weak", "agentic-forbidden", "agentic-loop", "agentic-budget",
-                         "agentic-overage", "agentic-max_tokens", "agentic-spill", "agentic-spill-plant")
+                         "agentic-overage", "agentic-max_tokens", "agentic-spill", "agentic-spill-plant", "agentic-partial-view")
 # SPILL: agentic-spill (the real CLI spills three parallel Grep results; the session completes) runs in every agentic preflight;
 # agentic-spill-plant (the same session, then one file planted beside the real spill: refused) is a capture-only negative proof.
 AGENTIC_PREFLIGHT_MODES = tuple(m for m in AGENTIC_CAPTURE_MODES if m != "agentic-spill-plant")
 SPILL_LINES = (600, 150, 150)                      # src/big{i}.py line counts (~100 KB, ~25 KB, ~25 KB): each Grep result spills
 SPILL_PLANT = "transcript.jsonl"                   # planted in projects/<key>/ beside the real session dir by agentic-spill-plant
+PAGE_FILES, PAGE_LINES = 8, 600                    # PARTIAL VIEW: src/page{i}.py, ~26k tokens each (over the CLI's 25k Read cap)
 # Each mode runs the REAL CLI through the live agentic path (minimal-root sandbox, relay, forwarder @4) against a loopback fake
 # Anthropic endpoint inside `bwrap --unshare-net` (claude_capture.capture_argv). The snapshot carries planted instruction files
 # (AGENTS.md, CLAUDE.md, .claude/settings.json hooks, .mcp.json, commands, skills) and a prompt-injection README, an outside secret
@@ -1305,6 +1356,8 @@ def _capture_tree(root: str) -> dict:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
     os.symlink(os.path.join(out, "secret.txt"), os.path.join(head, "link-out"))
+    for i in range(PAGE_FILES):                        # PARTIAL VIEW: each Read of these is truncated by the CLI
+        Path(head, f"src/page{i}.py").write_text("".join(f"p_{i}_{k} = 'PULLO-PAGE {'y' * 150}'\n" for k in range(PAGE_LINES)))
     for i, n in enumerate(SPILL_LINES):                # SPILL: Grep matches PULLO-SPILL on every line
         Path(head, f"src/big{i}.py").write_text("".join(f"x_{i}_{k} = 'PULLO-SPILL {'y' * 150}'\n" for k in range(n)))
     return {"head": head, "base": base, "secret": os.path.join(out, "secret.txt")}
@@ -1341,6 +1394,12 @@ def _script(mode: str, k: int, tree: dict):
             return ([tool(i, "Grep", {"pattern": "PULLO-SPILL", "path": f"{HEAD}/src/big{i}.py", "output_mode": "content",
                                       "head_limit": 0}) for i in range(len(SPILL_LINES))]
                     + [tool(9, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", False)
+        return answer, "end_turn", False
+    if mode == "agentic-partial-view":                 # 8 parallel truncated Reads, one more Read, then the answer
+        if k == 0:
+            return [tool(i, "Read", {"file_path": f"{HEAD}/src/page{i}.py"}) for i in range(PAGE_FILES)], "tool_use", False
+        if k == 1:
+            return [tool(0, "Read", {"file_path": HEAD + "/src/app.py"})], "tool_use", False
         return answer, "end_turn", False
     if mode == "agentic-max_tokens":
         if k == 0:
@@ -1688,6 +1747,16 @@ def analyse(out: dict, model: str, mode: str) -> dict:
         elif (v.get("reason"), v.get("itemType"), out.get("disabled")) != ("isolation-violation", "forbidden-work-entry",
                                                                            "forbidden-work-entry") or spill:
             problems.append(f"a file planted beside the real spill was not refused as forbidden-work-entry: {v}, {spill}")
+    elif mode == "agentic-partial-view":
+        roles = [[x.get("role") for x in b.get("messages") or []] for b in bodies]
+        ag = row.get("agentic") or {}             # (the CLI's count_tokens POSTs are refused by path, 404, never relayed: as before)
+        if out.get("posts") != 3 or v.get("status") != "ok" or not v.get("outputOk") or f.get("agenticRefused") or ag.get("refused") \
+                or ag.get("partialViewNotices") != PAGE_FILES or any("count_tokens" in str(x) for x in out.get("paths") or []):
+            problems.append(f"the truncated-Read notice was not admitted (3 requests, status ok, {PAGE_FILES} notices): posts "
+                            f"{out.get('posts')}, {v}, refused {f.get('agenticRefused')}, notices {ag.get('partialViewNotices')}")
+        if roles[1:] != [["user", "system", "assistant", "user", "system"],
+                         ["user", "system", "assistant", "user", "system", "assistant", "user"]]:
+            problems.append(f"the CLI's notice is not exactly one trailing system message kept in the history: {roles}")
     elif mode == "agentic-max_tokens":
         if (v.get("outcome"), v.get("status")) != ("processed", "invalid-output") or "max-output-tokens" not in str(row.get("note")):
             problems.append(f"a cut final answer was not an invalid-output cut: {v}")
