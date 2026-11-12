@@ -127,6 +127,12 @@ class Rules(unittest.TestCase):
             r.seed = None
             s0 = r.spec(m, backend, profile=V24_PROFILE, plan=V24_PLAN, retrieval=V24_POLICY)
             self.assertNotEqual(identity.config_snapshot_id(s1), identity.config_snapshot_id(s2))
+            other = [dict(x) for x in ITEMS]
+            other[1]["body"] += " (another baseline answer)"                              # F2 identity-no-digest: same mode, same count
+            r.seed = seed_doc(other)
+            s3 = r.spec(m, backend, profile=V24_PROFILE, plan=V24_PLAN, retrieval=V24_POLICY)
+            self.assertNotEqual(identity.config_snapshot_id(s1), identity.config_snapshot_id(s3))
+            self.assertNotEqual(seeded.identity_doc(seed_doc(ITEMS)), seeded.identity_doc(seed_doc(other)))
             with self.assertRaises(Exception) as ctx:
                 identity.config_snapshot_id(s0)
             self.assertIn("needs its seed document", str(ctx.exception))
@@ -149,10 +155,12 @@ class SeedRules(unittest.TestCase):
         bad = [b"\xff", b"[]", self.raw({**d, "x": 1}), self.raw({**d, "schema": "other@1"}), self.raw({**d, "mode": "fresh"}),
                self.raw({**d, "source": {**SRC, "extra": 1}}), self.raw({**d, "source": {**SRC, "commentsSha256": "x"}}),
                self.raw({**d, "source": {**SRC, "arm": ""}}), self.raw({**d, "items": {}}),
-               self.raw({**d, "items": [{"file": "a", "line": 1}]}), self.raw({**d, "items": [{"file": "", "line": 1, "body": "b"}]}),
-               self.raw({**d, "items": [{"file": "a", "line": 0, "body": "b"}]}),
-               self.raw({**d, "items": [{"file": "a", "line": True, "body": "b"}]}),
-               self.raw({**d, "items": [{"file": "a", "line": 1, "body": "  "}]}),
+               self.raw({**d, "items": [{"file": "a", "line": 1, "id": "x-0"}]}),
+               self.raw({**d, "items": [{"file": "", "line": 1, "body": "b", "id": "x-0"}]}),      # F2: each with a valid id, so the
+               self.raw({**d, "items": [{"file": "a", "line": 0, "body": "b", "id": "x-0"}]}),     # field's own guard is what refuses it
+               self.raw({**d, "items": [{"file": "a", "line": True, "body": "b", "id": "x-0"}]}),  # F2 load-bool-line: a bool is not an int
+               self.raw({**d, "items": [{"file": "a", "line": 1.0, "body": "b", "id": "x-0"}]}),
+               self.raw({**d, "items": [{"file": "a", "line": 1, "body": "  ", "id": "x-0"}]}),
                self.raw({**d, "items": [{"file": "a", "line": 1, "body": "b", "id": "x-0", "severity": "P0"}]}),
                self.raw({**d, "items": [{"file": "a", "line": 1, "body": "b"}]}),                        # SEED ID: required
                self.raw({**d, "items": [{"file": "a", "line": 1, "body": "b", "id": "Bad Id"}]}),
@@ -178,6 +186,10 @@ class SeedRules(unittest.TestCase):
                               "evidence": [{"kind": "code", "path": "src/lib.py", "lines": [1, 1], "commit": "snap:sha256:" + "0" * 64,
                                             "excerpt": "def load_user(uid, cache, region):"}]})
         self.assertEqual(validate("HypothesisDraft", d0), [])
+        past = {"file": "src/lib.py", "line": len(lines["src/lib.py"]) + 1, "body": "one past the end", "id": "ccbo-mini-past"}
+        last = dict(past, line=len(lines["src/lib.py"]), id="ccbo-mini-last")
+        out3, dropped3, _ = seeded.drafts(seed_doc([last, past]), lines.get, "snap:sha256:" + "0" * 64, {"src/lib.py"})
+        self.assertEqual(([n for n, _ in out3], dropped3), ([0], [{"index": 1, "reason": "no-such-line"}]))   # F2 drafts-off-by-one
         self.assertEqual(len(out[1][1]["claim"]), seeded.CLAIM_MAX)
         out2, dropped2, _ = seeded.drafts(seed_doc(ITEMS[4:5]), lambda p: ["x"] * 9, "snap:sha256:" + "0" * 64, None)
         self.assertEqual(([n for n, _ in out2], dropped2), ([0], []))           # unknown change list: not applied
@@ -324,6 +336,24 @@ class Options(TBH.Base):
         self.assertTrue(self.refused(impact_version=24, seed_candidates=str(self.tmp / "missing.json"))
                         .startswith("seed candidates are unreadable"))
         self.assertEqual(self.w.state_bytes(), before)
+
+    def test_benchmark_identity_binds_the_seed_digest(self):
+        """F2 identity-no-digest: two same-mode, same-count seeds that differ in one body give two config identities (so two eval
+        run ids); the identity records the seed's sha256."""
+        cfg = B.effective_config(self.w.options())
+        docs = [seed_doc(ITEMS), seed_doc([dict(x, body=x["body"] + " (other)") if n == 1 else x for n, x in enumerate(ITEMS)])]
+        idents = []
+        for n, doc in enumerate(docs):
+            p = self.tmp / f"seed-{n}.json"
+            p.write_text(json.dumps(doc))
+            ing = B.ingest(self.w.options(impact_version=24, seed_candidates=str(p)), cfg)
+            self.assertEqual(ing.seed, doc)
+            idents.append(B.config_identity(ing, {"p": 1}, {"q": 1}, None, True, cfg))
+        self.assertEqual([i["seedCandidates"]["sha256"] for i in idents], [seeded.digest(d) for d in docs])
+        self.assertEqual(idents[0]["seedCandidates"]["mode"], idents[1]["seedCandidates"]["mode"])
+        self.assertNotEqual(idents[0], idents[1])
+        o = self.w.options(impact_version=24, seed_candidates=str(self.tmp / "seed-0.json"))
+        self.assertNotEqual(B.eval_run_id(o, idents[0]), B.eval_run_id(o, idents[1]))
 
     def test_parser_and_identity(self):
         a = B._parser().parse_args(["--mode", "plan", "--case-url", "u", "--cutoff-proof", "p", "--admission", "a", "--decision",
