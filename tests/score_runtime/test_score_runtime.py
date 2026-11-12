@@ -177,7 +177,7 @@ class Validation(LedgerBase):
                 self.lg.totals(c)
 
     def test_constants_and_validator(self):
-        self.assertEqual((SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (60_000_000, 100_000_000))
+        self.assertEqual((SCORING_CATEGORY_CAP_MAX, SCORING_AGGREGATE_CEILING_MAX), (80_000_000, 100_000_000))
         validate_admission("scoring", 8_000_000, 20_000_000)
         validate_admission("review", None, None)
 
