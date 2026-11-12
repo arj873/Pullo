@@ -467,6 +467,7 @@ def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMP
                  else IMPACT_V20_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V20_PROMPT
                  else IMPACT_V21_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V21_PROMPT
                  else IMPACT_V24_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V24_PROMPT
+                 else IMPACT_V26_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V26_PROMPT
                  else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
@@ -998,9 +999,18 @@ IMPACT_V21_TEMPLATES = {**IMPACT_V20_TEMPLATES, "dualPass": V21_TEMPLATES}
 INVESTIGATOR_IMPACT_V24_PROMPT = "investigator.impact@v24"
 V24_TEMPLATES = {"seedRule": "seeded-candidates@1", "seedSchema": "pullo-seed-candidates@1", "behavior": "seeded-verify@1"}
 IMPACT_V24_TEMPLATES = {**IMPACT_V21_TEMPLATES, "seeded": V24_TEMPLATES}
-# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19, its broad-task variant v20, v21 and v24
+
+# investigator.impact@v26 (reviewer.pipeline.consensus; res2 CARD-v26-build, root GO 2026-11-12T08:25Z): v24's profile, Plan and
+# seed ingest with K6 consensus in place of v21's VERIFY and JUDGE calls; the run makes NO model call, so no model-visible text is
+# added. Every v1-v24 text above is unchanged; the consensus rule versions are bound through impact_template_digests(V26).
+INVESTIGATOR_IMPACT_V26_PROMPT = "investigator.impact@v26"
+V26_TEMPLATES = {"consensusRule": "k6-plain-witness@1", "seedSchema": "pullo-seed-candidates@2", "behavior": "consensus.k6@v26",
+                 "matcher": "res2-lexical-1to1@1", "verdict": "witness-supported"}
+IMPACT_V26_TEMPLATES = {**IMPACT_V24_TEMPLATES, "consensus": V26_TEMPLATES}
+# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19, its broad-task variant v20, v21, v24 and
+# v26 (v24's profile and Plan; it makes no model call at all)
 AGENTIC_PROMPTS = (INVESTIGATOR_IMPACT_V19_PROMPT, INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
-                   INVESTIGATOR_IMPACT_V24_PROMPT)
+                   INVESTIGATOR_IMPACT_V24_PROMPT, INVESTIGATOR_IMPACT_V26_PROMPT)
 
 
 def agentic_block(spec: dict) -> dict:

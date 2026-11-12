@@ -32,7 +32,7 @@ from reviewer.historical import BridgeError
 from reviewer.historical.bridge import _check_out
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
-from reviewer.pipeline import prompts, repocov, seeded
+from reviewer.pipeline import consensus, prompts, repocov, seeded
 from reviewer.pipeline.agentic import is_agentic_profile
 from reviewer.repoimport import RepoImportError, github_remote, load_import_pins, open_import, target_dir
 from reviewer.repoimport.fsio import read_nofollow
@@ -45,8 +45,8 @@ from .launcher import QUALITY, REPO, PilotError, _force_cleanup, _Unused, gatewa
 from .repository import (BOOK_NAME, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, RepositoryError,
                          _check_ceiling, _providers, _remove_if_empty, _request_facts, make_out, provider_scope, write_report)
 from .profile import ProfileError
-from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, export_snapshot, live_arm, live_terra, needs,
-                        open_terra_state, plan_providers, scrub_of, worst_case)
+from .providers import (TERRA_STATE_NOTE, CliProviders, ReviewProviders, TerraStateError, export_snapshot, live_arm, live_terra,
+                        needs, open_terra_state, plan_providers, scrub_of, worst_case)
 from .repository_profile import (ALT_IMPACT_VERSIONS, DEFAULT_IMPACT_VERSION, IMPACT_VERSIONS, check_experiment,
                                  repository_plan, repository_policy, repository_profile)
 
@@ -121,7 +121,7 @@ class BenchmarkOptions:
     experiment: str = "baseline"      # opt-in prompt arm; the default is the unchanged baseline
     live_stage_timing: bool = False   # opt-in: versioned live stage ceilings + host-stop recording (binds the plan)
     impact_version: int | None = None  # investigator impact@vN (None = the profile default, today 2); binds via profile
-    seed_candidates: str | None = None  # impact@v24 only: the seed document (seeded.SEED_SCHEMA); binds the run identity
+    seed_candidates: str | None = None  # impact@v24 / @v26 only: the seed document (seeded / consensus SEED_SCHEMA); binds the run identity
 
 
 @dataclass(frozen=True)
@@ -138,7 +138,7 @@ class BenchIngested:
     changed: tuple                   # sorted changed paths (all included on every side that has them)
     hashes: dict                     # proofSha256, admissionDigest, decisionSha256, baselineDigest
     store: Path
-    seed: dict | None = None         # impact@v24: the checked seed document (seeded.load); None for every other version
+    seed: dict | None = None         # impact@v24 / @v26: the checked seed document (seeded.load); None for every other version
 
 
 # ------------------------------------------------------------------ options
@@ -162,10 +162,14 @@ def check_options(o: BenchmarkOptions) -> None:
         if not o.retrieval:
             raise BenchmarkLaunchError("impact_version needs the retrieval profile (--retrieval on)")
     v24 = o.impact_version is not None and IMPACT_VERSIONS.get(o.impact_version) == prompts.INVESTIGATOR_IMPACT_V24_PROMPT
-    if o.seed_candidates is not None and (not isinstance(o.seed_candidates, str) or not o.seed_candidates or not v24):
-        raise BenchmarkLaunchError("seed_candidates is only for impact_version 24 (a seed document path)")
+    v26 = o.impact_version is not None and IMPACT_VERSIONS.get(o.impact_version) == prompts.INVESTIGATOR_IMPACT_V26_PROMPT
+    if o.seed_candidates is not None and (not isinstance(o.seed_candidates, str) or not o.seed_candidates
+                                          or not (v24 or v26)):
+        raise BenchmarkLaunchError("seed_candidates is only for impact_version 24 or 26 (a seed document path)")
     if v24 and o.seed_candidates is None:                  # seeded.SEED_RULE: v24 never runs without its seed
         raise BenchmarkLaunchError("impact_version 24 needs seed_candidates (its candidate list)")
+    if v26 and o.seed_candidates is None:                  # consensus.RULE: v26 never runs without its seed
+        raise BenchmarkLaunchError("impact_version 26 needs seed_candidates (its candidate and witness answers)")
     for name in ("case_url", "cutoff_proof", "admission", "decision", "launch_baseline", "store", "base_import_pins",
                  "head_import_pins", "out_dir"):
         if not isinstance(getattr(o, name), str) or not getattr(o, name):
@@ -509,15 +513,26 @@ def ingest(o: BenchmarkOptions, cfg: EffectiveConfig) -> BenchIngested:
     except Exception:  # noqa: BLE001
         raise BenchmarkLaunchError("CaseInput could not be built from the case URL and repository") from None
     seed = None
-    if o.seed_candidates is not None:                # impact@v24 (seeded.SEED_RULE): read and checked before any run starts
+    if o.seed_candidates is not None:                # impact@v24 / @v26: read and checked before any run starts
         try:
-            seed = seeded.load(read_nofollow(o.seed_candidates, seeded.MAX_SEED_BYTES))
+            seed = seeded.load(read_nofollow(o.seed_candidates, seeded.MAX_SEED_BYTES),
+                               26 if _zero_request(o.impact_version) else 24)
         except OSError:
             raise BenchmarkLaunchError("seed candidates are unreadable, not a regular file or too large") from None
         except seeded.SeedError as e:
             raise BenchmarkLaunchError(f"seed candidates refused: {str(e)[:200]}") from None
     return BenchIngested(o.case_url, case["id"], case, repo, proof, adm, base, head, {"base": bpins, "head": hpins},
                          changed, hashes, store, seed)
+
+
+def _zero_request(impact_version) -> bool:
+    """investigator.impact@v26 (reviewer.pipeline.consensus): the run makes no model request at all (plan_mode accepts that)."""
+    return impact_version is not None and IMPACT_VERSIONS.get(impact_version) == prompts.INVESTIGATOR_IMPACT_V26_PROMPT
+
+
+def _seed_identity(seed: dict) -> dict:
+    """The seed's identity record: impact@v26's (consensus.identity_doc) for a pullo-seed-candidates@2 document, else v24's."""
+    return consensus.identity_doc(seed) if seed.get("schema") == consensus.SEED_SCHEMA else seeded.identity_doc(seed)
 
 
 # ------------------------------------------------------------------ config and identity
@@ -576,8 +591,8 @@ def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retri
             "prTextSupplied": False, "reviewModelsDigest": cfg.models.digest}
     if "alternates" in profile:                      # impact@v7/@v10 only => every other identity is unchanged
         ident["reviewModelsAlternates"] = cfg.models.alternates_doc()
-    if ing.seed is not None:                         # impact@v24 only => every other identity is unchanged
-        ident["seedCandidates"] = seeded.identity_doc(ing.seed)
+    if ing.seed is not None:                         # impact@v24 / @v26 only => every other identity is unchanged
+        ident["seedCandidates"] = _seed_identity(ing.seed)
     if experiment != prompts.EXPERIMENT_BASELINE:    # absent for the baseline => the default identity is unchanged
         ident["experiment"] = {"id": experiment, "tasks": prompts.experiment_task_digests(),
                                "verifierPrompt": profile["roles"]["verifier"]["promptVersion"],
@@ -700,6 +715,9 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     ceiling = plan["budget"]["maxUsdMicros"]
     worst = worst_case(first)
     planned = bool(first) and not any(f.get("toolsInBody", False) for f in first)
+    zero = _zero_request(o.impact_version)               # impact@v26: planned only when the whole run made NO request
+    if zero:
+        planned = not first and problem is None and result is not None and result.status == "completed"
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent Opus gate on this host, then root's explicit invocation with real admission files",
              "live: root must export the exact accepted code bytes/hash and runtime config, pin them externally before any "
@@ -711,8 +729,12 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     if worst is not None and worst > ceiling:
         planned = False
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
-    if not first:
+    if not first and not zero:
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
+    if zero and first:
+        unmet.insert(0, f"{prompts.INVESTIGATOR_IMPACT_V26_PROMPT} makes no model request, but {len(first)} were captured")
+    if zero and not planned and not first:
+        unmet.insert(0, f"{prompts.INVESTIGATOR_IMPACT_V26_PROMPT}: the zero-request run did not complete in plan mode")
     return {**disclosure_header(ing, o, profile), "schema": REPORT_SCHEMA, "mode": "plan",
             "status": "planned" if planned else "plan-failed", "ok": planned,
             "plan": {"models": cfg.report()["roles"], "retrieval": o.retrieval,
@@ -737,7 +759,9 @@ def plan_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
                      "pipeline": problem if problem else {"status": result.status if result else None,
                                                           "error": result.error and result.error.get("code")},
                      "wouldWriteUnder": str(_real(o.out_dir))},
-            "unmetGates": unmet, "note": "plan proves the first actual request only; no bill, no quality claim"}
+            "unmetGates": unmet, "note": "plan proves the first actual request only; no bill, no quality claim",
+            **({"zeroRequestRun": {"behavior": consensus.BEHAVIOR, "capturedCount": len(first),
+                                   "status": result.status if result else None}} if zero else {})}
 
 
 # ------------------------------------------------------------------ live
@@ -788,11 +812,13 @@ def live_mode(o: BenchmarkOptions, ing: BenchIngested, cfg: EffectiveConfig, *, 
     except PipelineError as e:
         raise BenchmarkLaunchError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
     snapshot = snap_dir = None
-    if is_agentic_profile(profile):              # impact@v19: the agentic session's PR snapshot, removed after the run
+    zero = _zero_request(o.impact_version)       # impact@v26: no model request, so no CLI adapter, preflight or PR snapshot
+    if is_agentic_profile(profile) and not zero:  # impact@v19: the agentic session's PR snapshot, removed after the run
         snapshot, snap_dir = export_snapshot(ing.base, ing.head)
     try:
-        terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat),     # CLI preflight before any output
-                           **({} if snapshot is None else {"snapshot": snapshot}))
+        terra = (CliProviders(DisabledProvider("openai"), DisabledProvider("opencode"), DisabledProvider("claude-cli")) if zero
+                 else live_terra(profile, ledger, provider_scope(evr, ing, o.repeat),     # CLI preflight before any output
+                                 **({} if snapshot is None else {"snapshot": snapshot})))
         return _live_run(o, ing, cfg, out, evr, handle, book, ledger, profile, plan, policy, terra, transport, key_loader,
                          runner)
     finally:
@@ -893,8 +919,8 @@ def run_benchmark(o: BenchmarkOptions, *, transport=None, key_loader=load_openro
     else:
         rep = replay_mode(o, ing, cfg, runner=runner)
     rep["reviewModels"] = cfg.report()
-    if ing.seed is not None:                         # impact@v24: which candidate mode ran (seeded.SEED_RULE)
-        rep["seedCandidates"] = seeded.identity_doc(ing.seed)
+    if ing.seed is not None:                         # impact@v24 / @v26: which candidate mode ran
+        rep["seedCandidates"] = _seed_identity(ing.seed)
     return rep
 
 
@@ -964,7 +990,8 @@ def _parser() -> argparse.ArgumentParser:
                     help=f"investigator impact@vN (default: the profile default, v{DEFAULT_IMPACT_VERSION}); "
                     "3 = specialist investigators. Needs --retrieval on; binds the profile, Plan and policy")
     ap.add_argument("--seed-candidates", default=None,
-                    help="impact_version 24 only: the seed document (seeded-candidates@1); binds the run identity")
+                    help="impact_version 24 (seeded-candidates@1) or 26 (k6-plain-witness@1) only: the seed document; "
+                    "binds the run identity")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")

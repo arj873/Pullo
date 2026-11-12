@@ -65,7 +65,12 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # BenchmarkOptions.seed_candidates / --seed-candidates (refused for every other version, required for v24; the seed is read and
 # checked in ingest and its digest joins the config identity only when present, so every other launch is byte-identical).
 # Previous (V19-AGENTIC) pin: 1d2c5e29d1ff1f1c0ba95dd0fb3aff400c58bb6463d74283e78f731e42a8def1.
-GATED = {"reviewer/pilot/benchmark.py": "121d3194e13d6e63367501eb78969453b69ec468a277ff6c93ad46a14af0e9ca",   # CCFILTER-1 re-pin (impact@v24), pending ccb-gate
+# CONSENSUS-1 (declared for gate acceptance, NOT self-approved): benchmark.py re-pinned for impact@v26: seed_candidates also for v26
+# (seeded.load(raw, 26): pullo-seed-candidates@2) and required by it; the seed identity is consensus.identity_doc for an @2 seed;
+# plan mode reports 'planned' for v26 only when its whole run completed with NO captured request (zeroRequestRun, absent for every
+# other version); a v26 live run opens no CLI adapter, preflight or PR snapshot (DisabledProvider). Every other launch is unchanged.
+# Previous (CCFILTER-1) pin: 121d3194e13d6e63367501eb78969453b69ec468a277ff6c93ad46a14af0e9ca.
+GATED = {"reviewer/pilot/benchmark.py": "02b927d2a5a2c6241f036f216095003cff14d388ca58af7609475d4886cd767d",   # CONSENSUS-1 re-pin (impact@v26), pending ccf-gate
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",

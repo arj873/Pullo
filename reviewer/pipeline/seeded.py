@@ -69,8 +69,11 @@ def _pairs(kv):
     return out
 
 
-def load(raw: bytes) -> dict:
-    """The seed document from its bytes, checked (SeedError otherwise). Pure."""
+def load(raw: bytes, version: int = 24) -> dict:
+    """The seed document from its bytes, checked (SeedError otherwise). Pure. `version` is the run's impact version: 24 takes
+    exactly SEED_SCHEMA, 26 exactly consensus.SEED_SCHEMA (pullo-seed-candidates@2, consensus.check); every other one refuses."""
+    if version not in (24, 26):
+        raise SeedError("only impact_version 24 (pullo-seed-candidates@1) and 26 (pullo-seed-candidates@2) take a seed")
     if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_SEED_BYTES:
         raise SeedError(f"the seed is not at most {MAX_SEED_BYTES} bytes")
     try:
@@ -79,6 +82,9 @@ def load(raw: bytes) -> dict:
         if isinstance(e, SeedError):
             raise
         raise SeedError("the seed is not UTF-8 JSON") from None
+    if version == 26:                            # investigator.impact@v26 (reviewer.pipeline.consensus)
+        from . import consensus
+        return consensus.check(doc)
     if not isinstance(doc, dict) or set(doc) != {"schema", "mode", "source", "items"}:
         raise SeedError("the seed is not an object of exactly schema, mode, source, items")
     if doc["schema"] != SEED_SCHEMA:
@@ -94,7 +100,12 @@ def load(raw: bytes) -> dict:
     for k in ("promptSha256", "commentsSha256", "settleReceiptSha256"):
         if not isinstance(src[k], str) or not _HEX64.fullmatch(src[k]):
             raise SeedError(f"the seed source {k} is not a sha256")
-    items = doc["items"]
+    check_items(doc["items"])
+    return doc
+
+
+def check_items(items) -> None:
+    """A seed block's items: a list of at most MAX_ITEMS objects of exactly file, line, body, id, the ids unique (SeedError)."""
     if not isinstance(items, list) or len(items) > MAX_ITEMS:
         raise SeedError(f"the seed items are not a list of at most {MAX_ITEMS}")
     for it in items:
@@ -110,7 +121,6 @@ def load(raw: bytes) -> dict:
             raise SeedError("a seed item body is not a non-empty string")
     if len({it["id"] for it in items}) != len(items):
         raise SeedError("the seed item ids are not unique")
-    return doc
 
 
 def canonical(doc: dict) -> bytes:

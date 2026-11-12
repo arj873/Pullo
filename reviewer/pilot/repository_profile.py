@@ -41,6 +41,10 @@ required); v20's JUDGE; the $10 ceiling; its Plan lists `whole`, `whole-agentic`
 24 (explicit only) is investigator.impact@v24: v21 exactly (profile roles, verifier spec, specialists, ceiling and clocks) with
 INVESTIGATE replaced by a host-supplied seed (reviewer.pipeline.seeded: one plain baseline answer's comments, BenchmarkOptions
 seed_candidates) and no investigator model call; only its Plan reason names v24.
+26 (explicit only) is investigator.impact@v26: v24 exactly (profile roles, verifier spec, specialists, ceiling and clocks) with K6
+consensus (reviewer.pipeline.consensus: the seed carries one plain candidate answer and its plain witness answers; the candidates a
+witness supports are published verbatim) in place of v21's VERIFY and JUDGE calls; the run makes no model call; only its Plan
+reason names v26.
 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
@@ -58,7 +62,7 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
                                        INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
                                        INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT, SPECIALIST_AGENTS,
                                        INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
-                                       INVESTIGATOR_IMPACT_V24_PROMPT, AGENTIC_PROMPTS,
+                                       INVESTIGATOR_IMPACT_V24_PROMPT, INVESTIGATOR_IMPACT_V26_PROMPT, AGENTIC_PROMPTS,
                                        V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
@@ -87,7 +91,7 @@ IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROM
                    10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT,
                    16: INVESTIGATOR_IMPACT_V16_PROMPT, 19: INVESTIGATOR_IMPACT_V19_PROMPT,
                    20: INVESTIGATOR_IMPACT_V20_PROMPT, 21: INVESTIGATOR_IMPACT_V21_PROMPT,
-                   24: INVESTIGATOR_IMPACT_V24_PROMPT}
+                   24: INVESTIGATOR_IMPACT_V24_PROMPT, 26: INVESTIGATOR_IMPACT_V26_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -180,7 +184,7 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
         profile["roles"]["investigator"]["params"] = dict(profile["roles"]["investigator"]["params"],
                                                           agentic=agentic.spec())
     if profile["roles"]["investigator"]["promptVersion"] in (INVESTIGATOR_IMPACT_V21_PROMPT,     # dual.VERIFY_RULE
-                                                             INVESTIGATOR_IMPACT_V24_PROMPT):
+                                                             INVESTIGATOR_IMPACT_V24_PROMPT, INVESTIGATOR_IMPACT_V26_PROMPT):
         if profile["roles"]["verifier"]["provider"] != "claude-cli":
             raise ProfileError(f"{profile['roles']['investigator']['promptVersion']} needs a claude-cli verifier (its "
                                f"agentic read-only verifier session is {agentic.ISOLATION} only)")
@@ -221,7 +225,8 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     if inv in (INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS):   # v12's clocks and tool cap (V12_*)
         if "alternates" in profile:
             raise ProfileError(f"{inv} runs on the primary investigator model only (no alternates)")
-        v21 = inv in (INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT)   # v24: v21's Plan (its reason names v24)
+        v21 = inv in (INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT,   # v24: v21's Plan (its reason names v24)
+                      INVESTIGATOR_IMPACT_V26_PROMPT)                                   # v26: v24's (its reason names v26)
         plan = live_plan(profile, **({"stage_ceilings_sec": V21_LIVE_STAGE_CEILINGS_SEC if v21
                                       else V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
                                       "wall_clock_sec": V21_LIVE_WALL_CLOCK_SEC if v21 else V12_LIVE_WALL_CLOCK_SEC,
@@ -252,6 +257,11 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
                                   f"{dual.MAX_VERIFY} candidates), one agentic read-only verifier session per candidate "
                                   f"(at most {dual.VERIFIER_MAX_REQUESTS} requests, {dual.VERIFIER_DEADLINE_SEC} s), "
                                   "then JUDGE with the concrete-behaviour rule (primary models only)")
+        if inv == INVESTIGATOR_IMPACT_V26_PROMPT:      # impact@v26: v24's Plan bytes but this reason (consensus.k6@v26)
+            plan["reasons"][1] = (f"{inv}: the run makes no model call - consensus.k6@v26 (k6-plain-witness@1): the host's seed "
+                                  "carries one plain baseline answer's comments and plain witness answers on the same prompt and "
+                                  "diff; the candidates a witness supports (deterministic matcher res2-lexical-1to1@1) are "
+                                  "published verbatim, without a verifier or judge call")
         return plan
     if inv == INVESTIGATOR_IMPACT_V12_PROMPT:    # the v12 scaling (V12_*); primary model only
         if "alternates" in profile:

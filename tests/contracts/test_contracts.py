@@ -118,7 +118,10 @@ class EvidenceAndFindings(Base):
     def test_finding_verdict_is_confirmed_only(self):
         f = ex("Finding")
         f["verification"]["verdict"] = "uncertain"
-        self.assertInvalid("Finding", f, "const")
+        # investigator.impact@v26: Verification is a union on verdict (confirmed | witness-supported); any other verdict is refused
+        self.assertInvalid("Finding", f, "enum")
+        f["verification"]["verdict"] = "witness-supported"          # the confirmed fields never pass as the v26 variant
+        self.assertInvalid("Finding", f, "unknown-field")
 
     def test_comment_draft_vs_posted(self):
         c = ex("Comment")

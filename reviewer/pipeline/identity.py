@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import agentic, deepcov, dual, lanes, prompts, repocov, retrieval, seeded, specialists, sweeps, whole
+from . import agentic, consensus, deepcov, dual, lanes, prompts, repocov, retrieval, seeded, specialists, sweeps, whole
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -173,10 +173,15 @@ def config_snapshot_id(spec) -> str:
                                                               spec.host.comment_cap)
         if pol.dual_pass:                        # investigator.impact@v21 only => v1-v20 run ids are unchanged
             extra["impact"]["dual"] = dual.identity_doc(pol, spec.plan["budget"], lim.max_calls, spec.host.comment_cap)
-        if pol.seeded:                           # investigator.impact@v24 only => v1-v21 run ids are unchanged
+        if pol.seeded and not pol.consensus:     # investigator.impact@v24 only => v1-v21 run ids are unchanged
             if not isinstance(spec.seed, dict):
                 raise PipelineError("invalid-input", "investigator.impact@v24 needs its seed document (seed_candidates)")
             extra["impact"]["seeded"] = seeded.identity_doc(spec.seed)
+        if pol.consensus:                        # investigator.impact@v26 only => v1-v24 run ids are unchanged
+            if not isinstance(spec.seed, dict) or spec.seed.get("schema") != consensus.SEED_SCHEMA:
+                raise PipelineError("invalid-input", "investigator.impact@v26 needs its seed document (seed_candidates, "
+                                    f"{consensus.SEED_SCHEMA})")
+            extra["impact"]["consensus"] = consensus.identity_doc(spec.seed)
         if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
             extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                   spec.host.comment_cap)

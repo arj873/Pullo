@@ -15,7 +15,8 @@ COMMENTS_SCHEMA = "review-comments@1"
 PARTIAL_COMMENTS_SCHEMA = "review-comments@2"     # @1 plus a mandatory `coverage` object; full-view bundles stay @1, byte-identical
 
 
-def comments_doc(run: dict, status: str, comments: list, coverage: dict | None = None, seed_ids: dict | None = None) -> dict:
+def comments_doc(run: dict, status: str, comments: list, coverage: dict | None = None, seed_ids: dict | None = None,
+                 witness_ids: dict | None = None) -> dict:
     """Bundle wrapper only: individual Comment entities are contracts-owned and untouched. A partial run adds a
     bundle-level `coverage` object (and bumps the wrapper to @2) so a sink reading only this file cannot take
     'completed' for a whole-repository review."""
@@ -23,6 +24,8 @@ def comments_doc(run: dict, status: str, comments: list, coverage: dict | None =
            "status": status, "state": "draft", "comments": comments}
     if seed_ids is not None:                     # investigator.impact@v24 only (seeded SEED ID): comment id -> its seed ids
         doc["seedIds"] = seed_ids
+    if witness_ids is not None:                  # investigator.impact@v26 only: comment id -> its [witness j, witness item id]s
+        doc["witnessIds"] = witness_ids
     if coverage is not None:
         d = coverage["detail"]
         doc["schema"] = PARTIAL_COMMENTS_SCHEMA

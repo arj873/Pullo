@@ -104,7 +104,7 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:ad4ac7e6e266af5b128ed702cbba3934d6ac3e75282735b025b9e385e07f61e6"   # + SHARD-COVERAGE-01; CCFILTER-1 repin (was 020e0b44f92f...)
+LIVE_TRACEEVENT_DIGEST = "sha256:677b19c378be344287cc971d1538d83f9bf70cbc51f9d51e495cacf9238eb3d6"   # + SHARD-COVERAGE-01; CCFILTER-1 repin (was 020e0b44f92f...); CONSENSUS-1 repin (was ad4ac7e6e266...)
 # EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
 # exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
 FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
@@ -264,8 +264,38 @@ def minus_ccfilter(name, d):
     return d
 
 
+# CONSENSUS-1 (declared for gate acceptance, NOT self-approved): investigator.impact@v26's additive extensions - Finding.verification
+# becomes a union on verdict (the unchanged "confirmed" object, or "witness-supported": the v26 rule and witness refs, no call and no
+# verifier evidence; check_finding_provenance admits it only against a seed.input consensus record), the optional INVESTIGATE
+# "consensus" record and the optional seed.input "consensus" field. Exactly these are subtracted here (before CCFILTER-1's); the
+# new shapes are pinned on their own (CONSENSUS_FINDING_DIGEST, CONSENSUS_PAYLOAD_DIGEST, CONSENSUS_SEED_INPUT_VARIANT_DIGEST).
+CONSENSUS_FINDING_DIGEST = "sha256:726e048308549cc22441da3cdb414b3a3e8f8ae2451a9a66187efd73136be690"
+CONSENSUS_PAYLOAD_DIGEST = "sha256:03127214ec7d4008c53567d40a1f8e8cbf38e2f656abcead02ccf4a4cfe495ef"
+CONSENSUS_SEED_INPUT_VARIANT_DIGEST = "sha256:389ffae6034c6adbfd5067d78a3247f2570924c2f91f6d8bd632883358a41da8"
+
+
+def minus_consensus(name, d):
+    d = copy.deepcopy(d)
+    if name == "Finding":
+        v = d["properties"]["verification"]
+        assert [x["properties"]["verdict"]["const"] for x in v["oneOf"]] == ["confirmed", "witness-supported"]
+        d["properties"]["verification"] = v["oneOf"][0]
+    if name == "StagePayload":
+        inv = next(v for v in d["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")
+        assert "consensus" in inv["properties"] and "consensus" not in inv["required"]
+        del inv["properties"]["consensus"]
+    return d
+
+
+def seed_input_minus_consensus(v):
+    v = copy.deepcopy(v)
+    assert "consensus" in v["properties"] and "consensus" not in v["required"]
+    del v["properties"]["consensus"]
+    return v
+
+
 def minus_live(name, d):
-    d = minus_ccfilter(name, d)
+    d = minus_ccfilter(name, minus_consensus(name, d))
     if name in OPENCODE_DEFS:
         d = minus_opencode(d)
     return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
@@ -443,9 +473,11 @@ class L1L2Compatibility(Base):
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)
         self.assertEqual(C.digest(inv["properties"]["seed"]), SEED_PAYLOAD_DIGEST)                 # CCFILTER-1
-        self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "seed.input")),
-                         SEED_INPUT_VARIANT_DIGEST)
-        self.assertEqual({n: C.digest(REGISTRY[n].to_json()) for n in CCFILTER_DEFS}, CCFILTER_DEF_DIGESTS)
+        seed_input = next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "seed.input")
+        self.assertEqual(C.digest(seed_input_minus_consensus(seed_input)), SEED_INPUT_VARIANT_DIGEST)
+        self.assertEqual({n: C.digest(minus_consensus(n, REGISTRY[n].to_json())) for n in CCFILTER_DEFS}, CCFILTER_DEF_DIGESTS)
+        self.assertEqual((C.digest(REGISTRY["Finding"].to_json()), C.digest(inv["properties"]["consensus"]), C.digest(seed_input)),   # CONSENSUS-1
+                         (CONSENSUS_FINDING_DIGEST, CONSENSUS_PAYLOAD_DIGEST, CONSENSUS_SEED_INPUT_VARIANT_DIGEST))
 
     def test_CostRecord_changes_only_by_appending_score_to_kind(self):
         cr = REGISTRY["CostRecord"].to_json()

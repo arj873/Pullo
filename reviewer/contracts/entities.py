@@ -266,6 +266,33 @@ _hyp_fields = {
 SeedId = Str(pattern=r"[a-z0-9][a-z0-9._-]{0,99}")      # the baseline comment's own id (seeded.SEED_ID_RE)
 SeedRef = Obj(required={"seed": Digest, "index": Int(0, 10_000), "id": SeedId},
               description="the seed.input event (seed digest) and the entry index of the draft that proposed this")
+# investigator.impact@v26 (reviewer.pipeline.consensus, k6-plain-witness@1): the per-candidate consensus table the host computes from
+# the seed (match + vote; no model call). It rides on the run's seed.input event (ConsensusEvent) and in the INVESTIGATE artifact.
+_Sha64 = Str(pattern=r"[0-9a-f]{64}")
+ConsensusPair = Obj(required={"witness": Int(0, 2), "witnessId": SeedId, "jac": Num(0, 1), "kov": Num(0, 1),
+                              "d": Int(0, 10_000_000), "score": Num(-1, 2)})
+ConsensusRow = Obj(required={"index": Int(0, 10_000), "seedId": SeedId, "votes": Int(0, 3), "supported": Bool(),
+                             "pairs": Arr(ConsensusPair, max_items=3)})
+
+
+def _consensus_ok(d):
+    if d["k"] > d["n"]:
+        yield ".k", "k exceeds n"
+    for i, r in enumerate(d["table"]):
+        if r["index"] != i:
+            yield f".table[{i}].index", "rows are not in candidate order"
+        if r["votes"] != len(r["pairs"]) or r["supported"] != (r["votes"] >= d["k"]):
+            yield f".table[{i}]", "votes is not the number of pairs, or supported is not votes >= k"
+        ws = [x["witness"] for x in r["pairs"]]
+        if ws != sorted(set(ws)) or any(w >= d["n"] for w in ws):
+            yield f".table[{i}].pairs", "not at most one pair per witness, in witness order, within n"
+
+
+ConsensusEvent = Obj(required={"rule": Const("k6-plain-witness@1"), "matcherSha256": _Sha64, "n": Int(1, 3), "k": Int(1, 3),
+                               "tableSha256": _Sha64, "table": Arr(ConsensusRow, max_items=200)},
+                     invariants=[Invariant("consensus-votes", "votes = pairs, supported = votes >= k, one pair per witness",
+                                           _consensus_ok)])
+WitnessRef = Obj(required={"witness": Int(0, 2), "witnessId": SeedId})
 _hyp_optional = {"mechanism": Str(max_len=2000), "reach": Str(max_len=2000),
                  "confidence": Num(0, 1), "sourceCallId": Id("call"), "seedRef": SeedRef}
 
@@ -298,11 +325,18 @@ def _finding_ok(d):
                 yield f".{side}[{i}]", "code evidence in a Finding must be snapshot-resolved"
 
 
-Verification = Obj(required={
-    "verdict": Const("confirmed"), "refutationAttempts": Int(1, 10),
-    "verifierFamily": Str(min_len=1, max_len=64), "notes": Str(max_len=4000),
-    "evidence": Arr(Evidence, min_items=1, max_items=50),
-    "callIds": Arr(Id("call"), min_items=1, max_items=10, unique=True)})
+Verification = Union("verdict", {
+    "confirmed": Obj(required={
+        "verdict": Const("confirmed"), "refutationAttempts": Int(1, 10),
+        "verifierFamily": Str(min_len=1, max_len=64), "notes": Str(max_len=4000),
+        "evidence": Arr(Evidence, min_items=1, max_items=50),
+        "callIds": Arr(Id("call"), min_items=1, max_items=10, unique=True)}),
+    # investigator.impact@v26 only (check_finding_provenance: the run's seed.input consensus record supports the seed item and
+    # names exactly these witness items): no verifier call and no verifier evidence
+    "witness-supported": Obj(required={
+        "verdict": Const("witness-supported"), "rule": Const("k6-plain-witness@1"),
+        "witnessRefs": Arr(WitnessRef, min_items=1, max_items=3), "callIds": Arr(Id("call"), max_items=0),
+        "evidence": Arr(Evidence, max_items=0)})})
 
 # investigator.impact@v24 (CCFILTER-1): a seeded Finding names seedRef (entry `index` of the drafts of the run's one seed.input
 # event with that seed digest) instead of sourceCallId; exactly one of the two (the independent-confirm invariant).
@@ -760,6 +794,21 @@ def check_finding_provenance(finding: dict, events: list) -> list[Issue]:
                     issue(f"$finding.{k}", "differs from the proposal in the seed.input event")
     else:
         src_ev = ok_call(src, "INVESTIGATE", "investigator", "$finding.sourceCallId")
+    con = src_ev.get("consensus") if seed_ref is not None and src_ev is not None else None
+    if finding["verification"].get("verdict") == "witness-supported":   # investigator.impact@v26: the seed.input consensus record
+        row = next((r for r in con["table"] if r["index"] == seed_ref["index"] and r["seedId"] == seed_ref["id"]),
+                   None) if con is not None else None
+        if con is None:
+            issue("$finding.verification", "a witness-supported finding needs its run's impact@v26 seed.input consensus record")
+        elif row is None or row["supported"] is not True:
+            issue("$finding.verification", "the consensus record does not support this seed item")
+        elif finding["verification"]["witnessRefs"] != [{"witness": x["witness"], "witnessId": x["witnessId"]}
+                                                         for x in row["pairs"]]:
+            issue("$finding.verification.witnessRefs", "differs from the consensus record's pairs for this seed item")
+        if finding["severityBasis"] != {"impact": finding["impact"], "reachable": False}:
+            issue("$finding.severityBasis", "a witness-supported finding asserts no reachability (no verifier looked)")
+    elif con is not None:
+        issue("$finding.verification", "an impact@v26 seed item is published only as witness-supported")
     if src_ev is not None and seed_ref is None:
         output = terminal_payload(src_ev)
         if output is None:
@@ -1394,7 +1443,8 @@ TraceEvent = define("TraceEvent", Union("type", {
                    "role", _model_call_ok)]),
     "seed.input": _event("seed.input", {
         "stage": Const("INVESTIGATE"), "seed": Digest, "mode": Enum("reuse", "live"),
-        "drafts": Arr(Obj(required={"index": Int(0, 10_000), "id": SeedId, "draft": HypothesisDraft}), max_items=200)}),
+        "drafts": Arr(Obj(required={"index": Int(0, 10_000), "id": SeedId, "draft": HypothesisDraft}), max_items=200)},
+        {"consensus": ConsensusEvent}),          # investigator.impact@v26 only
     "tool.call": _event("tool.call", {
         "toolCallId": Id("tool"), "stage": Stage, "agentId": Slug, "ordinal": Int(0, 10**6),
         "tool": Slug, "args": Json(), "resultHash": Digest, "result": ToolResult,
@@ -1529,6 +1579,26 @@ SeedRecord = Obj(required={
     "drafts": Arr(Obj(required={"index": Int(0, 10_000), "id": SeedId, "draft": HypothesisDraft}), max_items=10_000)})
 
 
+# investigator.impact@v26 (reviewer.pipeline.consensus): the INVESTIGATE artifact's consensus record (host data; ids, numbers and the
+# drafts it kept, no other item text)
+ConsensusSource = Obj(required={**{k: Str(min_len=1, max_len=200) for k in ("arm", "case", "runId", "model", "cliVersion")},
+                                **{k: _Hex64 for k in ("settleReceiptSha256", "commentsSha256", "promptTextSha256", "bodySha256",
+                                                       "diffSha256", "reviewerManifestSha256")},
+                                "exportVersion": Int(1, 10_000)})
+ConsensusRecord = Obj(required={
+    "rule": Const("k6-plain-witness@1"), "behavior": Const("consensus.k6@v26"), "schema": Const("pullo-seed-candidates@2"),
+    "mode": Enum("reuse", "live"), "sha256": _Hex64, "n": Int(1, 3), "k": Int(1, 3), "matcher": Const("res2-lexical-1to1@1"),
+    "matcherSha256": _Hex64, "candidateSource": ConsensusSource, "witnessSources": Arr(ConsensusSource, min_items=1, max_items=3),
+    "items": Int(0, 10_000), "witnessItems": Arr(Int(0, 10_000), min_items=1, max_items=3),
+    "table": Arr(ConsensusRow, max_items=200), "tableSha256": _Hex64, "supported": Int(0, 10_000), "candidates": Int(0, 10_000),
+    "dropped": Arr(Obj(required={"index": Int(0, 10_000), "id": SeedId,
+                                 "reason": Enum("no-witness", "bad-path", "not-a-changed-file", "no-such-line",
+                                                "unpublishable-body")},
+                       optional={"votes": Int(0, 3)}), max_items=10_000),
+    "truncatedClaims": Int(0, 10_000),
+    "drafts": Arr(Obj(required={"index": Int(0, 10_000), "id": SeedId, "draft": HypothesisDraft}), max_items=10_000)})
+
+
 def _payload(stage: str, required: dict, optional: dict | None = None) -> Obj:
     return Obj(required={"stage": Const(stage), **required}, optional=optional or {})
 
@@ -1542,7 +1612,8 @@ StagePayload = define("StagePayload", Union("stage", {
     "INVESTIGATE": _payload("INVESTIGATE", {"hypotheses": Arr(Hypothesis, max_items=1000),
                                             "agents": Arr(AgentStatus, max_items=100)},
                             {"merges": Arr(SpecialistMerge, max_items=1000), "sweep": SweepCoverage,
-                             "collapses": Arr(NearDuplicateCollapse, max_items=1000), "seed": SeedRecord}),
+                             "collapses": Arr(NearDuplicateCollapse, max_items=1000), "seed": SeedRecord,
+                             "consensus": ConsensusRecord}),
     "VERIFY": _payload("VERIFY", {"findings": Arr(Finding, max_items=1000),
                                   "verifications": Arr(VerificationRecord, max_items=1000),
                                   "drops": Arr(DropRecord, max_items=1000)}),

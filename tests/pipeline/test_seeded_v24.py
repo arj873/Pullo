@@ -322,9 +322,9 @@ class Options(TBH.Base):
         self.assertEqual(self.refused(impact_version=24), "impact_version 24 needs seed_candidates (its candidate list)")
         for over in ({"seed_candidates": "x.json"}, {"seed_candidates": "x.json", "impact_version": 21}):
             with self.subTest(**over):
-                self.assertEqual(self.refused(**over), "seed_candidates is only for impact_version 24 (a seed document path)")
+                self.assertEqual(self.refused(**over), "seed_candidates is only for impact_version 24 or 26 (a seed document path)")
         self.assertEqual(self.refused(impact_version=24, seed_candidates=""),
-                         "seed_candidates is only for impact_version 24 (a seed document path)")
+                         "seed_candidates is only for impact_version 24 or 26 (a seed document path)")
         self.assertIn("seed_candidates: benchmark data, label, gold and competitor-review paths are not launch inputs",
                       self.refused(impact_version=24, seed_candidates=str(self.tmp / "gold.json")))
 

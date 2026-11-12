@@ -26,6 +26,7 @@ from reviewer.contracts.budget import (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDI
                                       estimate_input_tokens, investigation_limit, reservation, stage_ceiling,
                                       stage_deadline_exceeded)
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
+from reviewer.contracts.redaction import contains_protected
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
 from reviewer.contracts.stages import STAGES, artifact_name
@@ -35,7 +36,7 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
 
 from . import coverage as cov_mod
 from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, seeded, snaps, specialists,
-               sweeps, agentic, dual, whole)
+               sweeps, agentic, consensus, dual, whole)
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -120,7 +121,9 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
     impact = impactcov.summarize(events, {f["path"] for f in files})     # None unless an impact map was made
     seed_ids = (seeded.comment_seed_ids(comments, artifacts["VERIFY"]["payload"].get("findings", ()))   # impact@v24: SEED ID
                 if seeded.is_seeded_payload(artifacts["INVESTIGATE"]["payload"]) else None)
-    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc, seed_ids=seed_ids))
+    witness_ids = (consensus.witness_ids(comments, artifacts["VERIFY"]["payload"].get("findings", ()))   # impact@v26
+                   if consensus.is_consensus_payload(artifacts["INVESTIGATE"]["payload"]) else None)
+    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc, seed_ids=seed_ids, witness_ids=witness_ids))
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
                           coverage=cdoc, retrieval=retrieval_run, impact=impact,
@@ -144,6 +147,9 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                                                                     list(artifacts["VERIFY"]["payload"].get("drops", ()))
                                                                     + list(artifacts["JUDGE"]["payload"]["drops"]))
                                         if agentic.is_v19_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        else consensus.coverage_lines(artifacts["INVESTIGATE"]["payload"])
+                                        if dual.is_v21_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        and consensus.is_consensus_payload(artifacts["INVESTIGATE"]["payload"])   # impact@v26
                                         else seeded.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
                                                                    list(artifacts["VERIFY"]["payload"].get("drops", ()))
                                                                    + list(artifacts["JUDGE"]["payload"]["drops"]))
@@ -227,6 +233,9 @@ class Engine:
         self.v21 = bool(self.impact and self.policy.dual_pass)
         # investigator.impact@v24: v21 with INVESTIGATE replaced by the host's seed, no investigator call (reviewer.pipeline.seeded)
         self.v24 = bool(self.v21 and self.policy.seeded)
+        # investigator.impact@v26: v24's seed ingest kept to the witness-supported candidates, published verbatim; no model call
+        # in the whole run (reviewer.pipeline.consensus)
+        self.v26 = bool(self.v24 and self.policy.consensus)
         self._last_stop: str | None = None      # v21: the stop code of the latest gate check (None when it allowed work)
         self._verifier_note: str | None = None  # v21: the tool note appended to a verifier re-ask's task
         self._v21_capped_notes = {"server-error": 0, "isolation": 0}   # v21: capped note kinds taken so far (dual.*_NOTES)
@@ -1479,6 +1488,8 @@ class Engine:
             agents.append({"agentId": whole.AGENT, "specialist": whole.AGENT, "status": _agent_status(g[1]),
                            "error": g[1]})
             return self._v3_failed(agents, g[1], g[0])
+        if self.v26:
+            return self._investigate_v26(stage, agents)
         if self.v24:
             return self._investigate_v24(stage, agents)
         if self.v21:
@@ -1647,6 +1658,62 @@ class Engine:
         record["drafts"] = [{"index": n, "id": seed["items"][n]["id"], "draft": d} for n, d in drafts
                             if hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]) in kept]
         return "completed", {"hypotheses": hyps, "agents": agents, "seed": record}, None, []
+
+    def _investigate_v26(self, stage, agents):
+        """investigator.impact@v26 (reviewer.pipeline.consensus): no model call. The seed's candidates are matched against its
+        witness answers (consensus.table, k-of-n); the SUPPORTED ones go through v24's location ingest (seeded.drafts, then the
+        snapshot resolver) and the verbatim-body check, and become Hypothesis documents as v24's. Unsupported ('no-witness'),
+        unlocatable and unpublishable candidates are disclosed by id. INVESTIGATE completes (with zero candidates when nothing is
+        supported); a missing seed is an internal error (benchmark refuses v26 without one)."""
+        seed = self.spec.seed
+        if not isinstance(seed, dict) or seed.get("schema") != consensus.SEED_SCHEMA:
+            err = typed_error("internal", "investigator.impact@v26 has no seed document", stage=stage)
+            agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": _agent_status(err), "error": err})
+            return self._v3_failed(agents, err, None)
+        cands = seed["candidates"]["items"]
+        rows = consensus.table(seed)
+        supported = {r["index"] for r in rows if r["supported"]}
+        dropped = [{"index": r["index"], "id": r["seedId"], "reason": "no-witness", "votes": r["votes"]}
+                   for r in rows if not r["supported"]]
+        located, gone, _ = seeded.drafts({"items": cands}, lambda p: snaps.head_lines(self.spec.head.root, self.spec.head.manifest, p),
+                                         self.head_id, self.changed_head_paths())
+        dropped += [{"index": d["index"], "id": cands[d["index"]]["id"], "reason": d["reason"]} for d in gone
+                    if d["index"] in supported]
+        drafts = []
+        for n, d in located:
+            if n not in supported:
+                continue
+            body = cands[n]["body"]
+            if len(body) > consensus.BODY_MAX or contains_protected(body) or contains_protected(consensus.title_of(body)):
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "unpublishable-body"})
+                continue
+            drafts.append((n, d))
+        family = self.profile["roles"]["investigator"]["family"]
+        ref = "sha256:" + seeded.digest(seed)
+        event = consensus.event_record(seed, rows)
+        self.recorder.append("seed.input", stage=stage, seed=ref, mode=seed["mode"],   # the drafts' and the votes' provenance
+                             drafts=[{"index": n, "id": cands[n]["id"], "draft": d} for n, d in drafts], consensus=event)
+        hyps = []
+        for n, d in drafts:
+            ev, problems = materialize_evidence(d["evidence"], {}, f"seed:{seed['mode']}", self.resolver)
+            if problems or not ev:               # the host's own citation must resolve (it is the pinned head line)
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "no-such-line"})
+                continue
+            h = {"id": hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]),
+                 "runId": self.run["id"], "specialist": seeded.AGENT, "claim": d["claim"], "category": d["category"],
+                 "suspectedSeverity": d["suspectedSeverity"], "impact": d["impact"], "location": d["location"],
+                 "evidence": ev, "modelFamily": family, "seedRef": {"seed": ref, "index": n, "id": cands[n]["id"]}}
+            if validate("Hypothesis", h):            # as v24
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "bad-path"})
+                continue
+            hyps.append(h)
+        dropped.sort(key=lambda x: x["index"])
+        agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": "completed"})
+        kept = {h["seedRef"]["index"] for h in hyps}
+        cut = sum(1 for n, d in drafts if n in kept and d["claim"] != cands[n]["body"])
+        record = consensus.summary(seed, rows, dropped, cut, [{"index": n, "id": cands[n]["id"], "draft": d}
+                                                              for n, d in drafts if n in kept])
+        return "completed", {"hypotheses": hyps, "agents": agents, "consensus": record}, None, []
 
     def _v21_passes(self) -> list:
         """The union's lanes in UNION_ORDER: v21's two passes, or impact@v24's one seed lane (its kept drafts, in order)."""
@@ -1960,6 +2027,10 @@ class Engine:
         """-> ([(original index n, hypothesis id, draft)], {id: Hypothesis}) rebuilt from the logged successful
         investigator call and the INVESTIGATE artifact (so a resumed run needs nothing else)."""
         hyps = {h["id"]: h for h in self.artifacts["INVESTIGATE"]["payload"]["hypotheses"]}
+        if self.v26:                                      # impact@v26: the kept candidates in candidate order (no union)
+            rec = self.artifacts["INVESTIGATE"]["payload"].get("consensus") or {}
+            by = {x["index"]: x["draft"] for x in rec.get("drafts", ())}
+            return [(h["seedRef"]["index"], hid, by.get(h["seedRef"]["index"])) for hid, h in hyps.items()], hyps
         if self.v21:                                      # impact@v21 (dual.UNION_RULE)
             return self._v21_candidates(hyps), hyps
         if self.specialists is not None or self.v16:      # impact@v16: the reviewer's lane (whole.AGENT or its re-ask)
@@ -2056,6 +2127,8 @@ class Engine:
         stage = "VERIFY"
         if self.fatal:
             return self.skipped(stage)
+        if self.v26:                                  # impact@v26: no verifier session or call (consensus.VERDICT)
+            return self._verify_v26(stage)
         cands, hyps = self.candidates()
         findings, records, drops, inc = [], [], [], []
         session = self.new_session(stage, VERIFIER_AGENT)
@@ -2294,6 +2367,30 @@ class Engine:
         status = "partial" if inc else "completed"
         return status, {"findings": findings, "verifications": records, "drops": drops}, None, inc
 
+    def _verify_v26(self, stage):
+        """investigator.impact@v26 (consensus.VERDICT): no verifier session or call. Each kept hypothesis becomes a Finding whose
+        verification names the rule and the witness items that supported it (the INVESTIGATE consensus record's pairs); the
+        severity basis asserts no reachability (no verifier looked). Every Finding is checked against the run's seed.input event
+        (check_finding_provenance); a mismatch fails VERIFY."""
+        inv = self.artifacts["INVESTIGATE"]["payload"]
+        rows = {r["index"]: r for r in (inv.get("consensus") or {}).get("table", ())}
+        events = list(self.recorder.events)
+        findings = []
+        for h in inv["hypotheses"]:
+            row = rows.get(h["seedRef"]["index"]) or {"pairs": []}
+            f = {k: h[k] for k in ("id", "runId", "specialist", "claim", "category", "suspectedSeverity", "impact", "location",
+                                   "evidence", "modelFamily", "seedRef")}
+            f["verification"] = {"verdict": consensus.VERDICT, "rule": consensus.RULE, "callIds": [], "evidence": [],
+                                 "witnessRefs": [{"witness": p["witness"], "witnessId": p["witnessId"]} for p in row["pairs"]]}
+            f["severityBasis"] = {"impact": h["impact"], "reachable": False}
+            problems = [str(i) for i in validate("Finding", f)] + [str(i) for i in check_finding_provenance(f, events)]
+            if problems:
+                err = typed_error("contract-violation", "witness-supported finding failed provenance: " + problems[0][:300],
+                                  stage=stage)
+                return "failed", self.empty(stage), err, []
+            findings.append(f)
+        return "completed", {"findings": findings, "verifications": [], "drops": []}, None, []
+
     def _verify_collapsed(self, index, hyps, outcome, attempt, over_cap, drops, stopped) -> bool:
         """impact@v5 (lanes.NEAR_DUP_RULE): a near-duplicate group none of whose kept members yielded a finding hands
         VERIFY its best collapsed member (within the cap); every other collapsed member is dropped as merged.
@@ -2518,7 +2615,7 @@ class Engine:
         inc, drops = [], []
         comments: list[dict] = []
         if findings:
-            comments, drops, inc = self._judge_findings(findings, t0)
+            comments, drops, inc = self._judge_v26(findings) if self.v26 else self._judge_findings(findings, t0)
             if self.fatal and self.fatal["status"] == "failed":
                 return "failed", self.empty(stage), self.fatal["error"], []
         if self.orig is not None and self.fatal is None:
@@ -2663,6 +2760,55 @@ class Engine:
                 return [], [], []
             comments.append(c)
         return comments, drops, inc
+
+    def _judge_v26(self, findings):
+        """investigator.impact@v26: no judge call, rank or cap. Each finding's comment is its seed candidate verbatim (body = the
+        item body byte for byte, title = consensus.title_of(body), anchor = its line, no suggestion), in candidate order; an
+        exact same-claim same-anchor repeat keeps JUDGE's identical-claim rule (one comment, both finding ids)."""
+        stage = "JUDGE"
+        events = list(self.recorder.events)
+        seed = self.spec.seed
+        ref = "sha256:" + seeded.digest(seed)
+        cands = seed["candidates"]["items"]
+        for f in findings:                                       # revalidate against this run's actual events and seed
+            bad = [str(i) for i in check_finding_provenance(f, events)]
+            if not bad and (f["seedRef"]["seed"] != ref or cands[f["seedRef"]["index"]]["id"] != f["seedRef"]["id"]):
+                bad = ["the finding's seedRef does not name this run's seed item"]
+            if bad:
+                self.set_fatal(stage, typed_error("contract-violation", "finding failed provenance revalidation: "
+                                                  + bad[0][:300], stage=stage))
+                return [], [], []
+        tools = self.tool_calls()
+        head = self.spec.head
+        comments, drops, seen = [], [], {}
+        for f in findings:
+            loc = f["location"]
+            anchor = snaps.anchor_text(head.root, head.manifest, loc["path"], loc["line"], loc["line"])
+            if anchor is None:
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "suppressed",
+                              "detail": "anchor lines do not exist in the pinned head file"})
+                continue
+            body = cands[f["seedRef"]["index"]]["body"]
+            c = judging.build_comment(f, run_id=self.run["id"], head_snapshot_id=self.head_id, anchor=anchor,
+                                      tool_calls=tools, title=consensus.title_of(body), body=body, suggestion=None)
+            if c["fingerprint"] in seen:          # identical category, path, anchor text AND claim: same claim twice
+                keeper = seen[c["fingerprint"]]
+                keeper["findingIds"] = (keeper["findingIds"] + [f["id"]])[:50]
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "merged",
+                              "detail": f"identical claim and anchor as {keeper['findingIds'][0]}; its id is kept on that "
+                                        "comment"})
+                continue
+            seen[c["fingerprint"]] = c
+            comments.append(c)
+        for c in comments:
+            bad = judging.revalidate_comment(
+                c, head_snapshot_id=self.head_id, resolver=self.resolver,
+                anchor_ok=lambda p, a, b: snaps.anchor_text(head.root, head.manifest, p, a, b) is not None)
+            if bad:
+                self.set_fatal(stage, typed_error("contract-violation", "comment failed final validation: " + bad[0][:300],
+                                                  stage=stage))
+                return [], [], []
+        return comments, drops, []
 
     def comment_cap(self, entries: list) -> int:
         """The JUDGE comment cap: the host's (every version but v12), or impact@v12's dynamic cap (deepcov.CAP_RULE)."""
