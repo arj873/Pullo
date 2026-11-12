@@ -188,7 +188,7 @@ class Rules(unittest.TestCase):
         for plan, micros in ((p19, RUN_CEILING_USD_MICROS), (p16, RP.V19_RUN_CEILING_USD_MICROS)):
             with self.subTest(plan=plan["specialists"]), self.assertRaises(REPO.RepositoryError):
                 REPO._check_ceiling(Ledger(), dict(plan, budget=dict(plan["budget"], maxUsdMicros=micros)))
-        for v in sorted(set(RP.IMPACT_VERSIONS) - set(RP.ALT_IMPACT_VERSIONS) - {19, 20, 21}):   # no other Plan may (v20: v19's Plan; v21: its own $10 Plan)
+        for v in sorted(set(RP.IMPACT_VERSIONS) - set(RP.ALT_IMPACT_VERSIONS) - {19, 20, 21, 24}):   # no other Plan may (v20: v19's Plan; v21: its own $10 Plan; v24: v21's Plan)
             p = RP.repository_plan(RP.repository_profile(True, None, impact_version=v))
             with self.subTest(v=v), self.assertRaises(REPO.RepositoryError):
                 REPO._check_ceiling(Ledger(), dict(p, budget=dict(p["budget"], maxUsdMicros=RP.V19_RUN_CEILING_USD_MICROS)))

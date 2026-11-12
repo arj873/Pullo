@@ -32,7 +32,7 @@ from reviewer.historical import BridgeError
 from reviewer.historical.bridge import _check_out
 from reviewer.pipeline import (EvalIdentity, HostConfig, PipelineError, RecordBackend, ReplayBackend,
                                RepositoryImports, ReviewSpec, SnapshotInput, run_review, validate_spec)
-from reviewer.pipeline import prompts, repocov
+from reviewer.pipeline import prompts, repocov, seeded
 from reviewer.pipeline.agentic import is_agentic_profile
 from reviewer.repoimport import RepoImportError, github_remote, load_import_pins, open_import, target_dir
 from reviewer.repoimport.fsio import read_nofollow
@@ -121,6 +121,7 @@ class BenchmarkOptions:
     experiment: str = "baseline"      # opt-in prompt arm; the default is the unchanged baseline
     live_stage_timing: bool = False   # opt-in: versioned live stage ceilings + host-stop recording (binds the plan)
     impact_version: int | None = None  # investigator impact@vN (None = the profile default, today 2); binds via profile
+    seed_candidates: str | None = None  # impact@v24 only: the seed document (seeded.SEED_SCHEMA); binds the run identity
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,7 @@ class BenchIngested:
     changed: tuple                   # sorted changed paths (all included on every side that has them)
     hashes: dict                     # proofSha256, admissionDigest, decisionSha256, baselineDigest
     store: Path
+    seed: dict | None = None         # impact@v24: the checked seed document (seeded.load); None for every other version
 
 
 # ------------------------------------------------------------------ options
@@ -159,6 +161,11 @@ def check_options(o: BenchmarkOptions) -> None:
                                        "(or unset for the profile default)")
         if not o.retrieval:
             raise BenchmarkLaunchError("impact_version needs the retrieval profile (--retrieval on)")
+    v24 = o.impact_version is not None and IMPACT_VERSIONS.get(o.impact_version) == prompts.INVESTIGATOR_IMPACT_V24_PROMPT
+    if o.seed_candidates is not None and (not isinstance(o.seed_candidates, str) or not o.seed_candidates or not v24):
+        raise BenchmarkLaunchError("seed_candidates is only for impact_version 24 (a seed document path)")
+    if v24 and o.seed_candidates is None:                  # seeded.SEED_RULE: v24 never runs without its seed
+        raise BenchmarkLaunchError("impact_version 24 needs seed_candidates (its candidate list)")
     for name in ("case_url", "cutoff_proof", "admission", "decision", "launch_baseline", "store", "base_import_pins",
                  "head_import_pins", "out_dir"):
         if not isinstance(getattr(o, name), str) or not getattr(o, name):
@@ -166,7 +173,7 @@ def check_options(o: BenchmarkOptions) -> None:
     if not _URL_RX.fullmatch(o.case_url):
         raise BenchmarkLaunchError("case URL must be exactly https://github.com/<org>/<repo>/pull/<n>")
     for name in ("cutoff_proof", "admission", "decision", "launch_baseline", "base_import_pins", "head_import_pins",
-                 "replay_trace"):
+                 "replay_trace", "seed_candidates"):
         _no_payload_path(name, getattr(o, name))
     if type(o.repeat) is not int or not 0 <= o.repeat <= 1000:
         raise BenchmarkLaunchError("repeat must be 0..1000")
@@ -501,15 +508,23 @@ def ingest(o: BenchmarkOptions, cfg: EffectiveConfig) -> BenchIngested:
             "pr": {"title": "", "body": ""}})                # PR text stays empty: nothing from the benchmark is passed
     except Exception:  # noqa: BLE001
         raise BenchmarkLaunchError("CaseInput could not be built from the case URL and repository") from None
+    seed = None
+    if o.seed_candidates is not None:                # impact@v24 (seeded.SEED_RULE): read and checked before any run starts
+        try:
+            seed = seeded.load(read_nofollow(o.seed_candidates, seeded.MAX_SEED_BYTES))
+        except OSError:
+            raise BenchmarkLaunchError("seed candidates are unreadable, not a regular file or too large") from None
+        except seeded.SeedError as e:
+            raise BenchmarkLaunchError(f"seed candidates refused: {str(e)[:200]}") from None
     return BenchIngested(o.case_url, case["id"], case, repo, proof, adm, base, head, {"base": bpins, "head": hpins},
-                         changed, hashes, store)
+                         changed, hashes, store, seed)
 
 
 # ------------------------------------------------------------------ config and identity
 
 def _input_paths(o: BenchmarkOptions) -> list:
     return [p for p in (o.cutoff_proof, o.admission, o.decision, o.launch_baseline, o.base_import_pins,
-                        o.head_import_pins, o.store, o.out_dir) if p]
+                        o.head_import_pins, o.store, o.out_dir, o.seed_candidates) if p]
 
 
 def effective_config(o: BenchmarkOptions, cfg: EffectiveConfig | None = None) -> EffectiveConfig:
@@ -561,6 +576,8 @@ def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retri
             "prTextSupplied": False, "reviewModelsDigest": cfg.models.digest}
     if "alternates" in profile:                      # impact@v7/@v10 only => every other identity is unchanged
         ident["reviewModelsAlternates"] = cfg.models.alternates_doc()
+    if ing.seed is not None:                         # impact@v24 only => every other identity is unchanged
+        ident["seedCandidates"] = seeded.identity_doc(ing.seed)
     if experiment != prompts.EXPERIMENT_BASELINE:    # absent for the baseline => the default identity is unchanged
         ident["experiment"] = {"id": experiment, "tasks": prompts.experiment_task_digests(),
                                "verifierPrompt": profile["roles"]["verifier"]["promptVersion"],
@@ -584,7 +601,8 @@ def build_spec(o: BenchmarkOptions, ing: BenchIngested, backend, runs: Path, pro
     return ReviewSpec(case=copy.deepcopy(ing.case), base=SnapshotInput(ing.base.root, copy.deepcopy(ing.base.manifest)),
                       head=SnapshotInput(ing.head.root, copy.deepcopy(ing.head.manifest)), profile=profile, plan=plan,
                       host=host, backend=backend,
-                      imports=RepositoryImports(copy.deepcopy(ing.base.record), copy.deepcopy(ing.head.record)))
+                      imports=RepositoryImports(copy.deepcopy(ing.base.record), copy.deepcopy(ing.head.record)),
+                      seed=copy.deepcopy(ing.seed))
 
 
 # ------------------------------------------------------------------ disclosure and output
@@ -875,6 +893,8 @@ def run_benchmark(o: BenchmarkOptions, *, transport=None, key_loader=load_openro
     else:
         rep = replay_mode(o, ing, cfg, runner=runner)
     rep["reviewModels"] = cfg.report()
+    if ing.seed is not None:                         # impact@v24: which candidate mode ran (seeded.SEED_RULE)
+        rep["seedCandidates"] = seeded.identity_doc(ing.seed)
     return rep
 
 
@@ -943,6 +963,8 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--impact-version", type=int, choices=sorted(IMPACT_VERSIONS), default=None,
                     help=f"investigator impact@vN (default: the profile default, v{DEFAULT_IMPACT_VERSION}); "
                     "3 = specialist investigators. Needs --retrieval on; binds the profile, Plan and policy")
+    ap.add_argument("--seed-candidates", default=None,
+                    help="impact_version 24 only: the seed document (seeded-candidates@1); binds the run identity")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
     ap.add_argument("--json", action="store_true")
@@ -959,7 +981,8 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                          book_baseline_micros=a.book_baseline_micros, confirm_live=a.confirm_live,
                          replay_trace=a.replay_trace, trace_digest=a.trace_digest, retrieval=a.retrieval == "on",
                          repeat=a.repeat, config=a.config, experiment=a.experiment,
-                         live_stage_timing=a.live_stage_timing, impact_version=a.impact_version)
+                         live_stage_timing=a.live_stage_timing, impact_version=a.impact_version,
+                         seed_candidates=a.seed_candidates)
     try:
         rep = run_benchmark(o, transport=transport, key_loader=key_loader, runner=runner)
     except (BenchmarkLaunchError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:

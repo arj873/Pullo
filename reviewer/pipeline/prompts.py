@@ -466,6 +466,7 @@ def impact_template_digests(investigator_prompt: str = INVESTIGATOR_IMPACT_PROMP
                  else IMPACT_V19_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V19_PROMPT
                  else IMPACT_V20_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V20_PROMPT
                  else IMPACT_V21_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V21_PROMPT
+                 else IMPACT_V24_TEMPLATES if investigator_prompt == INVESTIGATOR_IMPACT_V24_PROMPT
                  else IMPACT_TEMPLATES)
     return {k: "sha256:" + hashlib.sha256(json.dumps(v, sort_keys=True).encode()).hexdigest()
             for k, v in templates.items()}
@@ -990,8 +991,16 @@ V21_VERIFY_RULE = (
 )
 V21_TEMPLATES = {"verifyRule": V21_VERIFY_RULE, "verifyVersion": AGENTIC_VERIFY_VERSION, "toolNote": V19_TOOL_NOTE}
 IMPACT_V21_TEMPLATES = {**IMPACT_V20_TEMPLATES, "dualPass": V21_TEMPLATES}
-# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19, its broad-task variant v20 and v21
-AGENTIC_PROMPTS = (INVESTIGATOR_IMPACT_V19_PROMPT, INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT)
+
+# investigator.impact@v24 (reviewer.pipeline.seeded; root card ccfilter-1): v21's VERIFY, JUDGE and PUBLISH exactly on a SEEDED
+# candidate list (one plain baseline answer's comments); INVESTIGATE makes no model call, so no model-visible text is added. Every
+# v1-v21 text above is unchanged; the seed rule versions are bound through impact_template_digests(V24).
+INVESTIGATOR_IMPACT_V24_PROMPT = "investigator.impact@v24"
+V24_TEMPLATES = {"seedRule": "seeded-candidates@1", "seedSchema": "pullo-seed-candidates@1", "behavior": "seeded-verify@1"}
+IMPACT_V24_TEMPLATES = {**IMPACT_V21_TEMPLATES, "seeded": V24_TEMPLATES}
+# the impact versions that run v19's agentic path (reviewer.pipeline.agentic): v19, its broad-task variant v20, v21 and v24
+AGENTIC_PROMPTS = (INVESTIGATOR_IMPACT_V19_PROMPT, INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
+                   INVESTIGATOR_IMPACT_V24_PROMPT)
 
 
 def agentic_block(spec: dict) -> dict:

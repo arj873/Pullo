@@ -61,7 +61,11 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # {7, 10} instead of 7 only; two comments). Previous (TOURNAMENT-V7) pin: b996f8b3189b3ed55c586ab1360f0e82481e1a26d210399f5032864e71a097f5.
 # V19-AGENTIC: benchmark.py re-pinned for impact@v19 (live_mode exports the PR snapshot of an agentic profile, hands it to
 # live_terra and removes it after the run; every other profile launches exactly as before)
-GATED = {"reviewer/pilot/benchmark.py": "1d2c5e29d1ff1f1c0ba95dd0fb3aff400c58bb6463d74283e78f731e42a8def1",   # V19-AGENTIC re-pin (impact@v19), pending root gate
+# CCFILTER-1 (declared for gate acceptance, NOT self-approved): benchmark.py re-pinned for impact@v24's opt-in
+# BenchmarkOptions.seed_candidates / --seed-candidates (refused for every other version, required for v24; the seed is read and
+# checked in ingest and its digest joins the config identity only when present, so every other launch is byte-identical).
+# Previous (V19-AGENTIC) pin: 1d2c5e29d1ff1f1c0ba95dd0fb3aff400c58bb6463d74283e78f731e42a8def1.
+GATED = {"reviewer/pilot/benchmark.py": "121d3194e13d6e63367501eb78969453b69ec468a277ff6c93ad46a14af0e9ca",   # CCFILTER-1 re-pin (impact@v24), pending ccb-gate
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
          "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",

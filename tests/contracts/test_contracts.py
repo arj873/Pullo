@@ -107,7 +107,11 @@ class EvidenceAndFindings(Base):
 
     def test_finding_needs_distinct_call_provenance(self):
         f = ex("Finding")
-        self.assertInvalid("Finding", {k: v for k, v in f.items() if k != "sourceCallId"}, "required")
+        # investigator.impact@v24: a Finding names exactly one source, its proposing call or a seed.input draft (seedRef)
+        self.assertInvalid("Finding", {k: v for k, v in f.items() if k != "sourceCallId"}, "independent-confirm")
+        self.assertInvalid("Finding", {**f, "seedRef": {"seed": "sha256:" + "0" * 64, "index": 0, "id": "ccbo-x-0"}}, "independent-confirm")
+        self.assertEqual(validate("Finding", {**{k: v for k, v in f.items() if k != "sourceCallId"},
+                                              "seedRef": {"seed": "sha256:" + "0" * 64, "index": 0, "id": "ccbo-x-0"}}), [])
         f["verification"]["callIds"] = [f["sourceCallId"]]
         self.assertInvalid("Finding", f, "independent-confirm")
 

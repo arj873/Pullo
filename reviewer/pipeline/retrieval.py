@@ -26,7 +26,8 @@ from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa:
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
                       INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT,
                       INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT,
-                      INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT, AGENTIC_PROMPTS,
+                      INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT,
+                      AGENTIC_PROMPTS,
                       SPECIALIST_AGENTS, V5_AGENTS,
                       V7_AGENTS, V10_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
@@ -153,14 +154,21 @@ class RetrievalPolicy:
     def broad_agentic(self) -> bool:
         """investigator.impact@v20: v19 with the reviewer's task replaced by v16's broad task plus the confirm rule
         (prompts.V20_WHOLE_TASK, agentic.BROAD_RULE); everything else is v19's. investigator.impact@v21's agentic pass
-        runs that task too."""
-        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT)
+        runs that task too, and so does investigator.impact@v24 (v21's policy exactly)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
+                                            INVESTIGATOR_IMPACT_V24_PROMPT)
 
     @property
     def dual_pass(self) -> bool:
         """investigator.impact@v21 (reviewer.pipeline.dual): v16's whole pass and v20's agentic pass, a claim-aware
-        union, an agentic verifier per candidate and v20's JUDGE."""
-        return self.investigator_prompt == INVESTIGATOR_IMPACT_V21_PROMPT
+        union, an agentic verifier per candidate and v20's JUDGE; investigator.impact@v24 too (seeded)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT)
+
+    @property
+    def seeded(self) -> bool:
+        """investigator.impact@v24 (reviewer.pipeline.seeded): v21 exactly, with INVESTIGATE replaced by a host-supplied seed
+        (one plain baseline answer's comments) and no investigator model call."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V24_PROMPT
 
     @property
     def diff_sweep(self) -> bool:

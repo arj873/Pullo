@@ -104,7 +104,7 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:020e0b44f92fd0dfd4bbec44ae5fc42eb0bf73b821a60a9a3ec62fdead6d9bf1"   # + SHARD-COVERAGE-01
+LIVE_TRACEEVENT_DIGEST = "sha256:ad4ac7e6e266af5b128ed702cbba3934d6ac3e75282735b025b9e385e07f61e6"   # + SHARD-COVERAGE-01; CCFILTER-1 repin (was 020e0b44f92f...)
 # EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
 # exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
 FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
@@ -238,7 +238,34 @@ def minus_opencode(d):
     return d
 
 
+# CCFILTER-1 (declared for gate acceptance, NOT self-approved): investigator.impact@v24's additive extensions (the optional
+# Hypothesis/Finding "seedRef", a Finding's "sourceCallId" optional with exactly one of the two, the optional INVESTIGATE "seed"
+# record and the TraceEvent "seed.input" variant), subtracted exactly here; the new shapes are pinned on their own (as
+# tests/score_contracts: CCFILTER_DEF_DIGESTS, SEED_INPUT_VARIANT_DIGEST, SEED_PAYLOAD_DIGEST).
+CCFILTER_DEFS = ("Hypothesis", "Finding")
+CCFILTER_DEF_DIGESTS = {"Hypothesis": "sha256:8f9e498e74ae10678ee3f10aa9ee6f796cfe73aa213968256d5f1570e6f65e97",
+                        "Finding": "sha256:1ee62c9afb3f76306eac3abf8fd283f2fba995cdb7ac63d0bace6254571f5e66"}
+SEED_INPUT_VARIANT_DIGEST = "sha256:2df38661a5f36f645bbe4f1e9090b80181a0cce62e3a5738e964428ab3343867"
+SEED_PAYLOAD_DIGEST = "sha256:3b65cce8085477038bcd6bee489f33318a39c8febd1e3c740f1b37502133813d"
+
+
+def minus_ccfilter(name, d):
+    d = copy.deepcopy(d)
+    if name in CCFILTER_DEFS:
+        assert "seedRef" in d["properties"] and "seedRef" not in d["required"]
+        del d["properties"]["seedRef"]
+        if name == "Finding":
+            assert "sourceCallId" in d["properties"] and "sourceCallId" not in d["required"]
+            d["required"].insert(d["required"].index("verification"), "sourceCallId")
+    if name == "StagePayload":
+        inv = next(v for v in d["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")
+        assert "seed" in inv["properties"] and "seed" not in inv["required"]
+        del inv["properties"]["seed"]
+    return d
+
+
 def minus_live(name, d):
+    d = minus_ccfilter(name, d)
     if name in OPENCODE_DEFS:
         d = minus_opencode(d)
     return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
@@ -247,7 +274,7 @@ def minus_live(name, d):
 
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
-    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS):
+    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS, "seed.input"):   # + CCFILTER-1
         hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == kind]
         assert len(hits) == 1, (kind, hits)
         del te["oneOf"][hits[0]]
@@ -415,6 +442,10 @@ class L1L2Compatibility(Base):
         self.assertEqual(C.digest(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)
+        self.assertEqual(C.digest(inv["properties"]["seed"]), SEED_PAYLOAD_DIGEST)                 # CCFILTER-1
+        self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "seed.input")),
+                         SEED_INPUT_VARIANT_DIGEST)
+        self.assertEqual({n: C.digest(REGISTRY[n].to_json()) for n in CCFILTER_DEFS}, CCFILTER_DEF_DIGESTS)
 
     def test_CostRecord_changes_only_by_appending_score_to_kind(self):
         cr = REGISTRY["CostRecord"].to_json()

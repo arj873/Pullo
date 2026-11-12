@@ -34,7 +34,7 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
                             import_view, omissions_from_records)
 
 from . import coverage as cov_mod
-from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists,
+from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, seeded, snaps, specialists,
                sweeps, agentic, dual, whole)
 from .compare import first_difference, segment
 from .errors import PipelineError
@@ -118,7 +118,9 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
     cdoc = None if cov is None else coverage_doc(cov)
     retrieval_run = any(e["type"] == "model.call" and "hop" in e["request"] for e in events)
     impact = impactcov.summarize(events, {f["path"] for f in files})     # None unless an impact map was made
-    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc))
+    seed_ids = (seeded.comment_seed_ids(comments, artifacts["VERIFY"]["payload"].get("findings", ()))   # impact@v24: SEED ID
+                if seeded.is_seeded_payload(artifacts["INVESTIGATE"]["payload"]) else None)
+    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc, seed_ids=seed_ids))
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
                           coverage=cdoc, retrieval=retrieval_run, impact=impact,
@@ -142,6 +144,11 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
                                                                     list(artifacts["VERIFY"]["payload"].get("drops", ()))
                                                                     + list(artifacts["JUDGE"]["payload"]["drops"]))
                                         if agentic.is_v19_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        else seeded.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                                   list(artifacts["VERIFY"]["payload"].get("drops", ()))
+                                                                   + list(artifacts["JUDGE"]["payload"]["drops"]))
+                                        if dual.is_v21_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        and seeded.is_seeded_payload(artifacts["INVESTIGATE"]["payload"])   # impact@v24
                                         else dual.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
                                                                  list(artifacts["VERIFY"]["payload"].get("drops", ()))
                                                                  + list(artifacts["JUDGE"]["payload"]["drops"]))
@@ -218,6 +225,8 @@ class Engine:
         self.v19 = bool(self.impact and self.policy.agentic_review)
         # investigator.impact@v21: v16's pass + v20's agentic pass, a union and an agentic verifier (reviewer.pipeline.dual)
         self.v21 = bool(self.impact and self.policy.dual_pass)
+        # investigator.impact@v24: v21 with INVESTIGATE replaced by the host's seed, no investigator call (reviewer.pipeline.seeded)
+        self.v24 = bool(self.v21 and self.policy.seeded)
         self._last_stop: str | None = None      # v21: the stop code of the latest gate check (None when it allowed work)
         self._verifier_note: str | None = None  # v21: the tool note appended to a verifier re-ask's task
         self._v21_capped_notes = {"server-error": 0, "isolation": 0}   # v21: capped note kinds taken so far (dual.*_NOTES)
@@ -1470,6 +1479,8 @@ class Engine:
             agents.append({"agentId": whole.AGENT, "specialist": whole.AGENT, "status": _agent_status(g[1]),
                            "error": g[1]})
             return self._v3_failed(agents, g[1], g[0])
+        if self.v24:
+            return self._investigate_v24(stage, agents)
         if self.v21:
             return self._investigate_v21(stage, t0, agents)
         ctx, notes, block = self._whole_context(stage, t0)
@@ -1599,16 +1610,60 @@ class Engine:
                               + self._exhausted_detail(got))]
         return self._v3_failed(agents, got, reason)
 
+    def _investigate_v24(self, stage, agents):
+        """investigator.impact@v24 (reviewer.pipeline.seeded): no model call. The host's seed becomes drafts (seeded.drafts:
+        the head line at file:line as the one code citation, re-checked by the snapshot resolver), resolved into Hypothesis
+        documents as an investigator answer would be; dropped items are disclosed. INVESTIGATE completes (with zero
+        candidates when nothing resolves); a missing seed is an internal error (benchmark refuses v24 without one)."""
+        seed = self.spec.seed
+        if not isinstance(seed, dict):
+            err = typed_error("internal", "investigator.impact@v24 has no seed document", stage=stage)
+            agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": _agent_status(err), "error": err})
+            return self._v3_failed(agents, err, None)
+        drafts, dropped, cut = seeded.drafts(seed, lambda p: snaps.head_lines(self.spec.head.root, self.spec.head.manifest, p),
+                                             self.head_id, self.changed_head_paths())
+        family = self.profile["roles"]["investigator"]["family"]
+        ref = "sha256:" + seeded.digest(seed)
+        self.recorder.append("seed.input", stage=stage, seed=ref, mode=seed["mode"],   # the drafts' provenance record
+                             drafts=[{"index": n, "id": seed["items"][n]["id"], "draft": d} for n, d in drafts])
+        hyps = []
+        for n, d in drafts:
+            ev, problems = materialize_evidence(d["evidence"], {}, f"seed:{seed['mode']}", self.resolver)
+            if problems or not ev:               # the host's own citation must resolve (it is the pinned head line)
+                dropped.append({"index": n, "reason": "no-such-line"})
+                continue
+            h = {"id": hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]),
+                 "runId": self.run["id"], "specialist": seeded.AGENT, "claim": d["claim"], "category": d["category"],
+                 "suspectedSeverity": d["suspectedSeverity"], "impact": d["impact"], "location": d["location"],
+                 "evidence": ev, "modelFamily": family, "seedRef": {"seed": ref, "index": n, "id": seed["items"][n]["id"]}}
+            if validate("Hypothesis", h):
+                dropped.append({"index": n, "reason": "bad-path"})
+                continue
+            hyps.append(h)
+        dropped.sort(key=lambda x: x["index"])
+        agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": "completed"})
+        kept = {h["id"] for h in hyps}
+        record = seeded.summary(seed, dropped, cut, len(hyps))
+        record["drafts"] = [{"index": n, "id": seed["items"][n]["id"], "draft": d} for n, d in drafts
+                            if hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]) in kept]
+        return "completed", {"hypotheses": hyps, "agents": agents, "seed": record}, None, []
+
+    def _v21_passes(self) -> list:
+        """The union's lanes in UNION_ORDER: v21's two passes, or impact@v24's one seed lane (its kept drafts, in order)."""
+        if self.v24:
+            rec = self.artifacts["INVESTIGATE"]["payload"].get("seed") or {}
+            return [[(hypothesis_id(seeded.AGENT, x["index"], x["draft"]["claim"], x["draft"]["location"]["path"],
+                                    x["draft"]["location"]["line"]), x["draft"]) for x in rec.get("drafts", ())]]
+        return [self._lane_candidates(lambda a, b=base: a in dual.pass_agents(b)) for base in dual.UNION_ORDER]
+
     def _v21_candidates(self, hyps: dict) -> list:
         """dual.UNION_RULE: the agentic pass's candidates, then v16's, kept ones ordered (both passes, P0/P1, the rest),
-        then the merged ones (dropped in VERIFY without a verifier call)."""
-        passes = [self._lane_candidates(lambda a, b=base: a in dual.pass_agents(b)) for base in dual.UNION_ORDER]
-        order, _, _ = dual.union(passes, hyps)
+        then the merged ones (dropped in VERIFY without a verifier call). impact@v24: the one seed lane."""
+        order, _, _ = dual.union(self._v21_passes(), hyps)
         return [(i, hid, d) for i, (hid, d) in enumerate(order)]
 
     def _v21_merged(self, hyps: dict) -> dict:
-        passes = [self._lane_candidates(lambda a, b=base: a in dual.pass_agents(b)) for base in dual.UNION_ORDER]
-        return dual.union(passes, hyps)[1]
+        return dual.union(self._v21_passes(), hyps)[1]
 
     def _v21_verify_room(self) -> bool:
         """dual.VERIFY_ADMISSION_RULE: a verifier session and its repair still fit below the JUDGE reserve floor."""
@@ -2332,8 +2387,8 @@ class Engine:
                                          "the investigator cited; resolvable but unrelated code does not "
                                          "verify a claim"}, inc
         finding = {k: hyp[k] for k in ("id", "runId", "specialist", "claim", "category", "suspectedSeverity", "impact",
-                                       "location", "evidence", "modelFamily", "sourceCallId")}
-        for k in ("mechanism", "reach", "confidence"):
+                                       "location", "evidence", "modelFamily")}
+        for k in ("sourceCallId", "seedRef", "mechanism", "reach", "confidence"):   # impact@v24: seedRef, never both
             if k in hyp:
                 finding[k] = hyp[k]
         finding["verification"] = {"verdict": "confirmed", "refutationAttempts": 1, "verifierFamily": family,

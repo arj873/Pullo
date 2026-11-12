@@ -38,6 +38,9 @@ tools to confirm each claim against the code before reporting it" (agentic.BROAD
 21 (explicit only) is investigator.impact@v21: v16's whole pass and v20's agentic pass, a claim-aware union and an agentic
 read-only verifier per candidate (the verifier role carries params.agentic = dual.verifier_spec(); a claude-cli verifier is
 required); v20's JUDGE; the $10 ceiling; its Plan lists `whole`, `whole-agentic`, `agentic` and carries the V21_* clocks.
+24 (explicit only) is investigator.impact@v24: v21 exactly (profile roles, verifier spec, specialists, ceiling and clocks) with
+INVESTIGATE replaced by a host-supplied seed (reviewer.pipeline.seeded: one plain baseline answer's comments, BenchmarkOptions
+seed_candidates) and no investigator model call; only its Plan reason names v24.
 1 is exactly the IMPACT-01 profile and policy
 (investigator.impact@v1, same digests). The verifier is verifier.impact@v1 in all four. `impact=False` is exactly the earlier retrieval@2 profile and
 policy (same digests). The older selections are kept for reproducing and replaying earlier runs."""
@@ -54,7 +57,8 @@ from reviewer.pipeline.prompts import (EXPERIMENT_BASELINE, EXPERIMENT_CONTEXT_C
                                        INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
                                        INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
                                        INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT, SPECIALIST_AGENTS,
-                                       INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT, AGENTIC_PROMPTS,
+                                       INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
+                                       INVESTIGATOR_IMPACT_V24_PROMPT, AGENTIC_PROMPTS,
                                        V5_AGENTS, V7_AGENTS,
                                        V7_ALT_AGENTS, V10_AGENTS, V10_ALT_AGENTS,
                                        JUDGE_FACT_WORDING_PROMPT,
@@ -82,7 +86,8 @@ IMPACT_VERSIONS = {1: INVESTIGATOR_IMPACT_PROMPT, 2: INVESTIGATOR_IMPACT_V2_PROM
                    4: INVESTIGATOR_IMPACT_V4_PROMPT, 5: INVESTIGATOR_IMPACT_V5_PROMPT, 7: INVESTIGATOR_IMPACT_V7_PROMPT,
                    10: INVESTIGATOR_IMPACT_V10_PROMPT, 12: INVESTIGATOR_IMPACT_V12_PROMPT,
                    16: INVESTIGATOR_IMPACT_V16_PROMPT, 19: INVESTIGATOR_IMPACT_V19_PROMPT,
-                   20: INVESTIGATOR_IMPACT_V20_PROMPT, 21: INVESTIGATOR_IMPACT_V21_PROMPT}
+                   20: INVESTIGATOR_IMPACT_V20_PROMPT, 21: INVESTIGATOR_IMPACT_V21_PROMPT,
+                   24: INVESTIGATOR_IMPACT_V24_PROMPT}
 # the impact versions that run alternate-model lanes and need [review.investigator_alt] (refused without it)
 ALT_IMPACT_VERSIONS = {7: INVESTIGATOR_IMPACT_V7_PROMPT, 10: INVESTIGATOR_IMPACT_V10_PROMPT}
 DEFAULT_IMPACT_VERSION = 2
@@ -174,10 +179,11 @@ def repository_profile(retrieval: bool = True, models=None, experiment: str = EX
                                f"{agentic.ISOLATION} only)")
         profile["roles"]["investigator"]["params"] = dict(profile["roles"]["investigator"]["params"],
                                                           agentic=agentic.spec())
-    if profile["roles"]["investigator"]["promptVersion"] == INVESTIGATOR_IMPACT_V21_PROMPT:   # dual.VERIFY_RULE
+    if profile["roles"]["investigator"]["promptVersion"] in (INVESTIGATOR_IMPACT_V21_PROMPT,     # dual.VERIFY_RULE
+                                                             INVESTIGATOR_IMPACT_V24_PROMPT):
         if profile["roles"]["verifier"]["provider"] != "claude-cli":
-            raise ProfileError("investigator.impact@v21 needs a claude-cli verifier (its agentic read-only verifier "
-                               f"session is {agentic.ISOLATION} only)")
+            raise ProfileError(f"{profile['roles']['investigator']['promptVersion']} needs a claude-cli verifier (its "
+                               f"agentic read-only verifier session is {agentic.ISOLATION} only)")
         profile["roles"]["verifier"]["params"] = dict(profile["roles"]["verifier"]["params"],
                                                       agentic=dual.verifier_spec())
     if profile["roles"]["investigator"]["promptVersion"] in ALT_IMPACT_VERSIONS.values():
@@ -215,7 +221,7 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
     if inv in (INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS):   # v12's clocks and tool cap (V12_*)
         if "alternates" in profile:
             raise ProfileError(f"{inv} runs on the primary investigator model only (no alternates)")
-        v21 = inv == INVESTIGATOR_IMPACT_V21_PROMPT
+        v21 = inv in (INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT)   # v24: v21's Plan (its reason names v24)
         plan = live_plan(profile, **({"stage_ceilings_sec": V21_LIVE_STAGE_CEILINGS_SEC if v21
                                       else V12_LIVE_STAGE_CEILINGS_SEC, "host_stop_recording": True,
                                       "wall_clock_sec": V21_LIVE_WALL_CLOCK_SEC if v21 else V12_LIVE_WALL_CLOCK_SEC,
@@ -237,6 +243,12 @@ def _repository_plan(profile: dict, *, live_stage_timing: bool = False) -> dict:
         if v21:                                        # impact@v21: two passes, the agentic verifier
             plan["specialists"] = dual.plan_specialists()
             plan["reasons"][1] = (f"{inv}: v16's whole-change pass and v20's agentic pass, a claim-aware union (at most "
+                                  f"{dual.MAX_VERIFY} candidates), one agentic read-only verifier session per candidate "
+                                  f"(at most {dual.VERIFIER_MAX_REQUESTS} requests, {dual.VERIFIER_DEADLINE_SEC} s), "
+                                  "then JUDGE with the concrete-behaviour rule (primary models only)")
+        if inv == INVESTIGATOR_IMPACT_V24_PROMPT:      # impact@v24: v21's Plan bytes but this reason (seeded.SEED_RULE)
+            plan["reasons"][1] = (f"{inv}: INVESTIGATE makes no model call - its candidates are the comments of one plain "
+                                  "baseline answer supplied by the host (seeded-candidates@1), a claim-aware union (at most "
                                   f"{dual.MAX_VERIFY} candidates), one agentic read-only verifier session per candidate "
                                   f"(at most {dual.VERIFIER_MAX_REQUESTS} requests, {dual.VERIFIER_DEADLINE_SEC} s), "
                                   "then JUDGE with the concrete-behaviour rule (primary models only)")

@@ -106,7 +106,7 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:020e0b44f92fd0dfd4bbec44ae5fc42eb0bf73b821a60a9a3ec62fdead6d9bf1"   # + SHARD-COVERAGE-01
+LIVE_TRACEEVENT_DIGEST = "sha256:ad4ac7e6e266af5b128ed702cbba3934d6ac3e75282735b025b9e385e07f61e6"   # + SHARD-COVERAGE-01; CCFILTER-1 repin (was 020e0b44f92f...)
 # EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
 # exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
 FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
@@ -240,7 +240,33 @@ def minus_opencode(d):
     return d
 
 
+# CCFILTER-1 (declared for gate acceptance, NOT self-approved): investigator.impact@v24's additive extensions - the optional
+# Hypothesis/Finding "seedRef" (a seeded candidate's provenance; a Finding's "sourceCallId" becomes optional, exactly one of the
+# two by the existing independent-confirm invariant), the optional INVESTIGATE "seed" record and the TraceEvent "seed.input"
+# variant. Exactly these are subtracted below before the legacy pins are compared; the new definitions are pinned on their own.
+CCFILTER_DEFS = ("Hypothesis", "Finding")
+CCFILTER_DEF_DIGESTS = {"Hypothesis": "sha256:8f9e498e74ae10678ee3f10aa9ee6f796cfe73aa213968256d5f1570e6f65e97", "Finding": "sha256:1ee62c9afb3f76306eac3abf8fd283f2fba995cdb7ac63d0bace6254571f5e66"}
+SEED_INPUT_VARIANT_DIGEST = "sha256:2df38661a5f36f645bbe4f1e9090b80181a0cce62e3a5738e964428ab3343867"
+SEED_PAYLOAD_DIGEST = "sha256:3b65cce8085477038bcd6bee489f33318a39c8febd1e3c740f1b37502133813d"
+
+
+def minus_ccfilter(name, d):
+    d = copy.deepcopy(d)
+    if name in CCFILTER_DEFS:
+        assert "seedRef" in d["properties"] and "seedRef" not in d["required"]
+        del d["properties"]["seedRef"]
+        if name == "Finding":
+            assert "sourceCallId" in d["properties"] and "sourceCallId" not in d["required"]
+            d["required"].insert(d["required"].index("verification"), "sourceCallId")
+    if name == "StagePayload":
+        inv = next(v for v in d["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")
+        assert "seed" in inv["properties"] and "seed" not in inv["required"]
+        del inv["properties"]["seed"]
+    return d
+
+
 def minus_live(name, d):
+    d = minus_ccfilter(name, d)
     if name in OPENCODE_DEFS:
         d = minus_opencode(d)
     return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
@@ -249,7 +275,7 @@ def minus_live(name, d):
 
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
-    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS):
+    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS, "seed.input"):   # + CCFILTER-1
         hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == kind]
         assert len(hits) == 1, (kind, hits)
         del te["oneOf"][hits[0]]
@@ -372,7 +398,7 @@ class Compatibility(Base):
                 cur = REGISTRY[name].to_json()
                 self.assertEqual(dig(minus_live(name, cur)), want)
         changed = sorted(n for n, want in BASELINE_DEF_DIGESTS.items() if dig(REGISTRY[n].to_json()) != want)
-        self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget", "ModelProfile",     # + TOURNAMENT-V7
+        self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget", "ModelProfile", *CCFILTER_DEFS,   # + TOURNAMENT-V7, CCFILTER-1
                                           "StagePayload",     # + LIVE-DEADLINE-04 Budget, SPECIALISTS-01 merges
                                           "ModelRequest", "SpendAuthorization")))   # + OPENCODE-FREE-PROVIDER
 
@@ -388,6 +414,9 @@ class Compatibility(Base):
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(dig(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
         self.assertEqual(dig(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
+        self.assertEqual(dig(inv["properties"]["seed"]), SEED_PAYLOAD_DIGEST)                     # CCFILTER-1
+        self.assertEqual(dig(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "seed.input")), SEED_INPUT_VARIANT_DIGEST)
+        self.assertEqual({n: dig(REGISTRY[n].to_json()) for n in CCFILTER_DEFS}, CCFILTER_DEF_DIGESTS)
         self.assertEqual(dig(minus_opencode(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"])),
                          ALTERNATES_DIGEST)                                     # OPENCODE-FREE-PROVIDER enum subtracted
         for name, want in OPENCODE_DEF_DIGESTS.items():                         # the opencode-era shapes, unchanged
