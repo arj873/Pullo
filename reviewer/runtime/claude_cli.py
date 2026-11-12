@@ -14,6 +14,16 @@ still fails; (3) with SHELL unset the environment block names the first of zsh /
 (claude_capture.ENV_TEMPLATE); (4) the anthropic-beta list is the same 8 betas in another order. argv, env, the stream-json
 event types, the request keys and system blocks, the continuation prefix (both texts), the 401/404 retry handling, the
 remote-settings / policy suppression and the token-on-fd path are unchanged.
+CLI322 (2.1.317 -> 2.1.322; root card ccfilter-1 2026-11-12, the CLI was upgraded by the system package manager and downgrading is
+not allowed): re-proved offline on the real 2.1.322 binary with NO code delta - CLAUDE_CLI_VERSION (and so the billing-header
+cc_version and the init event check) and AGENTIC_TOOLS_SHA["2.1.322"] (the same sha as 2.1.317: the Glob/Grep/Read tools array is
+byte-identical) are the only changes. All 22 CAPTURE_MODES and all 11 AGENTIC_CAPTURE_MODES x both models are supported with no
+problem; every captured leaf (request keys, system blocks, betas, metadata, tools, events, verdicts, sandbox and forwarder facts)
+equals the 2.1.317 record but the post-prompt Environment block's variable parts (it still matches ENV_TEMPLATE exactly) and the
+fake usage-limit reset time; an LD_PRELOAD trace of 46 live-path calls shows one loopback connect to the forwarder per call (two
+for the refused 404 re-send), 0 DNS lookups, 0 other connects, execs of the CLI and git only, and the same per-call home layout as
+2.1.317 with no token or prompt bytes. Isolation versions @5 / @7 are unchanged (no isolation code changed; cliVersion is recorded
+separately).
   * ONE ENDPOINT - the host loopback FORWARDER (`claude-loopback-forwarder@1`, class Forwarder, one per adapter = per run, run by
     this trusted host process): every live call gets ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/c/<per-call random token>. It
     relays exactly ONE `POST /v1/messages?beta=true` per call to https://api.anthropic.com - only a JSON body with "stream": true,

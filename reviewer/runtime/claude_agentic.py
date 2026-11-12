@@ -102,7 +102,8 @@ AGENTIC_TOOLS = ("Glob", "Grep", "Read")          # what init lists (sorted) and
 TOOLS_ARG = "Read,Grep,Glob"
 # sha256 of the canonical JSON (sort_keys, compact) of the request `tools` array the CLI sends with --tools Read,Grep,Glob, per CLI
 # version (proved by capture agentic-answer; the forwarder refuses any other array). Filled from the offline capture.
-AGENTIC_TOOLS_SHA = {"2.1.317": "c42b853e7fbaabcf639a296b86f106556331ea118a0506f3aa8d0861d2b7376e"}
+AGENTIC_TOOLS_SHA = {"2.1.317": "c42b853e7fbaabcf639a296b86f106556331ea118a0506f3aa8d0861d2b7376e",
+                     "2.1.322": "c42b853e7fbaabcf639a296b86f106556331ea118a0506f3aa8d0861d2b7376e"}   # CLI322: byte-identical tools array (capture)
 IN = "/pullo"
 HEAD, BASE, HOME, RELAY, FWD_SOCK = IN + "/head", IN + "/base", IN + "/home", IN + "/relay.py", IN + "/fwd.sock"
 RELAY_PORT = 41917

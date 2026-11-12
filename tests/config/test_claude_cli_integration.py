@@ -259,7 +259,7 @@ class Routing(unittest.TestCase):
 
     def test_preflight_failure_is_a_typed_config_refusal(self):
         def unsupported(**kw):
-            raise O.ClaudeCliUnsupported("claude version is not the pinned 2.1.317")
+            raise O.ClaudeCliUnsupported("claude version is not the pinned 2.1.322")
         with self.assertRaisesRegex(P.PipelineError, "claude-cli isolation preflight failed"):
             P.live_terra(self.profile(), None, "s", claude_factory=unsupported)
 
@@ -306,7 +306,7 @@ class RepositoryClaudeCli(RT.Base):
         first = rep["plan"]["firstRequest"]
         self.assertEqual((first["provider"], first["model"], first["schemaName"], first["billingKind"]),
                          ("claude-cli", MODEL, "InvestigatorTurn", "claude-subscription"))
-        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@5", "2.1.317"))
+        self.assertEqual((first["isolationVersion"], first["cliVersion"]), ("claude-cli-isolated@5", "2.1.322"))
         self.assertGreater(first["worstCaseApiEquivalentUsdMicros"], 0)
         self.assertEqual(rep["plan"]["worstCaseAdmissionUsdMicros"], first["worstCaseApiEquivalentUsdMicros"])
         p = rep["plan"]                                                     # REPAIR1: one repair, bounded with each first call

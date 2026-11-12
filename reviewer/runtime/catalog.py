@@ -186,12 +186,12 @@ def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) 
 
 
 # ---------------------------------------------------------------- Claude Code CLI on the subscription (CLAUDE-CLI-PROVIDER)
-# provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`, exactly 2.1.317) on
+# provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`, exactly 2.1.322) on
 # the user's Claude subscription (OAuth), with NO tools. Pullo-side ids are namespaced `claude-cli/<cli model id>` so the
 # allowlists stay disjoint (the model alone names its provider) and the bare `claude-opus-5-5` stays a development-only id
 # (contracts.DEV_ONLY_MODELS) for every other path. Only these entries are allowed (exact ids); the CLI gets `cliModel`.
-CLAUDE_CLI_VERSION = "2.1.317"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI
-CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@5"     # @5 (CLI317): Claude Code 2.1.317 - its builtin privacy plugin and the builtin plugins' own state store admitted; @4 (TIMEOUT-FIX): max_tokens = the role cap, a max_tokens stop is a cut answer; @3: adaptive thinking admitted
+CLAUDE_CLI_VERSION = "2.1.322"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI (CLI322: was 2.1.317)
+CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@5"     # @5 (CLI317; CLI322 re-proved on 2.1.322 with no code delta): Claude Code 2.1.317 - its builtin privacy plugin and the builtin plugins' own state store admitted; @4 (TIMEOUT-FIX): max_tokens = the role cap, a max_tokens stop is a cut answer; @3: adaptive thinking admitted
 CLAUDE_CLI_MODELS: dict[str, dict] = {
     "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "contextTokens": 1_000_000,
                                    "outputTokens": 128_000},

@@ -31,7 +31,7 @@ from tests.runtime import claude_fake as F
 
 SPEC = {"mode": "read-only", "maxRequests": 6, "sessionDeadlineSec": 120, "budgetUsdMicros": 2_000_000}
 TOOLS = [{"name": n, "description": f"{n} tool", "input_schema": {"type": "object"}} for n in ("Read", "Grep", "Glob")]
-SYSTEM = [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.317.1;"},
+SYSTEM = [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.322.1;"},
           {"type": "text", "text": "You are a Claude agent.", "cache_control": {"type": "ephemeral"}}]
 META = {"user_id": "u1"}
 ENV_MSG = "# Environment\nYou have been invoked in the following environment"

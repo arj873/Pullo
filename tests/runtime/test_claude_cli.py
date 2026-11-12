@@ -126,7 +126,7 @@ class Settings(unittest.TestCase):
         self.assertEqual(a, C.isolation_identity(F.MODEL))
         self.assertEqual({k for k in a if a[k] != b[k]}, {"argvSha256"})
         self.assertEqual((a["isolationVersion"], a["cliVersion"], a["sandbox"]),
-                         ("claude-cli-isolated@5", "2.1.317", "claude-bwrap-masked@2"))
+                         ("claude-cli-isolated@5", "2.1.322", "claude-bwrap-masked@2"))
 
     def test_pacing_is_the_terra6_list_rates_of_the_opencode_arm_for_every_model(self):
         oc = opencode_gateway_price("opencode/deepseek-v4.1-flash-free")
@@ -960,7 +960,7 @@ def _pinned_cli():
     return r.stdout.decode().strip() == C.CLAUDE_CLI_VERSION + " (Claude Code)"
 
 
-@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.317 and bwrap")
+@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.322 and bwrap")
 class RealCliCaptureProof(unittest.TestCase):
     """The REAL claude binary, offline: private network namespace, a dummy OAuth token on the live fd path, loopback fake
     Anthropic endpoint, the exact live argv/env, run through the live bwrap sandbox. No inference, no real credential."""
@@ -981,7 +981,7 @@ class RealCliCaptureProof(unittest.TestCase):
                 self.assertEqual(cap["posts"], 1)                                   # exact: the forwarder relays at most one
 
 
-@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.317 and bwrap")
+@unittest.skipUnless(_pinned_cli(), "needs the installed claude 2.1.322 and bwrap")
 class RealCliRepairProof(unittest.TestCase):
     """CLAUDE-CLI-REPAIR1 on the REAL claude binary, offline (tests/runtime/claude_repair_proof: private network namespace,
     loopback fake Anthropic endpoint, dummy token, the live sandbox and forwarder) under Pullo's real Gateway: a schema-invalid
