@@ -16,14 +16,17 @@ gateway. `runner.run_review` owns pre-flight, idempotency and resume. Design rul
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 
 from reviewer.contracts import (check_finding_provenance, citable_tool_calls, is_turn_schema, require, terminal_payload,
                                 validate)
 from reviewer.contracts.budget import (HOST_STOP_RECORDING_V1, HOST_STOP_RECORDING_V2, deadline_state,
-                                      investigation_limit, stage_ceiling, stage_deadline_exceeded)
+                                      estimate_input_tokens, investigation_limit, reservation, stage_ceiling,
+                                      stage_deadline_exceeded)
 from reviewer.contracts.canonical import artifact_digest, digest, hypothesis_id
+from reviewer.contracts.redaction import contains_protected
 from reviewer.contracts.severity import RANK, materialize_evidence
 from reviewer.contracts.snapshot import verify_manifest
 from reviewer.contracts.stages import STAGES, artifact_name
@@ -32,7 +35,8 @@ from reviewer.tools import (HOST_IMPACT_TOOLS, IMPACT_TOOLS, SWEEP_TOOLS, TOOLS,
                             import_view, omissions_from_records)
 
 from . import coverage as cov_mod
-from . import identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, snaps, specialists, sweeps
+from . import (deepcov, identity, impactcov, judging, lanes, prompts, render, repocov, retrieval, seeded, snaps, specialists,
+               sweeps, agentic, consensus, dual, whole)
 from .compare import first_difference, segment
 from .errors import PipelineError
 
@@ -115,15 +119,56 @@ def render_outputs(run: dict, status: str, incomplete: list, error: dict | None,
     cdoc = None if cov is None else coverage_doc(cov)
     retrieval_run = any(e["type"] == "model.call" and "hop" in e["request"] for e in events)
     impact = impactcov.summarize(events, {f["path"] for f in files})     # None unless an impact map was made
-    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc))
+    seed_ids = (seeded.comment_seed_ids(comments, artifacts["VERIFY"]["payload"].get("findings", ()))   # impact@v24: SEED ID
+                if seeded.is_seeded_payload(artifacts["INVESTIGATE"]["payload"]) else None)
+    witness_ids = (consensus.witness_ids(comments, artifacts["VERIFY"]["payload"].get("findings", ()))   # impact@v26
+                   if consensus.is_consensus_payload(artifacts["INVESTIGATE"]["payload"]) else None)
+    cbytes = render.comments_bytes(render.comments_doc(run, status, comments, cdoc, seed_ids=seed_ids, witness_ids=witness_ids))
     md = render.review_md(run=run, status=status, comments=comments, drops=drops, incomplete=incomplete,
                           error=error, changed=files, context_notes=notes, tool_calls=used, cost_note=cost_note,
                           coverage=cdoc, retrieval=retrieval_run, impact=impact,
                           specialists=(artifacts["INVESTIGATE"]["payload"]
                                        if specialists.is_specialist_plan(artifacts["TRIAGE"]["payload"]["plan"])
                                        else None),
-                          sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"))
+                          sweep=artifacts["INVESTIGATE"]["payload"].get("sweep"),
+                          alternate_models=sorted({e["request"]["model"] for e in events if e["type"] == "model.call"
+                                                   and e["stage"] == "INVESTIGATE"
+                                                   and prompts.is_alt_lane(e["agentId"])}) or None,
+                          alt_coverage=(lanes.v10_alt_coverage(artifacts["INVESTIGATE"]["payload"], events, incomplete,
+                                                               artifacts["VERIFY"]["payload"].get("drops", ()))
+                                        if lanes.is_v10_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
+                          deep_coverage=(deepcov.coverage_lines(deep_plan(files, events), artifacts["INVESTIGATE"]["payload"],
+                                                                events, artifacts["VERIFY"]["payload"].get("drops", ()))
+                                         if deepcov.is_v12_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None),
+                          whole_change=(whole.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                             artifacts["VERIFY"]["payload"].get("drops", ()))
+                                        if whole.is_v16_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        else agentic.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                                    list(artifacts["VERIFY"]["payload"].get("drops", ()))
+                                                                    + list(artifacts["JUDGE"]["payload"]["drops"]))
+                                        if agentic.is_v19_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        else consensus.coverage_lines(artifacts["INVESTIGATE"]["payload"])
+                                        if dual.is_v21_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        and consensus.is_consensus_payload(artifacts["INVESTIGATE"]["payload"])   # impact@v26
+                                        else seeded.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                                   list(artifacts["VERIFY"]["payload"].get("drops", ()))
+                                                                   + list(artifacts["JUDGE"]["payload"]["drops"]))
+                                        if dual.is_v21_plan(artifacts["TRIAGE"]["payload"]["plan"])
+                                        and seeded.is_seeded_payload(artifacts["INVESTIGATE"]["payload"])   # impact@v24
+                                        else dual.coverage_lines(artifacts["INVESTIGATE"]["payload"], events,
+                                                                 list(artifacts["VERIFY"]["payload"].get("drops", ()))
+                                                                 + list(artifacts["JUDGE"]["payload"]["drops"]))
+                                        if dual.is_v21_plan(artifacts["TRIAGE"]["payload"]["plan"]) else None))
     return cbytes, md.encode("utf-8"), comments
+
+
+def deep_plan(files: list, events: list) -> dict:
+    """investigator.impact@v12: the coverage plan (deepcov.plan) of the PREPARE file list and its logged per-file diffs."""
+    diffs = {}
+    for e in events:
+        if e["type"] == "tool.call" and e["stage"] == "PREPARE" and e["tool"] == "diff" and e["args"].get("path") is not None:
+            diffs.setdefault(e["args"]["path"], e)
+    return deepcov.plan(files, diffs)
 
 
 def coverage_doc(cov: dict, limit: int = 50) -> dict:
@@ -173,6 +218,38 @@ class Engine:
         self.sweep = bool(self.impact and self.policy.diff_sweep)
         # investigator.impact@v5: five specialist lanes with the lanes.py split and near-duplicate cap
         self.five = bool(self.impact and self.policy.five_lanes)
+        # investigator.impact@v7: the v5 lanes, then alternate-model lanes (lanes.ALT_AGENTS) whose requests are built
+        # from a profile view whose investigator is ModelProfile.alternates.investigator (runner refuses v7 without one)
+        self.cross = bool(self.impact and self.policy.cross_model)
+        # investigator.impact@v10: the v3 specialists unchanged, then their lenses on the alternate model (lanes.V10_*)
+        self.v10 = bool(self.impact and self.policy.cross_v3)
+        # investigator.impact@v12: the v3 lenses with a depth floor, then coverage investigators (reviewer.pipeline.deepcov)
+        self.v12 = bool(self.impact and self.policy.coverage_forced)
+        # investigator.impact@v16: one whole-change reviewer, then v12's VERIFY and JUDGE rules (reviewer.pipeline.whole)
+        self.v16 = bool(self.impact and self.policy.whole_change)
+        # investigator.impact@v19: v16's reviewer as one agentic read-only session, the JUDGE rule (reviewer.pipeline.agentic)
+        self.v19 = bool(self.impact and self.policy.agentic_review)
+        # investigator.impact@v21: v16's pass + v20's agentic pass, a union and an agentic verifier (reviewer.pipeline.dual)
+        self.v21 = bool(self.impact and self.policy.dual_pass)
+        # investigator.impact@v24: v21 with INVESTIGATE replaced by the host's seed, no investigator call (reviewer.pipeline.seeded)
+        self.v24 = bool(self.v21 and self.policy.seeded)
+        # investigator.impact@v26: v24's seed ingest kept to the witness-supported candidates, published verbatim; no model call
+        # in the whole run (reviewer.pipeline.consensus)
+        self.v26 = bool(self.v24 and self.policy.consensus)
+        self._last_stop: str | None = None      # v21: the stop code of the latest gate check (None when it allowed work)
+        self._verifier_note: str | None = None  # v21: the tool note appended to a verifier re-ask's task
+        self._v21_capped_notes = {"server-error": 0, "isolation": 0}   # v21: capped note kinds taken so far (dual.*_NOTES)
+        self.plain_profile = None               # v21: the profile view of v16's pass (investigator without params.agentic)
+        if self.v21:
+            self.plain_profile = copy.deepcopy(spec.profile)
+            self.plain_profile["roles"]["investigator"]["params"].pop("agentic", None)
+        self._reread: dict = {}                 # v12: `<agent>.reread` sessions that re-show earlier reads to a continuation
+        self._verify_note_only = False          # v12 VERIFY of unit candidates: limit ends are coverage notes
+        self._verify_slice: int | None = None   # v12: seconds into VERIFY after which no unit candidate starts
+        self.alt_profile = None
+        if self.cross and lanes.alternate(spec.profile) is not None:
+            self.alt_profile = copy.deepcopy(spec.profile)
+            self.alt_profile["roles"]["investigator"] = copy.deepcopy(lanes.alternate(spec.profile))
         self.off_shard: dict[str, str] = {}     # v4 VERIFY: sweep drafts located outside their own shard -> agent
         self._tool_share: int | None = None     # v3: tool calls the running specialist may still use (its share)
         self._spend_ceiling: int | None = None  # v3: cumulative INVESTIGATE spend ceiling of the running agent
@@ -270,6 +347,7 @@ class Engine:
         scope = "new-agent" if new_agent else scope
         policy = self.budget.get("hostStopRecording")
         recording = policy is not None
+        self._last_stop = None
         n = self._gate_n[stage] = self._gate_n.get(stage, 0) + 1     # EVERY check counts, stop or not, event or not
         ordinal = n if policy == HOST_STOP_RECORDING_V2 else None
         if recording and self.orig is not None:
@@ -280,6 +358,7 @@ class Engine:
             stop = self._clock_stop(stage, stage_t0, new_agent)
         if stop is None:
             return None
+        self._last_stop = stop
         if recording:
             extra = {} if ordinal is None else {"gateOrdinal": ordinal}
             self.recorder.append("host.stop", stage=stage, scope=scope, code=stop,
@@ -289,6 +368,11 @@ class Engine:
         if stop == "soft-deadline":
             return "soft-deadline", typed_error("deadline-exceeded", "soft deadline: no new agent starts", stage=stage)
         msg = "hard run deadline reached" if stop == "hard-deadline" else f"{stage} stage ceiling reached"
+        if stop == "stage-deadline" and self._verify_slice is not None and stage == "VERIFY":
+            msg = ((f"VERIFY clock margin reached ({self._verify_slice}s of the {stage_ceiling(stage, self.budget)}s "
+                    f"VERIFY ceiling; {dual.CLOCK_RULE}: nothing new starts, a note)") if self.v21 else
+                   f"VERIFY start window for coverage-unit candidates reached ({self._verify_slice}s of the "
+                   f"{stage_ceiling(stage, self.budget)}s VERIFY ceiling)")
         if stop == "stage-deadline" and self._time_slice is not None and stage == "INVESTIGATE":
             agent, end, ceiling = self._time_slice
             msg = f"INVESTIGATE time slice of {self.agent_label(agent)} {agent} reached ({end}s of the {ceiling}s stage ceiling)"
@@ -305,6 +389,9 @@ class Engine:
         if self._time_slice is not None and stage == "INVESTIGATE" \
                 and max(0.0, self.clock() - stage_t0) >= self._time_slice[1]:
             return "stage-deadline"             # v3: this specialist's cumulative time slice (specialists.TIME_RULE)
+        if self._verify_slice is not None and stage == "VERIFY" \
+                and max(0.0, self.clock() - stage_t0) >= self._verify_slice:
+            return "stage-deadline"             # v12: no unit candidate past VERIFY ceiling - deepcov.VERIFY_UNIT_MARGIN_SEC
         if state == "soft" and new_agent:
             return "soft-deadline"
         return None
@@ -359,7 +446,12 @@ class Engine:
             detail={"kind": "snapshot-tamper"}))
 
     def agent_label(self, agent: str) -> str:
-        """How messages name an INVESTIGATE agent: 'specialist' (always under v3), 'sweep investigator' for a v4 sweep."""
+        """How messages name an INVESTIGATE agent: 'specialist' (always under v3), 'sweep investigator' for a v4 sweep,
+        'coverage investigator' for a v12 coverage unit."""
+        if self.v12 and deepcov.is_unit(agent):
+            return "coverage investigator"
+        if self.v16:
+            return "reviewer"
         return "sweep investigator" if self.sweep and agent not in specialists.AGENTS else "specialist"
 
     def session_hard_limit(self) -> int:
@@ -410,16 +502,43 @@ class Engine:
         schema = request["outputSchema"]
         if self._spend_ceiling is not None and stage == "INVESTIGATE" and role == "investigator":
             spent = self.stage_spend(stage)
-            if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
-                sweep = self.agent_label(agent) != "specialist"
-                err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
-                                  stage=stage, detail={"scope": "sweep-share" if sweep else "specialist-share",
-                                                       "rule": sweeps.BUDGET_RULE if sweep else specialists.BUDGET_RULE,
-                                                       "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
+            need = (agentic.session_need(request, self.profile["roles"][role]["caps"]["maxRepairs"])
+                    if self.v19 else 0)          # v19 (agentic.ADMISSION_RULE): the session and its repair must fit
+            if need and spent + need > self._spend_ceiling:
+                err = typed_error("budget-exhausted", f"reviewer {agent}: an agentic session and its repair ({need} PACING "
+                                  "micros) no longer fit the INVESTIGATE top", stage=stage,
+                                  detail={"scope": "agentic-session", "rule": agentic.ADMISSION_RULE,
+                                          "spentUsdMicros": spent, "sessionWorstCaseUsdMicros": need,
+                                          "ceilingUsdMicros": self._spend_ceiling})
                 self.recorder.append("error", error=err)
                 return None, err, []
+            if spent >= self._spend_ceiling:      # v3 specialist spend share (before any gateway admission)
+                sweep = self.agent_label(agent) != "specialist"
+                alt = self.cross and prompts.is_alt_lane(agent)
+                detail = ({"scope": "whole-share", "rule": whole.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling} if self.v16 else
+                          {"scope": "unit-share" if deepcov.is_unit(agent) else "lens-share", "rule": deepcov.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling} if self.v12 else
+                          {"scope": "sweep-share" if sweep else "alternate-model-share" if alt
+                           else "specialist-share",
+                           "rule": sweeps.BUDGET_RULE if sweep
+                           else (lanes.V10_BUDGET_RULE if alt else specialists.BUDGET_RULE)
+                           if self.v10 else lanes.CROSS_BUDGET_RULE
+                           if self.cross else specialists.BUDGET_RULE,
+                           "spentUsdMicros": spent, "ceilingUsdMicros": self._spend_ceiling})
+                err = typed_error("budget-exhausted", f"{self.agent_label(agent)} {agent} reached its INVESTIGATE spend share",
+                                  stage=stage, detail=detail)
+                self.recorder.append("error", error=err)
+                return None, err, []
+        if self.v21 and stage == "VERIFY" and role == "verifier" and not self._v21_verify_room():
+            err = self._v21_admission_error(f"verifier {agent}")         # dual.VERIFY_ADMISSION_RULE
+            self.recorder.append("error", error=err)
+            return None, err, []
         try:
-            res = self.gw.call(stage, role, agent, ordinal, request, repair=prompts.repair_builder(request, schema))
+            # CLAUDE-CLI-REPAIR1: a claude-cli call's one repair shows the local schema issues; every other provider's as before
+            fix = ({"repair_with_issues": prompts.repair_issues_builder(request, schema)}
+                   if request.get("provider") == "claude-cli" else {"repair": prompts.repair_builder(request, schema)})
+            res = self.gw.call(stage, role, agent, ordinal, request, **fix)
         except SettlementError as e:
             self.needs_reconciliation = True
             err = typed_error("internal", "spend book failed after provider contact; operator reconciliation required",
@@ -652,11 +771,13 @@ class Engine:
     def omissions(self, stage: str, agent: str | None = None) -> list[str]:
         return omission_notes(self.recorder.events, stage, self.incomplete, agent)
 
-    def bounded_context(self, items: list[dict]) -> tuple[list[dict], list[str]]:
+    def bounded_context(self, items: list[dict], limit: int | None = None) -> tuple[list[dict], list[str]]:
+        """`limit` (impact@v16: whole.CONTEXT_CHARS) defaults to CONTEXT_CHARS, read at call time."""
+        limit = CONTEXT_CHARS if limit is None else limit
         total, out, notes = 0, [], []
         for it in items:
             size = sum(len(x) for x in it["excerpts"])
-            if total + size > CONTEXT_CHARS:
+            if total + size > limit:
                 out.append({**it, "excerpts": [], "notice": (it["notice"] + " Excerpts omitted: request context budget.").strip()})
                 notes.append(f"{it['tool']} result {it['toolCallId']} omitted from the request (context budget)")
                 continue
@@ -676,6 +797,10 @@ class Engine:
         stage = "INVESTIGATE"
         if self.fatal:
             return self.skipped(stage)
+        if self.v16:                            # investigator.impact@v16 (reviewer.pipeline.whole)
+            return self._investigate_v16(stage, t0)
+        if self.v12:                            # investigator.impact@v12 (reviewer.pipeline.deepcov)
+            return self._investigate_v12(stage, t0)
         if self.specialists is not None:
             return self._investigate_v3(stage, t0)
         g = self.gate(stage, t0, new_agent=True)
@@ -709,10 +834,44 @@ class Engine:
             items = [i for i in items if i["tool"] == "impact_scan"] + [i for i in items if i["tool"] != "impact_scan"]
         return self.bounded_context(items)
 
+    def alt_optional(self, agent: str, err: dict | None = None) -> bool:
+        """impact@v10: an alternate-model lane ended by its OWN cap (spend share, tool calls, time slice) or by a
+        provider-level failure of its model (lanes.v10_optional_error) ends alone: what it already answered is kept and
+        the end is an alternate-model coverage note (lanes.v10_alt_coverage), not an incomplete entry. Any other end of
+        an alternate lane (systemic codes, a run hard or soft deadline) is an incomplete entry exactly as in v3."""
+        return self.v10 and prompts.is_alt_lane(agent) and lanes.v10_optional_error(err)
+
+    def final_answer_due(self, stage: str, role: str, agent: str, request: dict) -> bool:
+        """impact@v10 (lanes.V10_FINAL_RULE): an alternate-lane investigator hop must be sent as its final-answer turn
+        when exploring could leave no worst-case reservation for one final-answer call under its spend ceiling.
+        False for every other chain (no change to any other version). impact@v12 (deepcov.FINAL_RULE): every v12 agent
+        under its own spend ceiling."""
+        if (self.v12 or self.v16) and stage == "INVESTIGATE" and role == "investigator" \
+                and self._spend_ceiling is not None:
+            spec = self.profile["roles"]["investigator"]
+            if spec["price"] is None:
+                return False
+            r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
+            return deepcov.final_answer_due(self.stage_spend(stage), self._spend_ceiling, r)
+        if not (self.v10 and prompts.is_alt_lane(agent) and stage == "INVESTIGATE" and role == "investigator"
+                and self._spend_ceiling is not None):
+            return False
+        spec = self.lane_profile(agent)["roles"]["investigator"]
+        if spec["price"] is None:
+            return False
+        r = reservation(spec["price"], estimate_input_tokens(request), spec["caps"]["maxOutputTokens"])
+        return lanes.v10_final_answer_due(self.stage_spend(stage), self._spend_ceiling, r,
+                                          lanes.V10_ALT_AGENTS.index(agent))
+
+    def lane_profile(self, agent: str) -> dict:
+        """The profile an INVESTIGATE agent's requests are built from: the alternate view for an impact@v7 alternate
+        lane, else the run's profile."""
+        return self.alt_profile if self.cross and prompts.is_alt_lane(agent) else self.profile
+
     def _hypotheses(self, agent: str, out: dict, source: str) -> list[dict]:
         """The agent's final InvestigatorOutput -> the Hypothesis documents whose citations and location resolve."""
         tools = self.citable(source)
-        family = self.profile["roles"]["investigator"]["family"]
+        family = self.lane_profile(agent)["roles"]["investigator"]["family"]
         changed = self.changed_head_paths()
         hyps = []
         for n, d in enumerate(out["hypotheses"]):
@@ -762,9 +921,11 @@ class Engine:
             return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
                                    turns=turns, policy=self.policy, host_events=host, unrendered=unrendered)
 
+        profile = self.lane_profile(agent)         # impact@v7: an alternate lane's requests name the alternate model
+
         def build(d):
             return lambda hop, state: prompts.turn_request(
-                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
                 retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools())
 
         first = chain(self.policy.investigator_turns)
@@ -787,7 +948,8 @@ class Engine:
         draft_id = draft_end.final_call
         rec = dict(stage=stage, agentId=agent, version=prompts.EXPLORATION_FLOOR_VERSION, draftCallId=draft_id)
         turns_left = self.policy.investigator_turns - draft_end.hops
-        skip = ("turns" if turns_left < 2 else "tool-calls" if first.tools_exhausted or first._allowed() == 0
+        skip = ("turns" if turns_left < 2 or draft_end.forced_final       # v10 alt: its final-answer turn was sent
+                else "tool-calls" if first.tools_exhausted or first._allowed() == 0
                 else "context-chars" if first.context_exhausted else None)
         if skip is not None:
             self.recorder.append("retrieval.floor", decision="skipped", reason=skip, **rec)
@@ -813,8 +975,14 @@ class Engine:
             if limit is not None:                # a real run limit, not just a missing second answer
                 n = len(draft_end.payload["hypotheses"])
                 who = "" if agent == SPECIALIST else f"specialist {agent}: "
-                inc = [self._inc(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
-                                               f"first-hop draft answer ({n} hypothesis(es)) was used")]
+                if not self.alt_optional(agent, end.error):      # v10 alt lane at its own cap: coverage note only
+                    inc = [self._inc(stage, limit, f"{who}the exploration-floor continuation was stopped ({code}); the "
+                                                   f"first-hop draft answer ({n} hypothesis(es)) was used")]
+            elif self.v10 and prompts.is_alt_lane(agent) and not lanes.v10_optional_error(end.error):
+                # impact@v10: a systemic end of an alternate lane's continuation is not optional (agent-failure)
+                inc = [self._inc(stage, "agent-failure", f"specialist {agent}: the exploration-floor continuation "
+                                 f"failed ({code}); the first-hop draft answer "
+                                 f"({len(draft_end.payload['hypotheses'])} hypothesis(es)) was used")]
         else:
             self.recorder.append("retrieval.floor", decision="draft", reason=end.exhausted, **rec)
         draft_end.hops, draft_end.call_ids = end.hops, end.call_ids
@@ -862,15 +1030,25 @@ class Engine:
             tool_cum = specialists.cumulative(lanes.tool_pool(self.policy, self.budget, k), k)
             spend_cum = specialists.cumulative(lanes.spend_top(self.budget), k)
             slices = specialists.time_slices(ceiling, k)
+        if self.v10:                             # impact@v10: v3's numbers for the v3 lanes, then the alternate lanes
+            tool_cum = lanes.v10_tool_cumulative(self.policy, self.budget, identity.tool_limits(self.spec).max_calls)
+            spend_cum = lanes.v10_primary_spend_cumulative(self.budget)
+            slices = lanes.v10_time_slices(ceiling)
+        elif self.cross:                         # impact@v7: v5 spend shares, then the alternate lanes' own cap
+            spend_cum = lanes.primary_spend_cumulative(self.budget)
+        alt_start = None                         # impact@v7: INVESTIGATE spend when the first alternate lane started
         agents, hyps, inc = [], [], []
         first_err = None                     # (error, reason) of the first specialist that failed or was stopped
+        alt_err = None                       # impact@v10: the same for the optional alternate lanes
         usable = 0
         ctx = notes = None
         systemic = False                     # impact@v4: a systemic failure also starts no sweep
 
         def failed(agent, err, why):
             agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
-            inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: {err['message']}"))
+            if not self.alt_optional(agent, err):     # impact@v10: an alternate lane's own cap: coverage note only
+                inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: "
+                                                     f"{err['message']}"))
 
         for i, agent in enumerate(self.specialists):
             # the agent's cumulative time slice gates its start and each of its tool and model calls (the last
@@ -885,15 +1063,26 @@ class Engine:
                                        "error": err})
                         return self._v3_failed(agents, err, reason)
                     failed(agent, err, reason)
-                    first_err = first_err or (err, reason)
+                    if self.v10 and prompts.is_alt_lane(agent):
+                        alt_err = alt_err or (err, reason)
+                    else:
+                        first_err = first_err or (err, reason)
                     continue
                 if ctx is None:
                     ctx, notes = self._cap_host_results(*self._investigate_context())
                 used = sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage)
-                self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), spend_cum[i]
+                if self.cross and prompts.is_alt_lane(agent):      # impact@v7/@v10 (lanes.*_BUDGET_RULE)
+                    if alt_start is None:
+                        alt_start = self.stage_spend(stage)
+                    ceiling_i = (lanes.v10_alt_spend_ceiling(alt_start, lanes.V10_ALT_AGENTS.index(agent), self.budget)
+                                 if self.v10 else
+                                 lanes.alt_spend_ceiling(alt_start, lanes.ALT_AGENTS.index(agent), self.budget))
+                else:
+                    ceiling_i = spend_cum[i]
+                self._tool_share, self._spend_ceiling = max(0, tool_cum[i] - used), ceiling_i
                 try:
                     end, floor_inc = self._investigator_chain(stage, t0, ctx, notes, agent,
-                                                              prompts.specialist_task(agent))
+                                                              prompts.specialist_task(prompts.lens_of(agent)))
                 finally:
                     self._tool_share = self._spend_ceiling = None
             finally:
@@ -906,7 +1095,10 @@ class Engine:
                     return self._v3_failed(agents, err, reason)
                 limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
                 failed(agent, err, limit or "agent-failure")
-                first_err = first_err or (err, reason)
+                if self.v10 and prompts.is_alt_lane(agent):
+                    alt_err = alt_err or (err, reason)
+                else:
+                    first_err = first_err or (err, reason)
                 if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further specialist
                     for later in self.specialists[i + 1:]:
                         failed(later, typed_error(
@@ -917,8 +1109,9 @@ class Engine:
                     break
             elif end.exhausted is not None:
                 agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
-                inc.append(self._inc_doc(stage, "tool-calls-exhausted",
-                                         f"specialist {agent}: " + self._exhausted_detail(end)))
+                if not self.alt_optional(agent):
+                    inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                             f"specialist {agent}: " + self._exhausted_detail(end)))
                 usable += 1
             else:
                 agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
@@ -935,14 +1128,20 @@ class Engine:
             usable += n_usable
             first_err = first_err or err_reason
         if not usable:
-            return self._v3_failed(agents, *first_err)
+            return self._v3_failed(agents, *(first_err or alt_err))
+        if self.v10 and not any(prompts.is_alt_lane(a["agentId"]) and a["status"] == "completed" for a in agents):
+            inc.append(self._inc_doc(stage, "agent-failure", f"{lanes.NO_ALT_ANSWER}: no alternate-model lane "
+                                     f"({', '.join(lanes.V10_ALT_AGENTS)}) produced an answer; this run has only the "
+                                     "v3 lanes' review"))
         if self.five:                            # impact@v5: merge in lane order, then the near-duplicate cap
-            merges = specialists.merge(hyps, list(self.specialists))
+            merges = (lanes.cross_merge(hyps) if self.cross      # impact@v7: merge only true near-duplicates
+                      else specialists.merge(hyps, list(self.specialists)))
             payload = {"hypotheses": hyps, "agents": agents, "merges": merges,
                        "collapses": lanes.collapse(hyps, merges)}
             return ("partial" if inc else "completed"), payload, None, inc
-        if not self.sweep:
-            payload = {"hypotheses": hyps, "agents": agents, "merges": specialists.merge(hyps)}
+        if not self.sweep:                       # impact@v10: restatement-only merge over its six lanes
+            payload = {"hypotheses": hyps, "agents": agents,
+                       "merges": lanes.v10_merge(hyps) if self.v10 else specialists.merge(hyps)}
             return ("partial" if inc else "completed"), payload, None, inc
         payload = {"hypotheses": hyps, "agents": agents,
                    "merges": specialists.merge(hyps, sweeps.merge_order(agents)), "sweep": cov}
@@ -959,6 +1158,615 @@ class Engine:
         if reason == "soft-deadline":
             self.set_fatal("INVESTIGATE", err, reason="soft-deadline")
         return "failed", {"hypotheses": [], "agents": agents, "merges": []}, err, []
+
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v12 coverage-forced depth
+    def unit_plan(self) -> dict:
+        """investigator.impact@v12: the deterministic coverage plan of this run's PREPARE artifact (deepcov.plan)."""
+        return deep_plan(self.artifacts["PREPARE"]["payload"]["files"], self.recorder.events)
+
+    def _requested_reads(self, stage: str) -> int:
+        """INVESTIGATE tool calls an agent requested (the v12 read budgets; re-shown reads are host calls)."""
+        return sum(1 for e in self.recorder.events if e["type"] == "tool.call" and e["stage"] == stage
+                   and "requestedBy" in e)
+
+    def _v12_optional(self, agent: str, err: dict | None) -> bool:
+        """impact@v12: a coverage investigator ended by its OWN cap (spend share, reads, time slice) or by a
+        provider-level failure ends alone (lanes.v10_optional_error): a coverage note, not an incomplete entry. A lens
+        lane keeps v3's rules."""
+        return self.v12 and deepcov.is_unit(agent) and lanes.v10_optional_error(err)
+
+    def _unit_context(self, paths: list[str]) -> tuple[list, list]:
+        """A coverage investigator's prefetched context: the impact map, the changed-path listing and its files' diffs."""
+        mine = set(paths)
+        items = prompts.context_items(self.recorder.events, "PREPARE")
+        keep = ([i for i in items if i["tool"] == "impact_scan"]
+                + [i for i in items if i["tool"] == "diff" and (i["args"].get("path") is None or i["args"]["path"] in mine)])
+        return self._cap_host_results(*self.bounded_context(keep))
+
+    def _investigate_v12(self, stage, t0):
+        """investigator.impact@v12: the three lens lanes (v3 lens task + depth paragraph), then one coverage
+        investigator per unit of deepcov.plan, each under its cumulative read, spend and time ceilings
+        (deepcov.BUDGET_RULE) and the depth floor (deepcov.FLOOR_RULE). Failure handling is v3's for the lens lanes;
+        a coverage investigator's own cap or provider failure is a coverage note (Engine._v12_optional). The payload
+        carries every resolved hypothesis (agent order, then output order) and deepcov.merge."""
+        plan_doc = self.unit_plan()
+        units = plan_doc["units"]
+        k = len(units)
+        ceiling = stage_ceiling(stage, self.budget)
+        lens_slices, unit_slices = deepcov.time_slices(ceiling, max(k, 1))
+        lens_tool = deepcov.lens_tool_cumulative()
+        all_paths = sorted(f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"])
+        jobs = [(a, None) for a in deepcov.LENS_AGENTS] + [(u["agentId"], u) for u in units]
+        agents, hyps, inc = [], [], []
+        errs: list = []                      # (error, reason) of failed or stopped agents, lens lanes first
+        usable = 0
+        ctx = notes = None
+        unit_tool = utop = None
+
+        def failed(agent, err, why):
+            agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+            if not self._v12_optional(agent, err):
+                inc.append(self._inc_doc(stage, why, f"{self.agent_label(agent)} {agent}: {err['code']}: "
+                                                     f"{err['message']}"))
+
+        for i, (agent, unit) in enumerate(jobs):
+            j = i - len(deepcov.LENS_AGENTS)
+            slices = lens_slices if unit is None else unit_slices
+            end_s = None if slices is None else slices[i if unit is None else j]
+            self._time_slice = None if end_s is None or end_s >= ceiling else (agent, end_s, ceiling)
+            try:
+                g = self.gate(stage, t0, new_agent=True)
+                if g is not None:
+                    reason, err = g
+                    if err["code"] == "cancelled":
+                        agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err),
+                                       "error": err})
+                        return self._v3_failed(agents, err, reason)
+                    failed(agent, err, reason)
+                    errs.append((err, reason))
+                    continue
+                if unit is None:
+                    if ctx is None:
+                        ctx, notes = self._cap_host_results(*self._investigate_context())
+                    c, n, task = ctx, notes, prompts.v12_lens_task(agent)
+                    tool_c = lens_tool[i]
+                    spend_c = deepcov.agent_ceiling(False, i, self.stage_spend(stage), self.budget,
+                                                    len(deepcov.LENS_AGENTS))
+                else:
+                    if unit_tool is None:        # the units start: keep VERIFY room for the known lens candidates
+                        lens_n = min(deepcov.MAX_VERIFY, self._lens_candidates(hyps))
+                        utop = deepcov.unit_top(self.budget, lens_n, self._max_reservation(stage),
+                                                self._lens_merge_groups(hyps))
+                        req = self._requested_reads(stage)
+                        used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
+                        cap = deepcov.unit_read_cap(req, min(self.policy.run_tool_calls, self.budget["maxToolCalls"])
+                                                    - used, lens_n, deepcov.REREAD_POOL - self._reread_used())
+                        unit_tool = [min(x, cap) for x in
+                                     deepcov.unit_tool_ceilings(req, [len(u["files"]) for u in units])]
+                    c, n = self._unit_context([f["path"] for f in unit["files"]])
+                    task = prompts.V12_UNIT_TASK
+                    tool_c = unit_tool[j]
+                    spend_c = deepcov.agent_ceiling(True, j, self.stage_spend(stage), self.budget, k, top=utop)
+                self._tool_share = max(0, tool_c - self._requested_reads(stage))
+                self._spend_ceiling = spend_c
+                try:
+                    end, more = self._v12_agent(stage, t0, agent, c, n, task, unit, j, k, plan_doc, all_paths)
+                finally:
+                    self._tool_share = self._spend_ceiling = None
+            finally:
+                self._time_slice = None
+            inc.extend(more)
+            if end.error is not None:
+                err, reason = end.error, (end.stop[0] if end.stop else None)
+                if err["code"] in REPLAY_CODES or err["code"] in ("cancelled", "internal") or self.needs_reconciliation:
+                    agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                    return self._v3_failed(agents, err, reason)
+                limit = reason or {"deadline-exceeded": "deadline", "budget-exhausted": "budget"}.get(err["code"])
+                failed(agent, err, limit or "agent-failure")
+                errs.append((err, reason))
+                if v3_stops_later_specialists(err):    # systemic or unknown outcome: start no further agent
+                    for later, _ in jobs[i + 1:]:     # a unit not started is a note when its code is optional
+                        failed(later, typed_error(err["code"], f"not started: {self.agent_label(agent)} {agent} failed "
+                                                  f"with {err['code']} (systemic or unknown provider outcome), which "
+                                                  "must not be repeated by every investigator", stage=stage),
+                               "agent-failure")
+                    break
+            elif end.exhausted is not None:
+                agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                if not self._v12_optional(agent, None):
+                    inc.append(self._inc_doc(stage, "tool-calls-exhausted",
+                                             f"specialist {agent}: " + self._exhausted_detail(end)))
+                usable += 1
+            else:
+                agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                hyps.extend(self._hypotheses(agent, end.payload, end.final_call))
+                usable += 1
+            if self.fatal:                       # e.g. a snapshot tamper during this agent's tool calls
+                break
+        if not usable:
+            return self._v3_failed(agents, *errs[0])
+        payload = {"hypotheses": hyps, "agents": agents, "merges": deepcov.merge(hyps)}
+        return ("partial" if inc else "completed"), payload, None, inc
+
+    def _lens_candidates(self, hyps: list) -> int:
+        """impact@v12: the distinct lens-lane candidates VERIFY will take first (resolved, not merged as v3 merges)."""
+        lens = [h for h in hyps if h["specialist"] in deepcov.LENS_AGENTS]
+        gone = {m for g in specialists.merge(lens) for m in g["mergedIds"]}
+        return sum(1 for h in lens if h["id"] not in gone)
+
+    def _max_reservation(self, stage: str) -> int:
+        """The largest investigator reservation logged so far (a worst-case final-answer call)."""
+        return max((e["record"]["reservedUsdMicros"] for e in self.recorder.events if e["type"] == "cost"
+                    and e["record"].get("stage") == stage and e["record"]["role"] == "investigator"), default=0)
+
+    @staticmethod
+    def _lens_merge_groups(hyps: list) -> int:
+        return len(specialists.merge([h for h in hyps if h["specialist"] in deepcov.LENS_AGENTS]))
+
+    def _reread_used(self) -> int:
+        return sum(1 for e in self.recorder.events if e["type"] == "tool.call"
+                   and e["agentId"].endswith(deepcov.REREAD_SUFFIX))
+
+    def _v12_agent(self, stage, t0, agent, ctx, notes, task, unit, j, k, plan_doc, all_paths):
+        """One impact@v12 agent: its retrieval chain, then the depth floor (deepcov.FLOOR_RULE). -> (ChainEnd of the
+        accepted answer, or of the failure that must fail the stage as v3 would; [incomplete]). An answer that misses
+        the floor and is not waived (deepcov.waiver) is a draft: the host re-shows the agent's earlier reads as
+        host-prepared calls of `<agent>.reread` (so they stay citable) and sends one continuation chain with the
+        depthFloor block, at most deepcov.MAX_CONTINUATIONS times. A continuation without a final answer leaves the
+        latest answer in force; a replay failure, cancellation, internal error or spend-book failure fails as v3."""
+        events = self.tool_calls()
+        host = [events[c["toolCallId"]] for c in ctx]
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(), task=task)
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        files = None
+        if unit is not None:
+            files = deepcov.unit_files(unit)
+            mine = set(files)
+            doc["coverageUnit"] = prompts.unit_block(j + 1, k, unit["files"], [p for p in all_paths if p not in mine],
+                                                     plan_doc["skipped"], deepcov.FLOOR_TEXT)
+        session = self.new_session(stage, agent)
+
+        def chain(turns, hev, items):
+            return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
+                                   turns=turns, policy=self.policy, host_events=hev,
+                                   unrendered=self.unrendered_ids(items, hev))
+
+        def build(d):
+            return lambda hop, state: prompts.turn_request(
+                self.profile, self.profile_ref, "investigator", d, state, self.policy.requests_per_turn,
+                retrieval.RETRIEVAL_VERSION, tools=self.retrieval_tools())
+
+        end = chain(self.policy.investigator_turns, host, ctx).run(build(doc))
+        while end.payload is not None:
+            ev = self.recorder.events
+            st = deepcov.floor_status(ev, agent, files)
+            if st["met"] or deepcov.waiver(ev, agent, end.final_call, self.policy.investigator_turns) is not None:
+                return end, []
+            n = deepcov.continuations(ev, agent) + 1
+            more_ctx, more_host, ids = self._reshow(stage, t0, agent, retrieval.MAX_HOST_RESULTS - len(host),
+                                                    deepcov.cited_ids(end.payload), files)
+            if self.fatal:
+                return end, []
+            turns = min(self.policy.investigator_turns - len(deepcov.agent_calls(self.recorder.events, agent)),
+                        deepcov.CONTINUATION_HOPS)
+            items2, host2 = ctx + more_ctx, host + more_host
+            d2 = dict(doc, context=items2,
+                      depthFloor=prompts.depth_floor_block(deepcov.remap_draft(end.payload, ids),
+                                                           deepcov.unmet(st, files), n, deepcov.MAX_CONTINUATIONS))
+            second = chain(turns, host2, items2).run(build(d2))
+            if second.payload is not None:
+                second.hops, second.call_ids = end.hops + second.hops, end.call_ids + second.call_ids
+                end = second
+                continue
+            if second.error is not None and (second.error["code"] in REPLAY_CODES
+                                             or second.error["code"] in ("cancelled", "internal")
+                                             or self.needs_reconciliation):
+                return second, []                # never masked by the draft: fail exactly as v3 would
+            inc = []
+            if second.error is not None:
+                code = second.error["code"]
+                limit = ("deadline" if second.stop is not None or code == "deadline-exceeded"
+                         else "budget" if code == "budget-exhausted" else None)
+                # a continuation ended by the agent's OWN cap (spend share, time slice, stage ceiling) or a provider
+                # failure keeps the draft as a floor note (deepcov.coverage_lines); a run deadline stays incomplete
+                if limit is not None and not lanes.v10_optional_error(second.error):
+                    inc = [self._inc(stage, limit, f"{self.agent_label(agent)} {agent}: the depth-floor continuation "
+                                                   f"was stopped ({code}); its earlier answer "
+                                                   f"({len(end.payload['hypotheses'])} hypothesis(es)) was used")]
+            end.hops, end.call_ids = end.hops + second.hops, end.call_ids + second.call_ids
+            return end, inc
+        return end, []
+
+    def _reshow(self, stage, t0, agent, room: int, cited=(), files=None) -> tuple[list, list, dict]:
+        """impact@v12: re-run the agent's earlier distinct reads (deepcov.reread_events: the draft's cited reads first,
+        then its own changed lines; at most `room` and what is left of the run-wide deepcov.REREAD_POOL) as
+        host-prepared tool calls of the session `<agent>.reread`, so a continuation chain (a new chain, whose hop 0
+        may show only host-prepared results) can see and cite them. -> (context items, logged tool.call events,
+        {earlier toolCallId: re-shown toolCallId} for remapping the draft's tool-ref citations)."""
+        name = agent + deepcov.REREAD_SUFFIX
+        session = self._reread.get(name)
+        if session is None:
+            used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
+            lim = dataclasses.replace(identity.tool_limits(self.spec),
+                                      max_calls=max(0, min(self.session_hard_limit(),
+                                                           self.budget["maxToolCalls"] - used)))
+            session = self._reread[name] = ToolSession(self.view, stage=stage, agent_id=name, limits=lim,
+                                                       clock=self.clock, tools=IMPACT_TOOLS)
+        logged, ids = [], {}
+        limit = max(0, min(room, deepcov.REREAD_MAX, deepcov.REREAD_POOL - self._reread_used()))
+        earlier = deepcov.agent_reads(self.recorder.events, agent)
+        for ev in deepcov.reread_events(self.recorder.events, agent, tuple(cited), files, limit):
+            call, why = self.tool(session, ev["tool"], ev["args"], t0)
+            if call is None:
+                break
+            new = self.tool_calls()[call.tool_call_id]
+            logged.append(new)
+            for old in earlier:                 # every earlier read of the same request maps to the re-shown one
+                if old["tool"] == ev["tool"] and old["args"] == ev["args"]:
+                    ids[old["toolCallId"]] = new["toolCallId"]
+            if self.fatal:
+                break
+        items = prompts.context_items(logged, stage)
+        return items, logged, ids
+
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v16 one whole-change reviewer
+    def _whole_context(self, stage, t0, head_reads: bool | None = None) -> tuple[list, list, dict]:
+        """impact@v16 (whole.CONTEXT_RULE): the PREPARE diff of every changed file, then the changed files' head content
+        read by the host (session whole.HEAD_AGENT, whole.head_plan and whole.read_ranges), within whole.CONTEXT_CHARS.
+        -> (context items, notes, the model-visible wholeChange block)."""
+        items = [i for i in prompts.context_items(self.recorder.events, "PREPARE") if i["tool"] == "diff"]
+        sizes = [(i["toolCallId"], sum(len(x) for x in i["excerpts"])) for i in items]
+        shown, out = whole.select_diffs(sizes)
+        name = {i["toolCallId"]: i["args"].get("path") or "(changed-path listing)" for i in items}
+        diffs = [i for i in items if i["toolCallId"] in set(shown)]
+        head = self.spec.head
+        reads = not self.v19 if head_reads is None else head_reads           # v21: per pass
+        files = [] if not reads else [(f["path"], ls) for f in self.artifacts["PREPARE"]["payload"]["files"]
+                                      if (ls := snaps.head_lines(head.root, head.manifest, f["path"]))]   # v19: the session reads
+        rows = whole.head_plan([(p, [len(x) + 1 for x in ls]) for p, ls in files],
+                               whole.CONTEXT_CHARS - sum(c for k, c in sizes if k in set(shown)))
+        session = None if not reads else self.new_session(stage, whole.HEAD_AGENT)
+        logged, notes, read = [], [], {}
+        for (path, ls), row in zip(files, rows):
+            ranges = whole.read_ranges(ls, row["shownLines"])
+            for a, b in ranges:
+                call, why = self.tool(session, "read_file", {"side": "head", "path": path, "start_line": a,
+                                                             "end_line": b}, t0)
+                if call is None:
+                    notes.append(f"head content of {path} from line {a} not read: {why}")
+                    break
+                logged.append(self.tool_calls()[call.tool_call_id])
+                read[path] = b if (a, b) != ranges[-1] else row["shownLines"]
+                if self.fatal:
+                    break
+            if notes or self.fatal:
+                break
+        rows = [dict(r, shownLines=read.get(r["path"], 0)) for r in rows]    # what was read, not what was planned
+        ctx, more = self.bounded_context(diffs + prompts.context_items(logged, stage), whole.CONTEXT_CHARS)
+        ctx, more = self._cap_host_results(ctx, more)
+        pr = self.case["pr"]
+        block = prompts.whole_block(whole.MAX_HYPOTHESES, len(diffs),
+                                    [{"path": name[d["path"]], "chars": d["chars"]} for d in out]
+                                    + [{"path": q, "reason": whole.NOT_COLLECTED} for q in self._uncollected(items)],
+                                    rows, bool(pr["title"] or pr["body"]))
+        return ctx, notes + more, block
+
+    def _uncollected(self, items: list) -> list[str]:
+        """impact@v16 (gate L1): the PREPARE files (every changed path, with zero counts when undiffed) that have no
+        PREPARE diff item, in PREPARE order: its tool cap ended before them (or, under partial coverage, a one-sided
+        gap row that is never diffed)."""
+        have = {i["args"].get("path") for i in items}
+        return [f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"] if f["path"] not in have]
+
+    def _whole_chain(self, stage, t0, agent, ctx, doc, turns, profile=None):
+        """One impact@v16 reviewer chain (at most `turns` hops, no floor) in its own session. `profile` (v21's v16 pass):
+        the profile view its requests are built from (default the run's)."""
+        profile = self.profile if profile is None else profile
+        events = self.tool_calls()
+        host = [events[c["toolCallId"]] for c in ctx]
+        session = self.new_session(stage, agent)
+        return retrieval.Chain(self, stage=stage, role="investigator", agent=agent, session=session, t0=t0,
+                               turns=turns, policy=self.policy, host_events=host,
+                               unrendered=self.unrendered_ids(ctx, host)).run(
+            lambda hop, state: prompts.turn_request(profile, self.profile_ref, "investigator", doc, state,
+                                                    self.policy.requests_per_turn, retrieval.RETRIEVAL_VERSION,
+                                                    tools=self.retrieval_tools()))
+
+    def _investigate_v16(self, stage, t0):
+        """investigator.impact@v16 (reviewer.pipeline.whole): one whole-change reviewer under deepcov's INVESTIGATE
+        spend top, whole.READS reads and whole.HOPS hops, until the stage ceiling. A chain that ends with a
+        whole.REASK_CODES code is asked once more in a new session (whole.REASK_RULE; the first end is a note); one that
+        ends at a turn, read or context limit without an answer is asked once more for its answer only
+        (whole.REASK_EXHAUSTED_HOPS). Any other end without an answer fails INVESTIGATE exactly as a v12 run without a
+        usable lane: nothing later runs (V1).
+        The payload carries the first whole.MAX_HYPOTHESES drafts' resolved hypotheses; there is nothing to merge."""
+        agents: list = []
+        g = self.gate(stage, t0, new_agent=True)
+        if g is not None:
+            agents.append({"agentId": whole.AGENT, "specialist": whole.AGENT, "status": _agent_status(g[1]),
+                           "error": g[1]})
+            return self._v3_failed(agents, g[1], g[0])
+        if self.v26:
+            return self._investigate_v26(stage, agents)
+        if self.v24:
+            return self._investigate_v24(stage, agents)
+        if self.v21:
+            return self._investigate_v21(stage, t0, agents)
+        ctx, notes, block = self._whole_context(stage, t0)
+        if self.fatal:                           # e.g. a snapshot tamper during a head read
+            return "failed", {"hypotheses": [], "agents": agents}, self.fatal["error"], []
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
+                                       task=((prompts.V20_WHOLE_TASK if self.policy.broad_agentic   # v20 (BROAD_RULE)
+                                              else prompts.V19_WHOLE_TASK) if self.v19 else prompts.V16_WHOLE_TASK))
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        doc["wholeChange"] = block
+        if self.v19:                             # agentic.SESSION_RULE: the session's own caps and where the snapshots are
+            doc["agenticReview"] = prompts.agentic_block(self.profile["roles"]["investigator"]["params"]["agentic"])
+        self._spend_ceiling = deepcov.spend_top(self.budget)
+        try:
+            turns = agentic.HOPS if self.v19 else whole.HOPS           # v19: one agentic call answers
+            for agent in (whole.AGENT, whole.AGENT + whole.REASK_SUFFIX):
+                self._tool_share = whole.READS
+                end = self._whole_chain(stage, t0, agent, ctx, doc, turns)
+                if end.error is None and end.exhausted is None:
+                    agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                    hyps = self._hypotheses(agent, {"hypotheses": end.payload["hypotheses"][:whole.MAX_HYPOTHESES]},
+                                            end.final_call)
+                    return "completed", {"hypotheses": hyps, "agents": agents}, None, []
+                if end.error is None:            # a turn, read or context limit ended it without a final answer
+                    agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                    if not whole.is_reask(agent) and not self.fatal:
+                        turns = whole.REASK_EXHAUSTED_HOPS          # whole.REASK_RULE: its answer only, once
+                        continue
+                    return "partial", {"hypotheses": [], "agents": agents}, None, [
+                        self._inc_doc(stage, "tool-calls-exhausted", f"reviewer {agent}: " + self._exhausted_detail(end))]
+                err = end.error
+                agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+                tool = self.v19 and agentic.is_tool_attempt(err)        # agentic.TOOL_REASK_RULE: re-asked once too
+                if not ((err["code"] in whole.REASK_CODES or tool) and not whole.is_reask(agent) and not self.fatal
+                        and not self.needs_reconciliation):
+                    return self._v3_failed(agents, err, end.stop[0] if end.stop else None)
+                if tool:                                 # the fresh session is told which tools exist
+                    doc = dict(doc, task=doc["task"] + " " + prompts.V19_TOOL_NOTE)
+        finally:
+            self._tool_share = self._spend_ceiling = None
+
+    # ------------------------------------------------------------------ INVESTIGATE: impact@v21 dual pass
+    def _v21_doc(self, stage, t0, agentic_pass: bool):
+        """The request document of one v21 pass: v16's (host head reads, V16 task) or v20's (diffs only, V20 task and
+        the agenticReview block). -> (ctx, doc)."""
+        ctx, notes, block = self._whole_context(stage, t0, head_reads=not agentic_pass)
+        doc = prompts.investigator_doc(self.case, ctx, self.omissions("PREPARE") + notes, self.coverage_doc(),
+                                       task=prompts.V20_WHOLE_TASK if agentic_pass else prompts.V16_WHOLE_TASK)
+        if self.coverage_doc() is None:
+            doc["coverage"] = ("Two full pinned snapshots are available through retrieval requests; the starting "
+                               "context below is bounded and may be truncated or omitted.")
+        doc["wholeChange"] = block
+        if agentic_pass:
+            doc["agenticReview"] = prompts.agentic_block(self.profile["roles"]["investigator"]["params"]["agentic"])
+        return ctx, doc
+
+    def _v21_pass(self, stage, t0, base, agents):
+        """One v21 pass `base` and its re-ask `base`-reask: v16's (plain requests, whole.HOPS) or v20's agentic one (one
+        hop, the tool re-ask). Appends its agent entries. -> ("answer", hypotheses, None) | ("exhausted", ChainEnd, None)
+        | ("failed", error, stop reason)."""
+        agentic_pass = base == dual.AGENTIC_AGENT
+        ctx, doc = self._v21_doc(stage, t0, agentic_pass)
+        if self.fatal:                           # e.g. a snapshot tamper during a head read
+            return "failed", self.fatal["error"], None
+        profile = None if agentic_pass else self.plain_profile
+        turns = agentic.HOPS if agentic_pass else whole.HOPS
+        for agent in dual.pass_agents(base):
+            self._tool_share = whole.READS
+            end = self._whole_chain(stage, t0, agent, ctx, doc, turns, profile=profile)
+            if end.error is None and end.exhausted is None:
+                agents.append({"agentId": agent, "specialist": agent, "status": "completed"})
+                return "answer", self._hypotheses(agent, {"hypotheses": end.payload["hypotheses"][:whole.MAX_HYPOTHESES]},
+                                                  end.final_call), None
+            if end.error is None:                # a turn, read or context limit ended it without a final answer
+                agents.append({"agentId": agent, "specialist": agent, "status": "failed"})
+                if not whole.is_reask(agent) and not self.fatal:
+                    turns = whole.REASK_EXHAUSTED_HOPS              # whole.REASK_RULE: its answer only, once
+                    continue
+                return "exhausted", end, None
+            err = end.error
+            agents.append({"agentId": agent, "specialist": agent, "status": _agent_status(err), "error": err})
+            tool = agentic_pass and agentic.is_tool_attempt(err)   # agentic.TOOL_REASK_RULE
+            if not ((err["code"] in whole.REASK_CODES or tool) and not whole.is_reask(agent) and not self.fatal
+                    and not self.needs_reconciliation):
+                return "failed", err, (end.stop[0] if end.stop else None)
+            if tool:
+                doc = dict(doc, task=doc["task"] + " " + prompts.V19_TOOL_NOTE)
+        raise AssertionError("unreachable: the re-ask always returns")      # pragma: no cover
+
+    def _investigate_v21(self, stage, t0, agents):
+        """investigator.impact@v21 (dual): v16's pass, then v20's agentic pass, both under deepcov's INVESTIGATE spend
+        top. A fatal or systemic end fails INVESTIGATE at once (V1); any other end of a pass without an answer is a note
+        when the other pass answers; with no answer at all INVESTIGATE ends as v16's."""
+        hyps: list = []
+        ends: list = []
+        answered = False
+        self._spend_ceiling = deepcov.spend_top(self.budget)
+        try:
+            for j, base in enumerate(dual.PASSES):
+                if j:
+                    g = self.gate(stage, t0, new_agent=True)
+                    if g is not None:
+                        agents.append({"agentId": base, "specialist": base, "status": _agent_status(g[1]), "error": g[1]})
+                        if g[1]["code"] == "cancelled" or not answered:
+                            return self._v3_failed(agents, g[1], g[0])
+                        break                                   # a note: the first pass answered
+                kind, got, reason = self._v21_pass(stage, t0, base, agents)
+                if kind == "answer":
+                    hyps += got
+                    answered = True
+                elif kind == "failed" and (got["code"] in REPLAY_CODES or got["code"] in ("cancelled", "internal")
+                                           or self.needs_reconciliation or self.fatal
+                                           or (v3_stops_later_specialists(got) and not agentic.is_tool_attempt(got)
+                                               and not (base == dual.AGENTIC_AGENT and self._v21_unverified(got)))):
+                    return self._v3_failed(agents, got, reason)  # V1: nothing later runs
+                ends.append((kind, got, reason))
+        finally:
+            self._tool_share = self._spend_ceiling = None
+        if answered:
+            return "completed", {"hypotheses": hyps, "agents": agents}, None, []
+        kind, got, reason = next((e for e in ends if e[0] == "failed"), ends[0])
+        if kind == "exhausted":
+            return "partial", {"hypotheses": [], "agents": agents}, None, [
+                self._inc_doc(stage, "tool-calls-exhausted", f"reviewer {agents[-1]['agentId']}: "
+                              + self._exhausted_detail(got))]
+        return self._v3_failed(agents, got, reason)
+
+    def _investigate_v24(self, stage, agents):
+        """investigator.impact@v24 (reviewer.pipeline.seeded): no model call. The host's seed becomes drafts (seeded.drafts:
+        the head line at file:line as the one code citation, re-checked by the snapshot resolver), resolved into Hypothesis
+        documents as an investigator answer would be; dropped items are disclosed. INVESTIGATE completes (with zero
+        candidates when nothing resolves); a missing seed is an internal error (benchmark refuses v24 without one)."""
+        seed = self.spec.seed
+        if not isinstance(seed, dict):
+            err = typed_error("internal", "investigator.impact@v24 has no seed document", stage=stage)
+            agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": _agent_status(err), "error": err})
+            return self._v3_failed(agents, err, None)
+        drafts, dropped, cut = seeded.drafts(seed, lambda p: snaps.head_lines(self.spec.head.root, self.spec.head.manifest, p),
+                                             self.head_id, self.changed_head_paths())
+        family = self.profile["roles"]["investigator"]["family"]
+        ref = "sha256:" + seeded.digest(seed)
+        self.recorder.append("seed.input", stage=stage, seed=ref, mode=seed["mode"],   # the drafts' provenance record
+                             drafts=[{"index": n, "id": seed["items"][n]["id"], "draft": d} for n, d in drafts])
+        hyps = []
+        for n, d in drafts:
+            ev, problems = materialize_evidence(d["evidence"], {}, f"seed:{seed['mode']}", self.resolver)
+            if problems or not ev:               # the host's own citation must resolve (it is the pinned head line)
+                dropped.append({"index": n, "reason": "no-such-line"})
+                continue
+            h = {"id": hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]),
+                 "runId": self.run["id"], "specialist": seeded.AGENT, "claim": d["claim"], "category": d["category"],
+                 "suspectedSeverity": d["suspectedSeverity"], "impact": d["impact"], "location": d["location"],
+                 "evidence": ev, "modelFamily": family, "seedRef": {"seed": ref, "index": n, "id": seed["items"][n]["id"]}}
+            if validate("Hypothesis", h):
+                dropped.append({"index": n, "reason": "bad-path"})
+                continue
+            hyps.append(h)
+        dropped.sort(key=lambda x: x["index"])
+        agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": "completed"})
+        kept = {h["id"] for h in hyps}
+        record = seeded.summary(seed, dropped, cut, len(hyps))
+        record["drafts"] = [{"index": n, "id": seed["items"][n]["id"], "draft": d} for n, d in drafts
+                            if hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]) in kept]
+        return "completed", {"hypotheses": hyps, "agents": agents, "seed": record}, None, []
+
+    def _investigate_v26(self, stage, agents):
+        """investigator.impact@v26 (reviewer.pipeline.consensus): no model call. The seed's candidates are matched against its
+        witness answers (consensus.table, k-of-n); the SUPPORTED ones go through v24's location ingest (seeded.drafts, then the
+        snapshot resolver) and the verbatim-body check, and become Hypothesis documents as v24's. Unsupported ('no-witness'),
+        unlocatable and unpublishable candidates are disclosed by id. INVESTIGATE completes (with zero candidates when nothing is
+        supported); a missing seed is an internal error (benchmark refuses v26 without one)."""
+        seed = self.spec.seed
+        if not isinstance(seed, dict) or seed.get("schema") != consensus.SEED_SCHEMA:
+            err = typed_error("internal", "investigator.impact@v26 has no seed document", stage=stage)
+            agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": _agent_status(err), "error": err})
+            return self._v3_failed(agents, err, None)
+        cands = seed["candidates"]["items"]
+        rows = consensus.table(seed)
+        supported = {r["index"] for r in rows if r["supported"]}
+        dropped = [{"index": r["index"], "id": r["seedId"], "reason": "no-witness", "votes": r["votes"]}
+                   for r in rows if not r["supported"]]
+        located, gone, _ = seeded.drafts({"items": cands}, lambda p: snaps.head_lines(self.spec.head.root, self.spec.head.manifest, p),
+                                         self.head_id, self.changed_head_paths())
+        dropped += [{"index": d["index"], "id": cands[d["index"]]["id"], "reason": d["reason"]} for d in gone
+                    if d["index"] in supported]
+        drafts = []
+        for n, d in located:
+            if n not in supported:
+                continue
+            body = cands[n]["body"]
+            if len(body) > consensus.BODY_MAX or contains_protected(body) or contains_protected(consensus.title_of(body)):
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "unpublishable-body"})
+                continue
+            drafts.append((n, d))
+        family = self.profile["roles"]["investigator"]["family"]
+        ref = "sha256:" + seeded.digest(seed)
+        event = consensus.event_record(seed, rows)
+        self.recorder.append("seed.input", stage=stage, seed=ref, mode=seed["mode"],   # the drafts' and the votes' provenance
+                             drafts=[{"index": n, "id": cands[n]["id"], "draft": d} for n, d in drafts], consensus=event)
+        hyps = []
+        for n, d in drafts:
+            ev, problems = materialize_evidence(d["evidence"], {}, f"seed:{seed['mode']}", self.resolver)
+            if problems or not ev:               # the host's own citation must resolve (it is the pinned head line)
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "no-such-line"})
+                continue
+            h = {"id": hypothesis_id(seeded.AGENT, n, d["claim"], d["location"]["path"], d["location"]["line"]),
+                 "runId": self.run["id"], "specialist": seeded.AGENT, "claim": d["claim"], "category": d["category"],
+                 "suspectedSeverity": d["suspectedSeverity"], "impact": d["impact"], "location": d["location"],
+                 "evidence": ev, "modelFamily": family, "seedRef": {"seed": ref, "index": n, "id": cands[n]["id"]}}
+            if validate("Hypothesis", h):            # as v24
+                dropped.append({"index": n, "id": cands[n]["id"], "reason": "bad-path"})
+                continue
+            hyps.append(h)
+        dropped.sort(key=lambda x: x["index"])
+        agents.append({"agentId": seeded.AGENT, "specialist": seeded.AGENT, "status": "completed"})
+        kept = {h["seedRef"]["index"] for h in hyps}
+        cut = sum(1 for n, d in drafts if n in kept and d["claim"] != cands[n]["body"])
+        record = consensus.summary(seed, rows, dropped, cut, [{"index": n, "id": cands[n]["id"], "draft": d}
+                                                              for n, d in drafts if n in kept])
+        return "completed", {"hypotheses": hyps, "agents": agents, "consensus": record}, None, []
+
+    def _v21_passes(self) -> list:
+        """The union's lanes in UNION_ORDER: v21's two passes, or impact@v24's one seed lane (its kept drafts, in order)."""
+        if self.v24:
+            rec = self.artifacts["INVESTIGATE"]["payload"].get("seed") or {}
+            return [[(hypothesis_id(seeded.AGENT, x["index"], x["draft"]["claim"], x["draft"]["location"]["path"],
+                                    x["draft"]["location"]["line"]), x["draft"]) for x in rec.get("drafts", ())]]
+        return [self._lane_candidates(lambda a, b=base: a in dual.pass_agents(b)) for base in dual.UNION_ORDER]
+
+    def _v21_candidates(self, hyps: dict) -> list:
+        """dual.UNION_RULE: the agentic pass's candidates, then v16's, kept ones ordered (both passes, P0/P1, the rest),
+        then the merged ones (dropped in VERIFY without a verifier call). impact@v24: the one seed lane."""
+        order, _, _ = dual.union(self._v21_passes(), hyps)
+        return [(i, hid, d) for i, (hid, d) in enumerate(order)]
+
+    def _v21_merged(self, hyps: dict) -> dict:
+        return dual.union(self._v21_passes(), hyps)[1]
+
+    def _v21_verify_room(self) -> bool:
+        """dual.VERIFY_ADMISSION_RULE: a verifier session and its repair still fit below the JUDGE reserve floor."""
+        need = dual.session_need(self.profile["roles"]["verifier"]["caps"]["maxRepairs"])
+        return self.run_spend() + need <= sweeps.judge_reserve_floor(self.budget)
+
+    def _v21_admission_error(self, who: str) -> dict:
+        need = dual.session_need(self.profile["roles"]["verifier"]["caps"]["maxRepairs"])
+        return typed_error("budget-exhausted", f"{who}: an agentic verifier session and its repair ({need} PACING micros) "
+                           f"no longer fit below the JUDGE reserve ({dual.VERIFY_ADMISSION_RULE})", stage="VERIFY",
+                           detail={"scope": "agentic-verify-session", "rule": dual.VERIFY_ADMISSION_RULE,
+                                   "spentUsdMicros": self.run_spend(), "sessionWorstCaseUsdMicros": need,
+                                   "floorUsdMicros": sweeps.judge_reserve_floor(self.budget)})
+
+    def _v21_clock_note(self) -> bool:
+        """dual.CLOCK_RULE: the latest gate stop was the VERIFY stage clock (its margin or ceiling), not the run's soft or
+        hard deadline or a cancellation: what it cut is a note and the run completes."""
+        return self.v21 and self._last_stop == "stage-deadline"
+
+    def _v21_unverified(self, err) -> str | None:
+        """dual.UNVERIFIED_RULE: the kind ('stop' | 'server-error' | 'isolation') of a v21 session end without a verdict
+        that is a note, else None. A 'server-error' / 'isolation' answer counts against dual.SERVER_ERROR_NOTES /
+        dual.ISOLATION_NOTES, so call it once per end."""
+        if not self.v21 or self.needs_reconciliation or self.fatal:
+            return None
+        kind = dual.unverified_end(err)
+        cap = {"server-error": dual.SERVER_ERROR_NOTES, "isolation": dual.ISOLATION_NOTES}.get(kind)
+        if cap is not None:
+            if self._v21_capped_notes[kind] >= cap:
+                return None
+            self._v21_capped_notes[kind] += 1
+        return kind
+
+    def _v21_tool(self, err) -> bool:
+        """v21 VERIFY: a verifier session the adapter ended for a tool attempt (agentic.TOOL_REASK_RULE)."""
+        return self.v21 and agentic.is_tool_attempt(err)
 
     # ------------------------------------------------------------------ INVESTIGATE: impact@v4 diff-shard sweeps
     def shard_plan(self) -> tuple[list, list, list, list]:
@@ -1219,7 +2027,13 @@ class Engine:
         """-> ([(original index n, hypothesis id, draft)], {id: Hypothesis}) rebuilt from the logged successful
         investigator call and the INVESTIGATE artifact (so a resumed run needs nothing else)."""
         hyps = {h["id"]: h for h in self.artifacts["INVESTIGATE"]["payload"]["hypotheses"]}
-        if self.specialists is not None:
+        if self.v26:                                      # impact@v26: the kept candidates in candidate order (no union)
+            rec = self.artifacts["INVESTIGATE"]["payload"].get("consensus") or {}
+            by = {x["index"]: x["draft"] for x in rec.get("drafts", ())}
+            return [(h["seedRef"]["index"], hid, by.get(h["seedRef"]["index"])) for hid, h in hyps.items()], hyps
+        if self.v21:                                      # impact@v21 (dual.UNION_RULE)
+            return self._v21_candidates(hyps), hyps
+        if self.specialists is not None or self.v16:      # impact@v16: the reviewer's lane (whole.AGENT or its re-ask)
             return self._v3_candidates(), hyps
         # the last usable INVESTIGATE answer that carries a role payload (a non-final Turn hop has none); with the
         # impact@v2 exploration floor, the answer its last retrieval.floor decision names (the draft when it was used)
@@ -1234,10 +2048,24 @@ class Engine:
     def _v3_candidates(self) -> list:
         """investigator.impact@v3: every completed specialist's accepted answer, interleaved round-robin in specialist
         order (contracts 0, logic 0, safety 0, contracts 1, ...), as [(running index, hypothesis id, draft)]. The
-        running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key)."""
+        running index is unique across specialists. impact@v5 orders each lane by value first (lanes.value_key).
+        impact@v10: exactly v3's list over the three v3 lanes, then the alternate lanes' own round-robin after it."""
+        if self.v12:                     # impact@v12: the lens lanes as v3, then the units' candidates by value
+            out = (self._lane_candidates(lambda a: not deepcov.is_unit(a))
+                   + self._lane_candidates(deepcov.is_unit, by_value=True))
+        elif self.v10:
+            out = (self._lane_candidates(lambda a: not prompts.is_alt_lane(a))
+                   + self._lane_candidates(prompts.is_alt_lane))
+        else:
+            out = self._lane_candidates(lambda a: True)
+        return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+
+    def _lane_candidates(self, keep, by_value: bool | None = None) -> list:
+        """[(hypothesis id, draft)] of the completed INVESTIGATE agents `keep` selects, round-robin in agent order.
+        `by_value` (default: impact@v5's rule) orders each agent's drafts by lanes.value_key first."""
         lane_list = []
         for a in self.artifacts["INVESTIGATE"]["payload"]["agents"]:
-            if a["status"] != "completed":
+            if a["status"] != "completed" or not keep(a["agentId"]):
                 continue
             agent = a["agentId"]
             if self.sweep and agent not in specialists.AGENTS:      # impact@v4 diff-shard sweep lane
@@ -1248,12 +2076,14 @@ class Engine:
                            if e["type"] == "model.call" and e["stage"] == "INVESTIGATE" and e["agentId"] == agent
                            and (src is None or e["callId"] == src)
                            and (p := terminal_payload(e)) is not None), [])
-            order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n)) if self.five
-                     else range(len(drafts)))          # impact@v5: a lane's most valuable hypotheses first
+            if self.v16:                        # impact@v16: the first whole.MAX_HYPOTHESES drafts only
+                drafts = drafts[:whole.MAX_HYPOTHESES]
+            order = (sorted(range(len(drafts)), key=lambda n: lanes.value_key(drafts[n], n))
+                     if (self.five if by_value is None else by_value)
+                     else range(len(drafts)))          # impact@v5 (and v12 units): a lane's most valuable first
             lane_list.append([(hypothesis_id(agent, n, drafts[n]["claim"], drafts[n]["location"]["path"],
                                          drafts[n]["location"]["line"]), drafts[n]) for n in order])
-        out = [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
-        return [(i, hid, d) for i, (hid, d) in enumerate(out)]
+        return [lane[k] for k in range(max(map(len, lane_list), default=0)) for lane in lane_list if k < len(lane)]
 
     def _sweep_lane(self, agent: str) -> list:
         """An impact@v4 sweep's VERIFY lane: the hypotheses of its first final answer, then those its disposition
@@ -1297,6 +2127,8 @@ class Engine:
         stage = "VERIFY"
         if self.fatal:
             return self.skipped(stage)
+        if self.v26:                                  # impact@v26: no verifier session or call (consensus.VERDICT)
+            return self._verify_v26(stage)
         cands, hyps = self.candidates()
         findings, records, drops, inc = [], [], [], []
         session = self.new_session(stage, VERIFIER_AGENT)
@@ -1305,6 +2137,11 @@ class Engine:
         scaled = self.sweep or self.five
         if self.five:                                 # impact@v5: the cap scales with the extra lanes
             shards, cap = lanes.extra_lanes(self.specialists), lanes.verify_cap(len(self.specialists))
+        if self.v12 or self.v16:                      # impact@v12 (and v16): its own cap; one verifier session each
+            cap = dual.MAX_VERIFY if self.v21 else deepcov.MAX_VERIFY
+        dup_into = self._v21_merged(hyps) if self.v21 else {}      # impact@v21 (dual.UNION_RULE): restatements
+        if self.v21 and stage_ceiling(stage, self.budget) is not None:    # dual.CLOCK_RULE: stop starting early
+            self._verify_slice = dual.verify_slice(stage_ceiling(stage, self.budget))
         collapsed = {m: g["keptIds"] for g in (self.artifacts["INVESTIGATE"]["payload"].get("collapses", ())
                                                if self.five else ()) for m in g["collapsedIds"]}
         sessions = {VERIFIER_AGENT: session}
@@ -1323,27 +2160,80 @@ class Engine:
                 g = self.gate(stage, t0)
                 if g is not None:
                     stop = g
-            if stop is None and shards and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
+            if stop is None and self.v12 and alt_phase[0] and self.needs_reconciliation:
+                stop = ("verifier-failure", typed_error(   # impact@v12: no further provider call for unit candidates
+                    "internal", "VERIFY started no further coverage-unit candidate: the spend book needs operator "
+                    "reconciliation", stage=stage, detail={"scope": "needs-reconciliation"}))
+            if stop is None and self.v12 and alt_phase[0]:     # impact@v12: unit candidates need run tool calls left
+                used = sum(1 for e in self.recorder.events if e["type"] == "tool.call")
+                left = min(self.policy.run_tool_calls, self.budget["maxToolCalls"]) - used
+                if left < deepcov.VERIFY_UNIT_TOOL_MARGIN:
+                    stop = ("budget", typed_error(
+                        "budget-exhausted", f"VERIFY stopped starting coverage-unit candidates: {left} run tool call(s) "
+                        f"left, fewer than {deepcov.VERIFY_UNIT_TOOL_MARGIN} ({deepcov.VERIFY_RULE})", stage=stage,
+                        detail={"scope": "unit-tool-margin", "left": max(0, left)}))
+            if stop is None and (shards or self.v10 or self.v12 or self.v16) \
+                    and self.run_spend() >= sweeps.judge_reserve_floor(self.budget):
                 stop = ("budget", typed_error(       # impact@v4: keep the JUDGE spend reserve (sweeps.JUDGE_RESERVE_BP)
                     "budget-exhausted", "VERIFY stopped before this candidate to keep the JUDGE spend reserve "
                     f"({sweeps.JUDGE_RESERVE_BP} bp of the run ceiling, {sweeps.BUDGET_RULE})", stage=stage,
                     detail={"scope": "judge-reserve", "spentUsdMicros": self.run_spend(),
                             "floorUsdMicros": sweeps.judge_reserve_floor(self.budget)}))
+            if stop is None and self.v21 and not self._v21_verify_room():     # dual.VERIFY_ADMISSION_RULE
+                stop = ("budget", self._v21_admission_error("VERIFY stopped before this candidate"))
             if self.fatal and self.fatal["status"] == "failed" and self.fatal["stage"] == stage:
                 return True
             if stop is not None:
                 reason, err = stop
-                inc.append(self._inc(stage, reason))
+                # impact@v10: the JUDGE-reserve stop cutting alternate-lane candidates only is a coverage note
+                # impact@v12: any non-cancel stop cutting unit candidates only is a coverage note (deepcov.coverage_lines)
+                if not (alt_phase[0] and ((err.get("detail") or {}).get("scope") == "judge-reserve"
+                                          or (self.v12 and reason != "cancelled" and not self.needs_reconciliation))) \
+                        and not (reason == "deadline" and self._v21_clock_note()):     # dual.CLOCK_RULE: a note
+                    inc.append(self._inc(stage, reason))
                 if reason == "cancelled":
                     self.set_fatal(stage, err)
-                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": reason,
-                              "detail": err["message"][:500]})
+                drops.append({"subjectIds": [hid], "stage": "VERIFY",
+                              "reason": {"verifier-failure": "verifier-failed"}.get(reason, reason),
+                              "detail": (f"{dual.CLOCK_RULE}: " if reason == "deadline" and self._v21_clock_note()
+                                         else "") + err["message"][:500]})
                 return False
-            name = sweeps.verifier_agent(kept - 1, shards) if scaled else VERIFIER_AGENT
+            name = (deepcov.verifier_agent(kept - 1) if self.v12 or self.v16
+                    else sweeps.verifier_agent(kept - 1, shards) if scaled else VERIFIER_AGENT)
             if name not in sessions:
                 sessions[name] = self.new_session(stage, name)
+                if self._verify_note_only:
+                    unit_sessions.add(name)
             rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
             inc.extend(more)
+            if self.v16 and rec is not None and rec["verdict"] == "failed" \
+                    and (rec["error"]["code"] in whole.REASK_CODES or self._v21_tool(rec["error"])):
+                # whole.REASK_RULE: once more, a new session (v21: a tool attempt too, told which tools exist)
+                tool = self._v21_tool(rec["error"])
+                why = ("a stop applies" if self.gate(stage, t0) is not None or self.fatal
+                       else "the spend book needs reconciliation" if self.needs_reconciliation      # gate L2
+                       else "the JUDGE spend reserve" if self.run_spend() >= sweeps.judge_reserve_floor(self.budget)
+                       else "the agentic verifier admission" if self.v21 and not self._v21_verify_room()
+                       else None)
+                first = rec["callIds"]
+                if why is None:
+                    name += whole.REASK_SUFFIX
+                    sessions[name] = self.new_session(stage, name)
+                    self._verifier_note = prompts.V19_TOOL_NOTE if tool else None
+                    try:
+                        rec, finding, drop, more = self.verify_one(sessions[name], n, hyps[hid], t0, family)
+                    finally:
+                        self._verifier_note = None
+                    inc.extend(more)
+                if rec is not None:
+                    rec = dict(rec, callIds=(first + rec["callIds"])[-10:]) if why is None else rec
+                    if drop is not None and drop["reason"] == "verifier-failed" \
+                            and (rec["error"]["code"] in whole.REASK_CODES or self._v21_tool(rec["error"])):
+                        # a note unless the spend book needs reconciliation (then v12's incomplete entry stands)
+                        drop = dict(drop, detail=(f"{whole.REASK_RULE}: " + (f"not re-asked ({why})" if why else
+                                                  "re-asked once") + f", {rec['error']['code']}"
+                                                  + ("" if self.needs_reconciliation else " (a note)") + "; "
+                                                  + drop.get("detail", ""))[:1000])
             if rec is None:
                 return False
             records.append(rec)
@@ -1356,68 +2246,150 @@ class Engine:
 
         def over_cap(hid) -> bool:
             nonlocal kept
-            if not v3:
+            if not v3 and not self.v16:
                 return False
             kept += 1
             if kept <= cap:
                 return False
             drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "over-cap",
-                          "detail": (f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
+                          "detail": (f"more than {cap} distinct candidates of the two passes ({dual.UNION_RULE}); "
+                                     "later ones (both passes, then P0/P1, then the rest) are not verified" if self.v21 else
+                                     f"more than {cap} hypotheses of the whole-change reviewer ({deepcov.VERIFY_RULE}); "
+                                     "later ones (in the reviewer's order) are not verified" if self.v16 else
+                                     f"more than {cap} distinct lens-lane and coverage-unit hypotheses "
+                                     f"({deepcov.VERIFY_RULE}); later ones (the lens lanes in v3 order, then the "
+                                     "units round-robin by value) are not verified" if self.v12 else
+                                     f"more than {cap} distinct specialist and diff-shard sweep hypotheses "
                                      f"({sweeps.VERIFY_RULE}); later ones (round-robin across specialist and sweep "
                                      "lanes) are not verified" if self.sweep else
                                      f"more than {cap} distinct specialist lane hypotheses ({lanes.VERIFY_RULE}); later "
-                                     "ones (round-robin across the five specialist lanes) are not verified" if self.five
+                                     f"ones (round-robin across the {'eight specialist and alternate-model' if self.cross else 'five specialist'} "
+                                     "lanes) are not verified" if self.five
                                      else f"more than {specialists.MAX_VERIFY_CANDIDATES} distinct specialist "
                                      "hypotheses; later ones (round-robin specialist order) are not verified")})
             return True
 
-        for n, hid, draft in cands:
+        def consider(n, hid) -> bool:
+            """One kept-candidate decision (skip, drop or verify). -> True to stop the stage loop (fatal)."""
             if hid in self.off_shard:           # impact@v4: a sweep's draft outside its own shard takes no slot
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "suppressed",
                               "detail": f"located outside the shard of {self.off_shard[hid]} ({sweeps.SCOPE_RULE}); "
                                         "that file is reviewed by its own sweep investigator"})
-                continue
+                return False
             if hid not in hyps:
                 drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "invalid-citation",
                               "detail": "investigator citation or location did not resolve against the pinned snapshots, "
                                         "or lies outside the files this change modified"})
-                continue
+                return False
+            if hid in dup_into:                 # impact@v21 (dual.UNION_RULE): a restatement, no verifier call
+                drops.append({"subjectIds": [hid], "stage": "VERIFY", "reason": "merged",
+                              "detail": f"duplicate of {dup_into[hid]} ({dual.UNION_RULE}, {dual.MERGE_RULE}: a "
+                                        "near-duplicate claim at an overlapping spot, same head path and category; the "
+                                        "earlier candidate is kept)"})
+                return False
             if hid in merged_into:              # v3: a later specialist's duplicate, decided after its kept one
-                continue
+                return False
             if hid in collapsed:                # impact@v5: a true near-duplicate, decided after its kept member(s)
-                continue
+                return False
             if over_cap(hid):
-                continue
-            if attempt(n, hid):
+                return False
+            return attempt(n, hid)
+
+        def merged_drop(m, g) -> dict:
+            return {"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
+                    "detail": f"duplicate of {g['keptId']} ({lanes.CROSS_MERGE_RULE}: a near-duplicate "
+                              "claim at an overlapping spot, same head path and category; the earlier "
+                              "lane's is kept)" if g["rule"] == lanes.CROSS_MERGE_RULE else
+                              f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
+                              f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
+                              "earlier specialist's is kept)"}
+
+        # impact@v10: v3's VERIFY runs first, unchanged, on the v3 lanes' candidates and v3 merge groups; then the
+        # alternate lanes' surviving candidates (within the same cap); an alternate restatement is dropped as merged
+        k = (len(self._lane_candidates(lambda a: not deepcov.is_unit(a))) if self.v12
+             else len(self._lane_candidates(lambda a: not prompts.is_alt_lane(a))) if self.v10 else len(cands))
+        primary, extra = cands[:k], cands[k:]          # v10/v12: _v3_candidates lists the v3/lens lanes' candidates first
+        split = self.v10 or self.v12
+        retry_groups = [g for g in merges if not (split and g["rule"] == lanes.CROSS_MERGE_RULE)]
+        alt_groups = [g for g in merges if split and g["rule"] == lanes.CROSS_MERGE_RULE]
+        halted_all = False
+        alt_phase = [False]                     # impact@v10: True while VERIFY takes the alternate lanes' candidates
+        unit_sessions: set = set()              # impact@v12: verifier sessions of unit candidates
+        for n, hid, draft in primary:
+            if consider(n, hid):
+                halted_all = True
                 break
-        else:
+        if not halted_all:
             # v3: a kept hypothesis that yielded no finding hands VERIFY its first merged duplicate (within the cap);
             # every other duplicate is dropped as merged, without a verifier call
             index = {hid: n for n, hid, _ in cands}
             # impact@v5: the near-duplicate fallback first, so a collapsed merge keptId verified without a finding
             # still hands VERIFY its own first merged duplicate below (lanes.NEAR_DUP_RULE)
             halted = self.five and self._verify_collapsed(index, hyps, outcome, attempt, over_cap, drops, lambda: stop)
-            for g in sorted(merges if not halted else (), key=lambda g: index.get(g["keptId"], len(index))):
+            for g in sorted(retry_groups if not halted else (), key=lambda g: index.get(g["keptId"], len(index))):
                 dups = [m for m in g["mergedIds"] if m in hyps and m in index]
                 retry = bool(dups) and outcome.get(g["keptId"]) is False and stop is None
                 if retry and not over_cap(dups[0]):
                     if attempt(index[dups[0]], dups[0]):
+                        halted_all = True
                         break
                     dups = dups[1:]
                 elif retry:
                     dups = dups[1:]                  # over-cap already recorded its drop
                 for m in dups:
-                    drops.append({"subjectIds": [m], "stage": "VERIFY", "reason": "merged",
-                                  "detail": f"duplicate of {g['keptId']} ({specialists.MERGE_RULE}: same head path and "
-                                            f"category, start lines within {specialists.MERGE_LINE_WINDOW}; the "
-                                            "earlier specialist's is kept)"})
+                    drops.append(merged_drop(m, g))
+            if split and not halted_all:
+                alt_phase[0] = True
+                ceiling = stage_ceiling(stage, self.budget)
+                if self.v12:                    # deepcov.VERIFY_RULE: unit candidates are best effort, notes only
+                    self._verify_note_only = True
+                    if ceiling is not None:
+                        self._verify_slice = deepcov.verify_unit_slice(ceiling)
+                try:
+                    for n, hid, draft in extra:
+                        if consider(n, hid):
+                            halted_all = True
+                            break
+                    else:
+                        for g in alt_groups:
+                            drops.extend(merged_drop(m, g) for m in g["mergedIds"] if m in hyps and m in index)
+                finally:
+                    self._verify_note_only, self._verify_slice = False, None
+        if self.v21:
+            self._verify_slice = None
         if self.fatal and self.fatal["stage"] == stage and self.fatal["status"] == "failed":
             return "failed", self.empty(stage), self.fatal["error"], []
-        for sess in sessions.values():
+        for name, sess in sessions.items():
+            if name in unit_sessions:           # impact@v12: a unit candidate's own session cap is a coverage note
+                continue
             if sess.incomplete and not any(i["reason"] == sess.incomplete for i in inc):
                 inc.append(self._inc(stage, sess.incomplete))
         status = "partial" if inc else "completed"
         return status, {"findings": findings, "verifications": records, "drops": drops}, None, inc
+
+    def _verify_v26(self, stage):
+        """investigator.impact@v26 (consensus.VERDICT): no verifier session or call. Each kept hypothesis becomes a Finding whose
+        verification names the rule and the witness items that supported it (the INVESTIGATE consensus record's pairs); the
+        severity basis asserts no reachability (no verifier looked). Every Finding is checked against the run's seed.input event
+        (check_finding_provenance); a mismatch fails VERIFY."""
+        inv = self.artifacts["INVESTIGATE"]["payload"]
+        rows = {r["index"]: r for r in (inv.get("consensus") or {}).get("table", ())}
+        events = list(self.recorder.events)
+        findings = []
+        for h in inv["hypotheses"]:
+            row = rows.get(h["seedRef"]["index"]) or {"pairs": []}
+            f = {k: h[k] for k in ("id", "runId", "specialist", "claim", "category", "suspectedSeverity", "impact", "location",
+                                   "evidence", "modelFamily", "seedRef")}
+            f["verification"] = {"verdict": consensus.VERDICT, "rule": consensus.RULE, "callIds": [], "evidence": [],
+                                 "witnessRefs": [{"witness": p["witness"], "witnessId": p["witnessId"]} for p in row["pairs"]]}
+            f["severityBasis"] = {"impact": h["impact"], "reachable": False}
+            problems = [str(i) for i in validate("Finding", f)] + [str(i) for i in check_finding_provenance(f, events)]
+            if problems:
+                err = typed_error("contract-violation", "witness-supported finding failed provenance: " + problems[0][:300],
+                                  stage=stage)
+                return "failed", self.empty(stage), err, []
+            findings.append(f)
+        return "completed", {"findings": findings, "verifications": [], "drops": []}, None, []
 
     def _verify_collapsed(self, index, hyps, outcome, attempt, over_cap, drops, stopped) -> bool:
         """impact@v5 (lanes.NEAR_DUP_RULE): a near-duplicate group none of whose kept members yielded a finding hands
@@ -1455,7 +2427,8 @@ class Engine:
             call, why = self.tool(session, tool, args, t0)
             if call is None:
                 omitted.append(f"{tool} for {loc['path']} not collected: {why}")
-                inc.append(self.stopped(stage, why, f"{tool} context for {hid} not collected"))
+                if why == "cancelled" or not (self._verify_note_only or self._v21_clock_note()):   # v12 unit: a note
+                    inc.append(self.stopped(stage, why, f"{tool} context for {hid} not collected"))
                 continue
             r = call.result
             host_ids.append(call.tool_call_id)
@@ -1511,8 +2484,8 @@ class Engine:
                                          "the investigator cited; resolvable but unrelated code does not "
                                          "verify a claim"}, inc
         finding = {k: hyp[k] for k in ("id", "runId", "specialist", "claim", "category", "suspectedSeverity", "impact",
-                                       "location", "evidence", "modelFamily", "sourceCallId")}
-        for k in ("mechanism", "reach", "confidence"):
+                                       "location", "evidence", "modelFamily")}
+        for k in ("sourceCallId", "seedRef", "mechanism", "reach", "confidence"):   # impact@v24: seedRef, never both
             if k in hyp:
                 finding[k] = hyp[k]
         finding["verification"] = {"verdict": "confirmed", "refutationAttempts": 1, "verifierFamily": family,
@@ -1530,10 +2503,15 @@ class Engine:
     def _verifier_chain(self, session, t0, hyp, items, omitted, host_ids):
         events = self.tool_calls()
         host = [events[i] for i in host_ids]
-        doc = prompts.verifier_doc(self.case, hyp, items, omitted, self.coverage_doc(),
-                                   task=prompts.verifier_task(self.policy.verifier_prompt))
+        task = prompts.verifier_task(self.policy.verifier_prompt)
+        if self.v21:                             # dual.VERIFY_RULE: refute-first against the code, one agentic hop
+            task += " " + prompts.V21_VERIFY_RULE + ("" if self._verifier_note is None else " " + self._verifier_note)
+        doc = prompts.verifier_doc(self.case, hyp, items, omitted, self.coverage_doc(), task=task)
+        if self.v21:
+            doc["agenticReview"] = prompts.agentic_block(self.profile["roles"]["verifier"]["params"]["agentic"])
         chain = retrieval.Chain(self, stage="VERIFY", role="verifier", agent=session.agent_id, session=session, t0=t0,
-                                turns=self.policy.verifier_turns, policy=self.policy, hypothesis_id=hyp["id"],
+                                turns=agentic.HOPS if self.v21 else self.policy.verifier_turns, policy=self.policy,
+                                hypothesis_id=hyp["id"],
                                 host_events=host, hyp_calls_used=len(host),
                                 unrendered=self.unrendered_ids(items, host))
         return chain.run(lambda hop, state: prompts.turn_request(
@@ -1550,7 +2528,8 @@ class Engine:
         detail = (f"verifier retrieval for {hid} ended at the {end.exhausted} limit after {end.hops} hop(s) and "
                   f"{end.tool_calls} requested tool call(s) without a final answer; {len(end.unread)} pending "
                   f"request(s) were not run: {unread_note(end.unread)}")
-        inc.append(self._inc("VERIFY", "tool-calls-exhausted", detail))
+        if not self._verify_note_only and not self.v21:   # v12 unit (and v21's one-hop verifier): a note
+            inc.append(self._inc("VERIFY", "tool-calls-exhausted", detail))
         rec = {"hypothesisId": hid, "verdict": "uncertain", "evidence": [], "callIds": call_ids[-10:],
                "notes": ("No verifier verdict: " + detail)[:4000]}
         return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "uncertain",
@@ -1599,6 +2578,15 @@ class Engine:
         if err["code"] in REPLAY_CODES:
             self.set_fatal("VERIFY", err)
             return rec, None, None, inc
+        kind = self._v21_unverified(err)
+        if kind is not None:                     # dual.UNVERIFIED_RULE: no verdict; the candidate is dropped, a note
+            return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "verifier-failed",
+                               "detail": f"{dual.UNVERIFIED_RULE}: no verdict ({kind}), dropped (a note); "
+                                         f"{err['code']}: {err['message']}"[:1000]}, inc
+        if self.v16 and (err["code"] in whole.REASK_CODES or self._v21_tool(err)) and not self.needs_reconciliation:
+            # impact@v16 (whole.REASK_RULE): re-asked once in a new session; a second such end is a note
+            return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": "verifier-failed",
+                               "detail": f"{err['code']}: {err['message']}"[:1000]}, inc
         if err["code"] == "cancelled":
             reason, drop = "cancelled", "cancelled"
         elif err["code"] == "deadline-exceeded":
@@ -1607,11 +2595,15 @@ class Engine:
             reason, drop = "budget", "budget"
         else:
             reason, drop = "verifier-failure", "verifier-failed"
-        inc.append(self._inc("VERIFY", reason, err["code"]))
+        clock = reason == "deadline" and self._v21_clock_note()          # dual.CLOCK_RULE: a note
+        if reason == "cancelled" or not (self._verify_note_only or clock) or err["code"] in deepcov.VERIFY_NEVER_NOTES \
+                or self.needs_reconciliation:      # v12 unit candidate: a note only for limit and provider ends
+            inc.append(self._inc("VERIFY", reason, err["code"]))
         if reason == "cancelled":
             self.set_fatal("VERIFY", err)
         return rec, None, {"subjectIds": [hid], "stage": "VERIFY", "reason": drop,
-                           "detail": f"{err['code']}: {err['message']}"[:1000]}, inc
+                           "detail": ((f"{dual.CLOCK_RULE}: " if clock else "")
+                                      + f"{err['code']}: {err['message']}")[:1000]}, inc
 
     # ------------------------------------------------------------------ JUDGE
     def judge(self, t0):
@@ -1623,7 +2615,7 @@ class Engine:
         inc, drops = [], []
         comments: list[dict] = []
         if findings:
-            comments, drops, inc = self._judge_findings(findings, t0)
+            comments, drops, inc = self._judge_v26(findings) if self.v26 else self._judge_findings(findings, t0)
             if self.fatal and self.fatal["status"] == "failed":
                 return "failed", self.empty(stage), self.fatal["error"], []
         if self.orig is not None and self.fatal is None:
@@ -1679,11 +2671,14 @@ class Engine:
         by_id = {f["id"]: (f, c) for f, c in entries}
         # issue-key equality only nominates candidate duplicates: nothing is merged unless the judge proposes it
         groups = judging.candidate_groups([f for f, _ in entries])
-        top, over = judging.rank_and_cap(entries, self.host.comment_cap)
+        top, over = judging.rank_and_cap(entries, self.comment_cap(entries))
         top_ids = {f["id"] for f, _ in top}
         in_play = [g for g in groups if any(i in top_ids for i in g)]
         judged = top + [(f, c) for f, c in over if any(f["id"] in g for g in in_play)]
+        if self.v19:                             # agentic.JUDGE_RULE: the judge sees every surviving finding
+            judged = list(entries)
         wording, proposed = {}, []
+        judge_ok = False                         # v19: a valid judge output, whose omissions are drops
         if judged:
             g = self.gate(stage, t0, scope="model")
             if g is not None:
@@ -1691,10 +2686,12 @@ class Engine:
                 if g[0] == "cancelled":
                     self.set_fatal(stage, g[1])
             else:
+                jtask = prompts.judge_task(self.profile["roles"]["judge"]["promptVersion"])
                 req = prompts.judge_request(self.profile, self.profile_ref, self.case,
                                             [(f, c["severity"]) for f, c in judged], in_play,
                                             coverage=self.coverage_doc(),
-                                            task=prompts.judge_task(self.profile["roles"]["judge"]["promptVersion"]))
+                                            task=(prompts.v19_judge_task(self.profile["roles"]["judge"]["promptVersion"])
+                                                  if self.v19 else jtask))
                 out, err, _ = self.model_call(stage, "judge", JUDGE_AGENT, 0, req)
                 if err is not None:
                     if err["code"] in REPLAY_CODES:
@@ -1710,6 +2707,7 @@ class Engine:
                     if problem:
                         wording, proposed = {}, []
                         inc.append(self._inc(stage, "agent-failure", f"judge output rejected: {problem}"))
+                    judge_ok = problem is None
         if self.fatal and self.fatal["status"] == "failed":
             return [], [], []
         final, away = [], set()
@@ -1727,6 +2725,11 @@ class Engine:
         for f, c in entries:
             if f["id"] in away:
                 continue
+            if self.v19 and judge_ok and f["id"] not in wording:     # agentic.JUDGE_RULE: left out by the judge
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "below-threshold",
+                              "detail": f"{agentic.JUDGE_RULE}: the judge left it out as without a concrete wrong "
+                                        "behaviour (not published)"})
+                continue
             if f["id"] in wording:
                 title, body, sug = wording[f["id"]]
                 c = judging.build_comment(f, run_id=self.run["id"], head_snapshot_id=self.head_id,
@@ -1735,10 +2738,14 @@ class Engine:
                                                                    f["location"].get("endLine", f["location"]["line"])),
                                           tool_calls=tools, title=title, body=body, suggestion=sug)
             final.append((f, c))
-        top, over = judging.rank_and_cap(final, self.host.comment_cap)
+        cap = self.comment_cap(final)
+        top, over = judging.rank_and_cap(final, cap)
         for f, c in over:
             drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "over-cap",
-                          "detail": f"ranked below the cap of {self.host.comment_cap}"})
+                          "detail": (f"ranked below the dynamic cap of {cap} ({deepcov.CAP_RULE}: base "
+                                     f"{self.host.comment_cap}, up to {deepcov.MAX_COMMENTS} while the next comment is "
+                                     "P0/P1 with strong evidence)") if self.v12 or self.v16
+                          else f"ranked below the cap of {self.host.comment_cap}"})
         comments = []
         for f, c in top:
             extra = [i for fid in c["findingIds"] for i in same_claim.get(fid, []) if i not in c["findingIds"]]
@@ -1753,6 +2760,59 @@ class Engine:
                 return [], [], []
             comments.append(c)
         return comments, drops, inc
+
+    def _judge_v26(self, findings):
+        """investigator.impact@v26: no judge call, rank or cap. Each finding's comment is its seed candidate verbatim (body = the
+        item body byte for byte, title = consensus.title_of(body), anchor = its line, no suggestion), in candidate order; an
+        exact same-claim same-anchor repeat keeps JUDGE's identical-claim rule (one comment, both finding ids)."""
+        stage = "JUDGE"
+        events = list(self.recorder.events)
+        seed = self.spec.seed
+        ref = "sha256:" + seeded.digest(seed)
+        cands = seed["candidates"]["items"]
+        for f in findings:                                       # revalidate against this run's actual events and seed
+            bad = [str(i) for i in check_finding_provenance(f, events)]
+            if not bad and (f["seedRef"]["seed"] != ref or cands[f["seedRef"]["index"]]["id"] != f["seedRef"]["id"]):
+                bad = ["the finding's seedRef does not name this run's seed item"]
+            if bad:
+                self.set_fatal(stage, typed_error("contract-violation", "finding failed provenance revalidation: "
+                                                  + bad[0][:300], stage=stage))
+                return [], [], []
+        tools = self.tool_calls()
+        head = self.spec.head
+        comments, drops, seen = [], [], {}
+        for f in findings:
+            loc = f["location"]
+            anchor = snaps.anchor_text(head.root, head.manifest, loc["path"], loc["line"], loc["line"])
+            if anchor is None:
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "suppressed",
+                              "detail": "anchor lines do not exist in the pinned head file"})
+                continue
+            body = cands[f["seedRef"]["index"]]["body"]
+            c = judging.build_comment(f, run_id=self.run["id"], head_snapshot_id=self.head_id, anchor=anchor,
+                                      tool_calls=tools, title=consensus.title_of(body), body=body, suggestion=None)
+            if c["fingerprint"] in seen:          # identical category, path, anchor text AND claim: same claim twice
+                keeper = seen[c["fingerprint"]]
+                keeper["findingIds"] = (keeper["findingIds"] + [f["id"]])[:50]
+                drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "merged",
+                              "detail": f"identical claim and anchor as {keeper['findingIds'][0]}; its id is kept on that "
+                                        "comment"})
+                continue
+            seen[c["fingerprint"]] = c
+            comments.append(c)
+        for c in comments:
+            bad = judging.revalidate_comment(
+                c, head_snapshot_id=self.head_id, resolver=self.resolver,
+                anchor_ok=lambda p, a, b: snaps.anchor_text(head.root, head.manifest, p, a, b) is not None)
+            if bad:
+                self.set_fatal(stage, typed_error("contract-violation", "comment failed final validation: " + bad[0][:300],
+                                                  stage=stage))
+                return [], [], []
+        return comments, drops, []
+
+    def comment_cap(self, entries: list) -> int:
+        """The JUDGE comment cap: the host's (every version but v12), or impact@v12's dynamic cap (deepcov.CAP_RULE)."""
+        return deepcov.comment_cap(entries, self.host.comment_cap) if self.v12 or self.v16 else self.host.comment_cap
 
     # ------------------------------------------------------------------ PUBLISH
     def publish(self, t0):

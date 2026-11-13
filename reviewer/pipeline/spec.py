@@ -107,6 +107,7 @@ class ReviewSpec:
     imports: RepositoryImports | None = None     # complete pinned repositories (repo-import@1 records)
     stage_replay: StageReplay | None = None
     fork: ForkFrom | None = None
+    seed: dict | None = None         # investigator.impact@v24: the host-checked seed document (reviewer.pipeline.seeded)
 
 
 @dataclass

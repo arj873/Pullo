@@ -153,7 +153,7 @@ class ImpactVersionOption(TBH.Base):
 
     def test_invalid_versions_are_refused_before_ingestion_key_state_or_output(self):
         before = self.w.state_bytes()
-        bad = (0, 6, -1, 99, True, False, 2.0, "2", "v3", [3], 4.0)
+        bad = (0, 6, 8, 9, -1, 99, True, False, 2.0, "2", "v3", [3], 4.0)
         msgs = set()
         for v in bad:
             with self.subTest(v=v):
@@ -162,7 +162,7 @@ class ImpactVersionOption(TBH.Base):
                 with self.assertRaises(B.BenchmarkLaunchError):
                     B.run_benchmark(self.w.options(impact_version=v, store=str(self.tmp / "missing"),
                                                    cutoff_proof=str(self.tmp / "missing.json")), key_loader=self.boom)
-        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4, 5] (or unset for the profile default)"})
+        self.assertEqual(msgs, {"impact_version must be one of [1, 2, 3, 4, 5, 7, 10, 12, 16, 19, 20, 21, 24, 26] (or unset for the profile default)"})
         self.assertEqual(self.refused(impact_version=3, retrieval=False),
                          "impact_version needs the retrieval profile (--retrieval on)")
         self.assertEqual(self.w.state_bytes(), before)

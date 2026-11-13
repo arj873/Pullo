@@ -1574,6 +1574,31 @@
           "pattern": "^(?:run_[0-9a-f]{16})$",
           "type": "string"
         },
+        "seedRef": {
+          "additionalProperties": false,
+          "description": "the seed.input event (seed digest) and the entry index of the draft that proposed this",
+          "properties": {
+            "id": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+              "type": "string"
+            },
+            "index": {
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seed": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "seed",
+            "index",
+            "id"
+          ],
+          "type": "object"
+        },
         "severityBasis": {
           "additionalProperties": false,
           "properties": {
@@ -1602,53 +1627,115 @@
           "$ref": "#/$defs/Severity"
         },
         "verification": {
-          "additionalProperties": false,
-          "properties": {
-            "callIds": {
-              "items": {
-                "pattern": "^(?:call_[0-9a-f]{16})$",
-                "type": "string"
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "callIds": {
+                  "items": {
+                    "pattern": "^(?:call_[0-9a-f]{16})$",
+                    "type": "string"
+                  },
+                  "maxItems": 10,
+                  "minItems": 1,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "evidence": {
+                  "items": {
+                    "$ref": "#/$defs/Evidence"
+                  },
+                  "maxItems": 50,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "notes": {
+                  "maxLength": 4000,
+                  "type": "string"
+                },
+                "refutationAttempts": {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "verdict": {
+                  "const": "confirmed"
+                },
+                "verifierFamily": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                }
               },
-              "maxItems": 10,
-              "minItems": 1,
-              "type": "array",
-              "uniqueItems": true
+              "required": [
+                "verdict",
+                "refutationAttempts",
+                "verifierFamily",
+                "notes",
+                "evidence",
+                "callIds"
+              ],
+              "type": "object"
             },
-            "evidence": {
-              "items": {
-                "$ref": "#/$defs/Evidence"
+            {
+              "additionalProperties": false,
+              "properties": {
+                "callIds": {
+                  "items": {
+                    "pattern": "^(?:call_[0-9a-f]{16})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "evidence": {
+                  "items": {
+                    "$ref": "#/$defs/Evidence"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "rule": {
+                  "const": "k6-plain-witness@1"
+                },
+                "verdict": {
+                  "const": "witness-supported"
+                },
+                "witnessRefs": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "witness": {
+                        "maximum": 2,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "witnessId": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "witness",
+                      "witnessId"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                }
               },
-              "maxItems": 50,
-              "minItems": 1,
-              "type": "array"
-            },
-            "notes": {
-              "maxLength": 4000,
-              "type": "string"
-            },
-            "refutationAttempts": {
-              "maximum": 10,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "verdict": {
-              "const": "confirmed"
-            },
-            "verifierFamily": {
-              "maxLength": 64,
-              "minLength": 1,
-              "type": "string"
+              "required": [
+                "verdict",
+                "rule",
+                "witnessRefs",
+                "callIds",
+                "evidence"
+              ],
+              "type": "object"
             }
-          },
-          "required": [
-            "verdict",
-            "refutationAttempts",
-            "verifierFamily",
-            "notes",
-            "evidence",
-            "callIds"
-          ],
-          "type": "object"
+          ]
         }
       },
       "required": [
@@ -1662,7 +1749,6 @@
         "location",
         "evidence",
         "modelFamily",
-        "sourceCallId",
         "verification",
         "severityBasis"
       ],
@@ -1723,6 +1809,31 @@
         "runId": {
           "pattern": "^(?:run_[0-9a-f]{16})$",
           "type": "string"
+        },
+        "seedRef": {
+          "additionalProperties": false,
+          "description": "the seed.input event (seed digest) and the entry index of the draft that proposed this",
+          "properties": {
+            "id": {
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+              "type": "string"
+            },
+            "index": {
+              "maximum": 10000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "seed": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "seed",
+            "index",
+            "id"
+          ],
+          "type": "object"
         },
         "sourceCallId": {
           "pattern": "^(?:call_[0-9a-f]{16})$",
@@ -2024,6 +2135,156 @@
       "additionalProperties": false,
       "description": "Immutable; a change is a new version. Referenced as '<id>@<version>'. A retrieval profile sets investigator/verifier outputSchema to the Turn schema.",
       "properties": {
+        "alternates": {
+          "additionalProperties": false,
+          "properties": {
+            "investigator": {
+              "additionalProperties": false,
+              "description": "resolved=false (e.g. exact Terra id pending) blocks live use. No fallbacks in Stage 0A: an unapproved fallback is a typed failure.",
+              "properties": {
+                "caps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxOutputTokens": {
+                      "maximum": 1000000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "maxRepairs": {
+                      "maximum": 1,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "maxRetries": {
+                      "maximum": 3,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "timeoutSec": {
+                      "maximum": 3600,
+                      "minimum": 1,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "maxOutputTokens",
+                    "timeoutSec",
+                    "maxRetries",
+                    "maxRepairs"
+                  ],
+                  "type": "object"
+                },
+                "fallbacks": {
+                  "items": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63}@[0-9]{1,6})$",
+                    "type": "string"
+                  },
+                  "maxItems": 0,
+                  "type": "array"
+                },
+                "family": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outputSchema": {
+                  "enum": [
+                    "InvestigatorOutput",
+                    "VerifierOutput",
+                    "JudgeOutput",
+                    "InvestigatorTurn",
+                    "VerifierTurn"
+                  ]
+                },
+                "params": {},
+                "price": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "cacheWriteInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "cachedInputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "inputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "outputPerMTokUsdMicros": {
+                          "maximum": 1000000000000,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "priceVersion": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "priceVersion",
+                        "inputPerMTokUsdMicros",
+                        "cachedInputPerMTokUsdMicros",
+                        "cacheWriteInputPerMTokUsdMicros",
+                        "outputPerMTokUsdMicros"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "promptVersion": {
+                  "pattern": "^(?:[a-z][a-z0-9.-]{0,63}@v[0-9]{1,6})$",
+                  "type": "string"
+                },
+                "provider": {
+                  "enum": [
+                    "anthropic",
+                    "openai",
+                    "synthetic",
+                    "opencode",
+                    "claude-cli"
+                  ]
+                },
+                "resolved": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "provider",
+                "model",
+                "family",
+                "resolved",
+                "promptVersion",
+                "outputSchema",
+                "params",
+                "caps",
+                "price",
+                "fallbacks"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "role-pinning: pinned, runtime-eligible, priced"
+              ]
+            }
+          },
+          "required": [],
+          "type": "object"
+        },
         "id": {
           "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,63})$",
           "type": "string"
@@ -2148,7 +2409,9 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2289,7 +2552,9 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2430,7 +2695,9 @@
                   "enum": [
                     "anthropic",
                     "openai",
-                    "synthetic"
+                    "synthetic",
+                    "opencode",
+                    "claude-cli"
                   ]
                 },
                 "resolved": {
@@ -2485,7 +2752,8 @@
       ],
       "type": "object",
       "x-invariants": [
-        "role-schema: each role returns its own plain or Turn schema"
+        "role-schema: each role returns its own plain or Turn schema",
+        "alternate-pinning: an alternate changes only the model of its role"
       ]
     },
     "ModelRequest": {
@@ -2567,7 +2835,9 @@
           "enum": [
             "anthropic",
             "openai",
-            "synthetic"
+            "synthetic",
+            "opencode",
+            "claude-cli"
           ]
         },
         "role": {
@@ -4188,7 +4458,9 @@
             "enum": [
               "anthropic",
               "openai",
-              "synthetic"
+              "synthetic",
+              "opencode",
+              "claude-cli"
             ]
           },
           "minItems": 1,
@@ -4527,6 +4799,403 @@
               "maxItems": 1000,
               "type": "array"
             },
+            "consensus": {
+              "additionalProperties": false,
+              "properties": {
+                "behavior": {
+                  "const": "consensus.k6@v26"
+                },
+                "candidateSource": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arm": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "bodySha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "case": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "cliVersion": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "commentsSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "diffSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "exportVersion": {
+                      "maximum": 10000,
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "model": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "promptTextSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "reviewerManifestSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "runId": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "settleReceiptSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "arm",
+                    "case",
+                    "runId",
+                    "model",
+                    "cliVersion",
+                    "settleReceiptSha256",
+                    "commentsSha256",
+                    "promptTextSha256",
+                    "bodySha256",
+                    "diffSha256",
+                    "reviewerManifestSha256",
+                    "exportVersion"
+                  ],
+                  "type": "object"
+                },
+                "candidates": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "drafts": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "draft": {
+                        "$ref": "#/$defs/HypothesisDraft"
+                      },
+                      "id": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      },
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "id",
+                      "draft"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10000,
+                  "type": "array"
+                },
+                "dropped": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      },
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "reason": {
+                        "enum": [
+                          "no-witness",
+                          "bad-path",
+                          "not-a-changed-file",
+                          "no-such-line",
+                          "unpublishable-body"
+                        ]
+                      },
+                      "votes": {
+                        "maximum": 3,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "id",
+                      "reason"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10000,
+                  "type": "array"
+                },
+                "items": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "k": {
+                  "maximum": 3,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "matcher": {
+                  "const": "res2-lexical-1to1@1"
+                },
+                "matcherSha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "mode": {
+                  "enum": [
+                    "reuse",
+                    "live"
+                  ]
+                },
+                "n": {
+                  "maximum": 3,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rule": {
+                  "const": "k6-plain-witness@1"
+                },
+                "schema": {
+                  "const": "pullo-seed-candidates@2"
+                },
+                "sha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "supported": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "table": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "pairs": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "d": {
+                              "maximum": 10000000,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "jac": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "kov": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "score": {
+                              "maximum": 2,
+                              "minimum": -1,
+                              "type": "number"
+                            },
+                            "witness": {
+                              "maximum": 2,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "witnessId": {
+                              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "witness",
+                            "witnessId",
+                            "jac",
+                            "kov",
+                            "d",
+                            "score"
+                          ],
+                          "type": "object"
+                        },
+                        "maxItems": 3,
+                        "type": "array"
+                      },
+                      "seedId": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      },
+                      "supported": {
+                        "type": "boolean"
+                      },
+                      "votes": {
+                        "maximum": 3,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "seedId",
+                      "votes",
+                      "supported",
+                      "pairs"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                "tableSha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "truncatedClaims": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "witnessItems": {
+                  "items": {
+                    "maximum": 10000,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "witnessSources": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "arm": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "bodySha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      },
+                      "case": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "cliVersion": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "commentsSha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      },
+                      "diffSha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      },
+                      "exportVersion": {
+                        "maximum": 10000,
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "model": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "promptTextSha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      },
+                      "reviewerManifestSha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      },
+                      "runId": {
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "settleReceiptSha256": {
+                        "pattern": "^(?:[0-9a-f]{64})$",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "arm",
+                      "case",
+                      "runId",
+                      "model",
+                      "cliVersion",
+                      "settleReceiptSha256",
+                      "commentsSha256",
+                      "promptTextSha256",
+                      "bodySha256",
+                      "diffSha256",
+                      "reviewerManifestSha256",
+                      "exportVersion"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 3,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "rule",
+                "behavior",
+                "schema",
+                "mode",
+                "sha256",
+                "n",
+                "k",
+                "matcher",
+                "matcherSha256",
+                "candidateSource",
+                "witnessSources",
+                "items",
+                "witnessItems",
+                "table",
+                "tableSha256",
+                "supported",
+                "candidates",
+                "dropped",
+                "truncatedClaims",
+                "drafts"
+              ],
+              "type": "object"
+            },
             "hypotheses": {
               "items": {
                 "$ref": "#/$defs/Hypothesis"
@@ -4554,7 +5223,10 @@
                     "uniqueItems": true
                   },
                   "rule": {
-                    "const": "specialist-merge@2"
+                    "enum": [
+                      "specialist-merge@2",
+                      "cross-model-merge@1"
+                    ]
                   }
                 },
                 "required": [
@@ -4566,6 +5238,149 @@
               },
               "maxItems": 1000,
               "type": "array"
+            },
+            "seed": {
+              "additionalProperties": false,
+              "properties": {
+                "candidates": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "drafts": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "draft": {
+                        "$ref": "#/$defs/HypothesisDraft"
+                      },
+                      "id": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      },
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "id",
+                      "draft"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10000,
+                  "type": "array"
+                },
+                "dropped": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "reason": {
+                        "enum": [
+                          "bad-path",
+                          "not-a-changed-file",
+                          "no-such-line"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "reason"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 10000,
+                  "type": "array"
+                },
+                "items": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "mode": {
+                  "enum": [
+                    "reuse",
+                    "live"
+                  ]
+                },
+                "rule": {
+                  "const": "seeded-candidates@1"
+                },
+                "schema": {
+                  "const": "pullo-seed-candidates@1"
+                },
+                "sha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "source": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "arm": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "case": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "commentsSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "model": {
+                      "maxLength": 200,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "promptSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    },
+                    "settleReceiptSha256": {
+                      "pattern": "^(?:[0-9a-f]{64})$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "arm",
+                    "case",
+                    "model",
+                    "promptSha256",
+                    "commentsSha256",
+                    "settleReceiptSha256"
+                  ],
+                  "type": "object"
+                },
+                "truncatedClaims": {
+                  "maximum": 10000,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "rule",
+                "schema",
+                "mode",
+                "sha256",
+                "source",
+                "items",
+                "candidates",
+                "truncatedClaims",
+                "dropped",
+                "drafts"
+              ],
+              "type": "object"
             },
             "stage": {
               "const": "INVESTIGATE"
@@ -5338,6 +6153,203 @@
           "type": "object",
           "x-invariants": [
             "call-outcome: response xor error; callId, requestHash and costRecordId recompute from the payload; request role and outputSchema match the event role",
+            "no-secrets: persisted TraceEvent contains no protected text (redact first)"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "at": {
+              "pattern": "^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z)$",
+              "type": "string"
+            },
+            "consensus": {
+              "additionalProperties": false,
+              "properties": {
+                "k": {
+                  "maximum": 3,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "matcherSha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                },
+                "n": {
+                  "maximum": 3,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rule": {
+                  "const": "k6-plain-witness@1"
+                },
+                "table": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "index": {
+                        "maximum": 10000,
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "pairs": {
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "d": {
+                              "maximum": 10000000,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "jac": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "kov": {
+                              "maximum": 1,
+                              "minimum": 0,
+                              "type": "number"
+                            },
+                            "score": {
+                              "maximum": 2,
+                              "minimum": -1,
+                              "type": "number"
+                            },
+                            "witness": {
+                              "maximum": 2,
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            "witnessId": {
+                              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "witness",
+                            "witnessId",
+                            "jac",
+                            "kov",
+                            "d",
+                            "score"
+                          ],
+                          "type": "object"
+                        },
+                        "maxItems": 3,
+                        "type": "array"
+                      },
+                      "seedId": {
+                        "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                        "type": "string"
+                      },
+                      "supported": {
+                        "type": "boolean"
+                      },
+                      "votes": {
+                        "maximum": 3,
+                        "minimum": 0,
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "seedId",
+                      "votes",
+                      "supported",
+                      "pairs"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                "tableSha256": {
+                  "pattern": "^(?:[0-9a-f]{64})$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "rule",
+                "matcherSha256",
+                "n",
+                "k",
+                "tableSha256",
+                "table"
+              ],
+              "type": "object",
+              "x-invariants": [
+                "consensus-votes: votes = pairs, supported = votes >= k, one pair per witness"
+              ]
+            },
+            "drafts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "draft": {
+                    "$ref": "#/$defs/HypothesisDraft"
+                  },
+                  "id": {
+                    "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,99})$",
+                    "type": "string"
+                  },
+                  "index": {
+                    "maximum": 10000,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "index",
+                  "id",
+                  "draft"
+                ],
+                "type": "object"
+              },
+              "maxItems": 200,
+              "type": "array"
+            },
+            "mode": {
+              "enum": [
+                "reuse",
+                "live"
+              ]
+            },
+            "runId": {
+              "pattern": "^(?:run_[0-9a-f]{16})$",
+              "type": "string"
+            },
+            "schema": {
+              "const": "trace-event@1"
+            },
+            "seed": {
+              "pattern": "^(?:sha256:[0-9a-f]{64})$",
+              "type": "string"
+            },
+            "seq": {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "stage": {
+              "const": "INVESTIGATE"
+            },
+            "type": {
+              "const": "seed.input"
+            }
+          },
+          "required": [
+            "schema",
+            "runId",
+            "seq",
+            "type",
+            "stage",
+            "seed",
+            "mode",
+            "drafts"
+          ],
+          "type": "object",
+          "x-invariants": [
             "no-secrets: persisted TraceEvent contains no protected text (redact first)"
           ]
         },

@@ -64,7 +64,10 @@ def is_specialist_plan(plan: dict) -> bool:
     """A Plan whose INVESTIGATE runs the specialists: impact@v3, impact@v4 (the specialists then the diff-shard sweep
     marker, see reviewer.pipeline.sweeps.PLAN_MARKER) or impact@v5 (five specialist lanes)."""
     return (is_v3_plan(plan) or plan.get("specialists") == list(AGENTS) + ["diff-sweep"]
-            or plan.get("specialists") == list(prompts.V5_AGENTS))      # impact@v5: five lanes (pipeline.lanes)
+            or plan.get("specialists") == list(prompts.V5_AGENTS)       # impact@v5: five lanes (pipeline.lanes)
+            or plan.get("specialists") == list(prompts.V7_AGENTS)       # impact@v7: v5 lanes + alternate-model lanes
+            or plan.get("specialists") == list(prompts.V10_AGENTS)      # impact@v10: v3 lanes + alternate-model lanes
+            or plan.get("specialists") == list(AGENTS) + ["coverage-units"])   # impact@v12 (deepcov.PLAN_MARKER)
 
 
 def time_slices(ceiling_sec: int | None, k: int = len(AGENTS)) -> list[int] | None:
@@ -109,19 +112,23 @@ def duplicate(a: dict, b: dict) -> bool:
             and abs(a["location"]["line"] - b["location"]["line"]) <= MERGE_LINE_WINDOW)
 
 
-def merge(hypotheses: list[dict], agents: list[str] | None = None) -> list[dict]:
+def merge(hypotheses: list[dict], agents: list[str] | None = None, *, predicate=None,
+          rule: str = MERGE_RULE) -> list[dict]:
     """-> [{keptId, mergedIds, rule}] for the INVESTIGATE artifact. `hypotheses` are Hypothesis documents in agent
     order then output order (as INVESTIGATE stores them); only a hypothesis of a LATER agent is merged, into the first
     kept one that it duplicates. Kept hypotheses never merge with each other inside one agent. `agents` is the agent
-    order (default: the v3 specialists; impact@v4 passes sweeps.merge_order, which appends the diff-shard sweeps)."""
+    order (default: the v3 specialists; impact@v4 passes sweeps.merge_order, which appends the diff-shard sweeps).
+    `predicate`/`rule` (default: `duplicate` and MERGE_RULE) are replaced only by impact@v7 and @v10
+    (lanes.cross_merge, lanes.v10_merge)."""
+    same = duplicate if predicate is None else predicate
     order = {a: i for i, a in enumerate(AGENTS if agents is None else agents)}
     kept: list[dict] = []
     merged: dict[str, list[str]] = {}
     for h in hypotheses:
         rank = order[h["specialist"]]
-        into = next((k for k in kept if order[k["specialist"]] < rank and duplicate(k, h)), None)
+        into = next((k for k in kept if order[k["specialist"]] < rank and same(k, h)), None)
         if into is None:
             kept.append(h)
         else:
             merged.setdefault(into["id"], []).append(h["id"])
-    return [{"keptId": k["id"], "mergedIds": merged[k["id"]], "rule": MERGE_RULE} for k in kept if k["id"] in merged]
+    return [{"keptId": k["id"], "mergedIds": merged[k["id"]], "rule": rule} for k in kept if k["id"] in merged]

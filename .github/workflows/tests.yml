@@ -13,7 +13,7 @@ concurrency:
 jobs:
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60   # the suite grew to ~4.4k tests (~15 min on a fast local machine)
     steps:
       # actions/checkout v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -29,7 +29,11 @@ jobs:
 
       - name: Unit tests (default discovery)
         shell: bash
-        run: nice -n 19 python3 -m unittest discover -s tests -t .
+        # Scratch dirs must live outside /tmp (the sandbox tests assert the child sees an empty /tmp) AND outside
+        # HOME and the checkout (snapshots must be plain dirs outside both); runner.temp is under HOME, so use /var/tmp.
+        run: |
+          export TMPDIR="$(mktemp -d /var/tmp/pullo-ci.XXXXXX)"
+          nice -n 19 python3 -m unittest discover -s tests -t .
 
       - name: Contract export is up to date
         shell: bash

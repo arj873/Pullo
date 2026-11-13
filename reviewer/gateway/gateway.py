@@ -92,6 +92,31 @@ class CallResult:
         return None if self.response is None else self.response["output"]
 
 
+def _opencode_free_model(model) -> bool:
+    from reviewer.runtime.catalog import OPENCODE_MODELS     # lazy: the gateway does not import the runtime at load time
+    return model in OPENCODE_MODELS
+
+
+def _claude_cli_model(model) -> bool:
+    from reviewer.runtime.catalog import CLAUDE_CLI_MODELS   # lazy, as above
+    return model in CLAUDE_CLI_MODELS
+
+
+def _call_reservation(spec: dict, req: dict) -> int:
+    """A live call's reservation: the request's input estimate plus the role's output cap at the role price; an AGENTIC claude-cli
+    call (isolated@6) reserves (at least) its whole session PACING budget, which its forwarder enforces per relayed request
+    (measured pacing so far + the next request's worst case <= budget)."""
+    amount = reservation(spec["price"], estimate_input_tokens(req), spec["caps"]["maxOutputTokens"])
+    agentic = _claude_cli_agentic(req) if req.get("provider") == "claude-cli" else None
+    return max(amount, agentic["budgetUsdMicros"]) if isinstance(agentic, dict) else amount
+
+
+def _claude_cli_agentic(req) -> dict | None | str:
+    """AGENTIC (claude-cli-isolated@6): a request's validated params.agentic, None (no agentic mode) or a refusal string."""
+    from reviewer.runtime.catalog import claude_cli_agentic_spec   # lazy, as above
+    return claude_cli_agentic_spec(req.get("params") if isinstance(req, dict) else None)
+
+
 class Gateway:
     def __init__(self, *, mode: str, profile: dict, budget: dict, run_id: str,
                  providers: dict | None = None, authorization: AuthorizationHandle | None = None,
@@ -383,8 +408,19 @@ class Gateway:
         # effect-free: the recorder is not this gateway's to write into
         return self._refuse(c["info"], typed_error("contract-violation", bad[1], stage=self._st(c["stage"])), record=False)
 
-    def _check_request(self, role: str, req: dict) -> dict | None:
+    def _spec(self, role: str, req: dict | None = None) -> dict:
+        """The profile RoleSpec a request is admitted, priced and replayed against: the role's, or its pinned
+        alternate (ModelProfile.alternates, investigator.impact@v7) when the request names exactly that alternate's
+        provider and model. A profile without alternates always gives the role's spec (unchanged behaviour)."""
         spec = self.profile["roles"][role]
+        alt = (self.profile.get("alternates") or {}).get(role) if self.family == "review" else None
+        if alt is not None and isinstance(req, dict) and req.get("provider") == alt["provider"] \
+                and req.get("model") == alt["model"]:
+            return alt
+        return spec
+
+    def _check_request(self, role: str, req: dict) -> dict | None:
+        spec = self._spec(role, req)
         def bad(why, code="contract-violation"):
             return typed_error(code, why)
         if req["role"] != role:
@@ -408,6 +444,14 @@ class Gateway:
                 v = params.get(k)
                 if v is not None and (type(v) is not int or v > spec["caps"]["maxOutputTokens"]):
                     return bad(f"params.{k} exceeds the role output cap")
+            if "agentic" in params:                  # AGENTIC (claude-cli-isolated@6): claude-cli review roles only, exact spec
+                a = _claude_cli_agentic(req)
+                if self.family != "review" or req["provider"] != "claude-cli" or not _claude_cli_model(req["model"]):
+                    return bad("params.agentic is a claude-cli review mode only")
+                if not isinstance(a, dict):
+                    return bad(a)
+                if a != (spec["params"] or {}).get("agentic"):
+                    return bad("params.agentic differs from the profile role (the trusted session caps)")
         return None
 
     def _attempt(self, stage, role, agent_id, ordinal, attempt, request, repair_of, retry_of=None) -> dict:
@@ -481,8 +525,8 @@ class Gateway:
         unbound = self._bound(c)
         if unbound is not None:
             return unbound
-        spec = self.profile["roles"][c["role"]]
-        amount = reservation(spec["price"], estimate_input_tokens(req), spec["caps"]["maxOutputTokens"])
+        spec = self._spec(c["role"], req)
+        amount = _call_reservation(spec, req)
         rkey = scoped_key(self.run_id, c["cid"])
         with self._lock:
             reused = c["cid"] in self._used_calls
@@ -497,8 +541,16 @@ class Gateway:
         # A subscription (Codex CLI) review call is bounded by this run's Plan ceiling at its API-equivalent
         # reservation, the adapter's per-run call cap and the per-call timeout, and recorded in the trace and runtime
         # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
-        subscription = (self.family == "review" and req["provider"] == "openai" and
-                        getattr(provider, "billing_kind", None) == "subscription-consumption")
+        # An opencode free-model call (OPENCODE-FREE-PROVIDER) takes the same path: $0 actual, a pacing reservation only;
+        # only for a pinned free model (defense in depth: authorization and the adapter already refuse any other model).
+        # A claude-cli call (CLAUDE-CLI-PROVIDER) too: the Claude subscription, $0 actual, a pacing reservation at the Terra-6
+        # list rates (as opencode); only for a pinned claude-cli model.
+        subscription = (self.family == "review" and (
+            (req["provider"] == "openai" and getattr(provider, "billing_kind", None) == "subscription-consumption")
+            or (req["provider"] == "opencode" and getattr(provider, "billing_kind", None) == "free-model"
+                and _opencode_free_model(req["model"]))
+            or (req["provider"] == "claude-cli" and getattr(provider, "billing_kind", None) == "claude-subscription"
+                and _claude_cli_model(req["model"]))))
         if subscription:
             self._subscription_keys.add(rkey)
         refuse = self._reserve(rkey, stage, amount)
@@ -627,14 +679,15 @@ class Gateway:
     def _basis(self, provider, settled_basis, *, known_none=False):
         if provider == "synthetic":
             return "synthetic"
-        if provider == "openai" and not known_none:
-            return "estimated"          # subscription CLI usage priced at API-equivalent list rates: never a bill
+        if provider in ("openai", "opencode", "claude-cli") and not known_none:
+            return "estimated"          # subscription / free-model CLI usage priced at list or pacing rates: never a bill
         return settled_basis or ("measured" if known_none else "estimated")
 
     def _cost_doc(self, c, amount, usd, usage, basis, over, *, replay_of=None):
+        price = self._spec(c["role"], c["req"])["price"]
         doc = {"id": cost_id(c["cid"]), "kind": self.cost_kind, "basis": basis, "usage": copy.deepcopy(usage),
-               "usdMicros": usd, "reservedUsdMicros": amount, "priceVersion": self.profile["roles"][c["role"]]["price"]["priceVersion"]
-               if self.profile["roles"][c["role"]]["price"] else None,
+               "usdMicros": usd, "reservedUsdMicros": amount, "priceVersion": price["priceVersion"]
+               if price else None,
                "runId": self.run_id, "role": c["role"], "callId": c["cid"],
                "provider": c["req"]["provider"], "model": c["req"]["model"]}
         if self.family != "score":
@@ -752,8 +805,8 @@ class Gateway:
                 return self._mismatch(c, "recorded guard refusal carries a charge")
             return self._finish_error(c, copy.deepcopy(rerr), 0, 0, None,
                                       replay_cost=self._replayed_cost(c, recorded_cost, 0))
-        spec = self.profile["roles"][c["role"]]
-        amount = reservation(spec["price"], estimate_input_tokens(c["req"]), spec["caps"]["maxOutputTokens"])
+        spec = self._spec(c["role"], c["req"])
+        amount = _call_reservation(spec, c["req"])          # as recorded: an AGENTIC call reserved its session budget
         rkey = scoped_key(self.run_id, c["cid"])
         if amount != recorded_cost["reservedUsdMicros"]:
             return self._mismatch(c, "recomputed reservation differs from the recording (profile or request drift)")

@@ -22,6 +22,7 @@ from reviewer.pilot import live_profile
 from reviewer.pilot import launcher as L
 from reviewer.pipeline import PipelineError
 from reviewer.runtime.openrouter import HttpsTransport, OpenRouterProvider
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import (BASE, CTX, FAKE_KEY, HEAD, LABEL_CANARIES, Model, Rig, boom_key_loader,
                                  tree_listing)
 from tests.tools.helpers import make_case
@@ -163,7 +164,7 @@ class SharedState(Rig):
         prev = cum1
         for c in r2["cases"]:
             rt = c["costs"]["runtime"]
-            self.assertEqual(rt["capUsdMicros"], 50_000_000)
+            self.assertEqual(rt["capUsdMicros"], TRIAL_TOTAL_USD_MICROS)
             for k in prev:
                 self.assertEqual(rt["cumulative"][k]["usdMicros"],
                                  prev[k]["usdMicros"] + rt["thisCase"][k]["usdMicros"], (c["case"], k))

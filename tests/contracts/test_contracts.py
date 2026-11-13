@@ -107,14 +107,21 @@ class EvidenceAndFindings(Base):
 
     def test_finding_needs_distinct_call_provenance(self):
         f = ex("Finding")
-        self.assertInvalid("Finding", {k: v for k, v in f.items() if k != "sourceCallId"}, "required")
+        # investigator.impact@v24: a Finding names exactly one source, its proposing call or a seed.input draft (seedRef)
+        self.assertInvalid("Finding", {k: v for k, v in f.items() if k != "sourceCallId"}, "independent-confirm")
+        self.assertInvalid("Finding", {**f, "seedRef": {"seed": "sha256:" + "0" * 64, "index": 0, "id": "ccbo-x-0"}}, "independent-confirm")
+        self.assertEqual(validate("Finding", {**{k: v for k, v in f.items() if k != "sourceCallId"},
+                                              "seedRef": {"seed": "sha256:" + "0" * 64, "index": 0, "id": "ccbo-x-0"}}), [])
         f["verification"]["callIds"] = [f["sourceCallId"]]
         self.assertInvalid("Finding", f, "independent-confirm")
 
     def test_finding_verdict_is_confirmed_only(self):
         f = ex("Finding")
         f["verification"]["verdict"] = "uncertain"
-        self.assertInvalid("Finding", f, "const")
+        # investigator.impact@v26: Verification is a union on verdict (confirmed | witness-supported); any other verdict is refused
+        self.assertInvalid("Finding", f, "enum")
+        f["verification"]["verdict"] = "witness-supported"          # the confirmed fields never pass as the v26 variant
+        self.assertInvalid("Finding", f, "unknown-field")
 
     def test_comment_draft_vs_posted(self):
         c = ex("Comment")

@@ -46,7 +46,7 @@ GOLD = {
     "engineIdentity": "sha256:9238adb1cc170f79625c1b0da27a2dcafba51d7ee1c4a0d91c2c73d20a44e299",
     "profileOn": "sha256:f113cf0fa903a2e5cd4b4410a85a3025389cb257fc45cf2eb662241acabe7c85",
     "profileOff": "sha256:60750b6fbecd9ed73d9b1faba9e3fa49e7bb8dc19523775fbedeab1bf5fc762e",
-    "plan": "sha256:18bedae1e19e8460affb22388cb88188b8ec2b1ace72c9d2238be84774f4b306",
+    "plan": "sha256:80fda5fefebfc337c3fb9fa4a73c6701917b19c1ca76944ebb971474fff4b32e",   # v6cd time successor: run deadlines 3000/2400
     "policy": "sha256:2c5b1add3d9dc8946fbeb006677ed090163541570965faa419fff9bb1a97f48c",
     "policyDoc": {"agent_tool_calls": 60, "context_chars": 240000, "hypothesis_tool_calls": 12,
                   "investigator_prompt": "investigator.retrieve@v2", "investigator_turns": 8, "requests_per_turn": 6,
@@ -83,7 +83,7 @@ IMPACT_V2_GOLD = {
 IMPACT_V3_GOLD = {
     "profileOn": "sha256:0959087c4958b516e6fb984d611b9535ec46d6325047e54290586d41ec98367a",
     "policy": "sha256:5913eba11ee09a1ecf782dff5b8efb75d8d9d3ea9879f931802b9e27d779392f",
-    "plan": "sha256:9244e9a26da37d0b807fff9731d4499e843123b3d558b70a89aa5e246bf433d8",
+    "plan": "sha256:3e3e1b35ef7d4d07e80b098b97d848e7a9d1278305f469e44b140e1f514e279c",   # v6cd time successor: run deadlines 3000/2400
     "benchFirst": "7b79ed6e702b5d04b6cebf0e1127d7a9ddb4840213ba29cfe894f1a84a0d2928",
 }
 

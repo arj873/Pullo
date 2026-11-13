@@ -15,12 +15,17 @@ COMMENTS_SCHEMA = "review-comments@1"
 PARTIAL_COMMENTS_SCHEMA = "review-comments@2"     # @1 plus a mandatory `coverage` object; full-view bundles stay @1, byte-identical
 
 
-def comments_doc(run: dict, status: str, comments: list, coverage: dict | None = None) -> dict:
+def comments_doc(run: dict, status: str, comments: list, coverage: dict | None = None, seed_ids: dict | None = None,
+                 witness_ids: dict | None = None) -> dict:
     """Bundle wrapper only: individual Comment entities are contracts-owned and untouched. A partial run adds a
     bundle-level `coverage` object (and bumps the wrapper to @2) so a sink reading only this file cannot take
     'completed' for a whole-repository review."""
     doc = {"schema": COMMENTS_SCHEMA, "runId": run["id"], "headSnapshotId": run["headSnapshotId"],
            "status": status, "state": "draft", "comments": comments}
+    if seed_ids is not None:                     # investigator.impact@v24 only (seeded SEED ID): comment id -> its seed ids
+        doc["seedIds"] = seed_ids
+    if witness_ids is not None:                  # investigator.impact@v26 only: comment id -> its [witness j, witness item id]s
+        doc["witnessIds"] = witness_ids
     if coverage is not None:
         d = coverage["detail"]
         doc["schema"] = PARTIAL_COMMENTS_SCHEMA
@@ -109,7 +114,9 @@ def sweep_section(cov: dict, investigate: dict | None = None, limit: int = 60) -
 def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete: list, error: dict | None,
               changed: list, context_notes: list[str], tool_calls: int, cost_note: str,
               coverage: dict | None = None, retrieval: bool = False, impact: dict | None = None,
-              specialists: dict | None = None, sweep: dict | None = None) -> str:
+              specialists: dict | None = None, sweep: dict | None = None,
+              alternate_models: list | None = None, alt_coverage: list | None = None,
+              deep_coverage: list | None = None, whole_change: list | None = None) -> str:
     out = ["# Draft code review (local only)", "",
            "> DRAFT. Nothing in this file was posted, applied or executed against the repository. The review is "
            "read-only and explanatory: you decide which changes, if any, to make.", "",
@@ -181,8 +188,20 @@ def review_md(*, run: dict, status: str, comments: list, drops: list, incomplete
         if "collapses" in specialists:       # investigator.impact@v5 only
             out[-1:] = [f"- Near-duplicates collapsed before verification (same file, category and spot; the best "
                         f"evidenced kept): {sum(len(g['collapsedIds']) for g in specialists['collapses'])}", ""]
+        if alternate_models:                 # investigator.impact@v7 only: bytes unchanged else
+            out[-1:] = [f"- Lanes ending in `.alt` re-ran those lenses on the alternate investigator model "
+                        f"{', '.join(alternate_models)}; their duplicates of earlier lanes were merged before "
+                        "verification.", ""]
+        if alt_coverage:                     # investigator.impact@v10 only: the optional alternate lanes' ends
+            out[-1:] = ["- Alternate-model coverage (an alternate lane's own cap or a provider failure of its model "
+                        "does not make the run partial; entries counted as incomplete say so):",
+                        *[f"  - {n}" for n in alt_coverage], ""]
     if sweep is not None:           # investigator.impact@v4 only (the INVESTIGATE payload has `sweep`): bytes unchanged else
         out += sweep_section(sweep, specialists)
+    if deep_coverage is not None:   # investigator.impact@v12 only: bytes unchanged else
+        out += ["## Coverage-forced investigation", "", *deep_coverage, ""]
+    if whole_change is not None:    # investigator.impact@v16 only: bytes unchanged else
+        out += ["## Whole-change review", "", *whole_change, ""]
     out += [f"## Comments ({len(comments)})", ""]
     if not comments:
         out += ["No supported finding in the inspected context. This is not a certificate that the change is "

@@ -797,18 +797,20 @@ class Pilot(unittest.TestCase):
 
 
 # pre-change (af00d48f) digests: (profile, plan, plan with live stage timing, policy) for impact v1-v3
+# plans re-pinned for the DEADLINE time successor (2026-11-02, as v6cd): run deadlines 3000/2400, live ceilings
+# 900/600/400; profiles and policies unchanged.
 REPO_DIGESTS = {
     1: ("sha256:3e62ef3208e068fafde841cb7d220094f15ed0e08a11bf185097b8299f16bdf7",
-        "sha256:18bedae1e19e8460affb22388cb88188b8ec2b1ace72c9d2238be84774f4b306",
-        "sha256:e50f514549e522e70f4d58064524a6f01924032662db33930b827deec26e561b",
+        "sha256:80fda5fefebfc337c3fb9fa4a73c6701917b19c1ca76944ebb971474fff4b32e",
+        "sha256:6bd0e38896cf0b9f8224382882e3c1993e075e60cc631c542abd42adc135157e",
         "sha256:c849a611a21899ac9c64ac149ce2b0b4edb36ebcf544111987cebd91c639e559"),
     2: ("sha256:216a6748aef63f2aeb9a53ec28b14d7e8575713f596a8f909cf94a7b51f1c9a6",
-        "sha256:18bedae1e19e8460affb22388cb88188b8ec2b1ace72c9d2238be84774f4b306",
-        "sha256:e50f514549e522e70f4d58064524a6f01924032662db33930b827deec26e561b",
+        "sha256:80fda5fefebfc337c3fb9fa4a73c6701917b19c1ca76944ebb971474fff4b32e",
+        "sha256:6bd0e38896cf0b9f8224382882e3c1993e075e60cc631c542abd42adc135157e",
         "sha256:d80e2c255d0a6247abe4d739a72566066155069d846e4b707ddb0d34694913f9"),
     3: ("sha256:0959087c4958b516e6fb984d611b9535ec46d6325047e54290586d41ec98367a",
-        "sha256:9244e9a26da37d0b807fff9731d4499e843123b3d558b70a89aa5e246bf433d8",
-        "sha256:0ec7f78996de044b19cf8ed6a4bb69d17082f0211d5d293a472ad17f43673571",
+        "sha256:3e3e1b35ef7d4d07e80b098b97d848e7a9d1278305f469e44b140e1f514e279c",
+        "sha256:3e5e1cacfb29e62adf66bc6f84aea3a779dc55a95f3a6c858c1c2c9267dd3dca",
         "sha256:5913eba11ee09a1ecf782dff5b8efb75d8d9d3ea9879f931802b9e27d779392f"),
 }
 

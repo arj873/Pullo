@@ -288,3 +288,118 @@ class ForgedRows(AckBase):
         with self.assertRaises(ValueError):
             self.lg.finish("r1", callKey="r2", outcome="processed", generationId="g")
         self.assertEqual(self.sha(), before)
+
+
+class AcknowledgeUnknownNoGeneration(AckBase):
+    """V6D (root card v6d-ack, incident run_a3255b9b58960aad): a scoring call that ended outcome 'unknown' on an HTTP 503 with no
+    generation id (nothing to look up, so neither reconcile nor a generation-keyed ack is possible) is acknowledged by call key with a
+    null generation id. The worst case stays counted everywhere; every other rule is unchanged."""
+    W503 = 52_296
+
+    def unknown503(self, key="u503", worst=W503, **over):
+        """The real shape (the frozen adapter's row for an HTTP 503 with no generation): outcome unknown, generationId null, no cost."""
+        self.lg.admit(key, worst, model=OPUS, **S)
+        self.lg.finish(key, **{"outcome": "unknown", "httpStatus": 503, "errorKind": "http-503", "generationId": None,
+                               "costBasis": "unknown", "billingKind": "openrouter-usd", "kind": "openrouter", "model": OPUS,
+                               "schemaName": "ScorePair", **over})
+
+    def test_hold_clears_for_the_null_generation_ack_and_money_is_unchanged(self):
+        self.known("a", 3000)
+        self.unknown503()
+        self.assertEqual(self.lg.totals("scoring")["unknownBoundUsdMicros"], self.W503)
+        self.assertEqual(self.lg.scoring_startup_hold(), {"reason": "prior-unresolved-scoring-exposure"})
+        with self.assertRaises(AuthorizationError):
+            self.sp()
+        totals, before = self.all_totals(), self.sha()
+        pre = self.lg.acknowledge("u503", None, evidence=EV, apply=False)
+        self.assertEqual(self.sha(), before)
+        self.assertEqual((pre["appended"], pre["holdAfter"], pre["countedUsdMicros"], pre["countedBasis"], pre["impliedCallUsdMicros"]),
+                         (False, None, self.W503, "unknown-worst-case", 0))
+        res = self.lg.acknowledge("u503", None, evidence=EV, apply=True)
+        self.assertTrue(res["appended"])
+        self.assertEqual((res["before"], res["scoringBefore"]), (res["after"], res["scoringAfter"]))
+        self.assertIsNone(self.lg.scoring_startup_hold())
+        self.assertEqual(self.all_totals(), totals)                        # the worst case still counted in every total
+        row = self.rows()[-1]
+        self.assertEqual({k: row[k] for k in ("type", "callKey", "generationId", "scope", "reasonCode", "impliedCallUsdMicros",
+                                              "countedUsdMicros", "countedBasis")},
+                         {"type": "acknowledge", "callKey": "u503", "generationId": None, "scope": "scoring-startup-hold",
+                          "reasonCode": "generation-not-found", "impliedCallUsdMicros": 0, "countedUsdMicros": self.W503,
+                          "countedBasis": "unknown-worst-case"})
+        self.sp()                                                          # a new scoring provider now constructs
+        again = self.lg.acknowledge("u503", None, evidence=EV, apply=True)  # idempotent; other evidence refused
+        self.assertEqual((again["appended"], again["alreadyAcknowledged"]), (False, True))
+        with self.assertRaises(ValueError):
+            self.lg.acknowledge("u503", None, evidence={**EV, "note": "other"}, apply=True)
+
+    def test_the_acknowledged_worst_case_still_counts_against_the_caps(self):
+        self.unknown503()
+        self.lg.acknowledge("u503", None, evidence=EV, apply=True)
+        cap = S["category_cap"]
+        self.assertEqual(self.lg.admit("n1", cap - self.W503 + 1, model=OPUS, **S),
+                         {"reason": "scoring-campaign-cap", "wouldReach": cap + 1, "limit": cap})
+        self.assertIsNone(self.lg.admit("n2", cap - self.W503, model=OPUS, **S))
+        small = RuntimeLedger(self.ledger_path, cap + 1)                   # the runtime cap counts it too
+        self.assertEqual(small.admit("n3", 2, model=SONNET)["reason"], "runtime-aggregate-cap")
+
+    def test_a_null_generation_ack_only_for_the_unknown_no_cost_shape(self):
+        self.filtered()                                                    # processed, has a generation id
+        self.lg.admit("ug", 5000, model=OPUS, **S)                         # unknown WITH a generation id: the generation-keyed path only
+        self.lg.finish("ug", outcome="unknown", generationId="gen-ug", costBasis="unknown")
+        self.unknown503("ucost", routerCostUsdMicros=7)                    # unknown, no generation, but a cost fact
+        self.unknown503("ubasis", accountableBasis="unknown-worst-case", accountableUsdMicros=self.W503)
+        self.lg.admit("ns", 5000, model=OPUS, **S)                         # not processed: counts nothing, never acknowledged
+        self.lg.finish("ns", outcome="not-sent", generationId=None, errorKind="timeout", costBasis="unknown")
+        self.lg.admit("rev", 5000, model=SONNET)                           # a REVIEW call with the 503 shape: not the scoring hold
+        self.lg.finish("rev", outcome="unknown", httpStatus=503, errorKind="http-503", generationId=None, costBasis="unknown")
+        self.lg.admit("orphan", 5000, model=OPUS, **S)                     # intent, no result
+        self.lg.admit("nokey", 5000, model=OPUS, **S)                      # unknown, generationId field absent (not recorded as null)
+        self.lg.finish("nokey", outcome="unknown", httpStatus=503, errorKind="http-503", costBasis="unknown")
+        before = self.sha()
+        for ck in ("cf", "ug", "ucost", "ubasis", "ns", "rev", "orphan", "nokey", "absent"):
+            with self.subTest(ck=ck), self.assertRaises(ValueError):
+                self.lg.acknowledge(ck, None, evidence=EV, apply=True)
+        self.unknown503()
+        for ev in ({**EV, "sumOtherOfficialMicros": 100_001},             # implied charge negative: unchanged rule
+                   {**EV, "keyRemainingAfterMicros": 47_900_000 - self.W503 - 1}):   # implied above the counted worst case
+            with self.subTest(ev=ev), self.assertRaises(ValueError):
+                self.lg.acknowledge("u503", None, evidence=ev, apply=True)
+        for gid in ("", 3):
+            with self.subTest(gid=gid), self.assertRaises(ValueError):
+                self.lg.acknowledge("u503", gid, evidence=EV, apply=True)
+        self.assertEqual(len([r for r in self.rows() if r["type"] == "acknowledge"]), 0)   # every refusal wrote nothing
+        self.assertIsNotNone(self.lg.scoring_startup_hold())
+
+    def test_forged_null_ack_rows_do_not_release_other_calls(self):
+        self.filtered()                                                    # has generation gen-cf
+        self.unknown503("ucost", routerCostUsdMicros=0, tokenPricedUsdMicros=None)   # zero cost fact: estimated, not the shape
+        with self.ledger_path.open("a") as f:
+            for ack in ({"type": "acknowledge", "callKey": "cf", "generationId": None},
+                        {"type": "acknowledge", "callKey": "ucost", "generationId": None}):
+                f.write(json.dumps(ack) + "\n")
+        self.assertIsNotNone(self.lg.scoring_startup_hold())
+        for shape in ({"outcome": "processed"},                            # no generation, no cost: unknown-worst-case but not 'unknown'
+                      {"accountableUsdMicros": self.W503, "accountableBasis": "unknown-worst-case"},   # unknown, but cost facts recorded
+                      {"upstreamInferenceCostUsd": "n/a"}):                # unknown, an unusable cost fact (still unknown-worst-case)
+            with self.subTest(shape=shape):
+                self.ledger_path.unlink()
+                self.unknown503("forged", **shape)
+                self.assertEqual(self.lg.totals("scoring")["unknownBoundUsdMicros"], self.W503)   # all three count as unknown-worst-case
+                with self.ledger_path.open("a") as f:
+                    f.write(json.dumps({"type": "acknowledge", "callKey": "forged", "generationId": None}) + "\n")
+                self.assertEqual(self.lg.scoring_startup_hold(), {"reason": "prior-unresolved-scoring-exposure"})
+                with self.assertRaises(ValueError):
+                    self.lg.acknowledge("forged", None, evidence=EV, apply=True)
+        self.ledger_path.unlink()
+        self.unknown503("u1"); self.unknown503("u2")
+        self.lg.acknowledge("u1", None, evidence=EV, apply=True)
+        self.assertEqual(self.lg.scoring_startup_hold(), {"reason": "prior-unresolved-scoring-exposure"})   # u2 still holds
+        self.lg.acknowledge("u2", None, evidence=EV, apply=True)
+        self.assertIsNone(self.lg.scoring_startup_hold())
+
+    def test_generation_keyed_path_unchanged(self):
+        self.filtered()
+        with self.assertRaises(ValueError):                                # a None ack never stands in for a generation-keyed one
+            self.lg.acknowledge("cf", None, evidence=EV, apply=True)
+        self.lg.acknowledge("cf", "gen-cf", evidence=EV, apply=True)
+        self.assertIsNone(self.lg.scoring_startup_hold())

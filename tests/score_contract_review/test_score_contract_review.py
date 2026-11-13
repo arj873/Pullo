@@ -104,7 +104,7 @@ def ex(name):
 # kept unchanged: Budget optional stageCeilingsSec + hostStopRecording and their "stage-ceilings" invariant, and the
 # TraceEvent "host.stop" variant. The NEW shapes/digests are asserted independently so no other addition is excused.
 LIVE_BUDGET_DIGEST = "sha256:2ad15744528ea621da0e31fd9f363f0428fe95552ec766447824cda80ede9671"
-LIVE_TRACEEVENT_DIGEST = "sha256:020e0b44f92fd0dfd4bbec44ae5fc42eb0bf73b821a60a9a3ec62fdead6d9bf1"   # + SHARD-COVERAGE-01
+LIVE_TRACEEVENT_DIGEST = "sha256:677b19c378be344287cc971d1538d83f9bf70cbc51f9d51e495cacf9238eb3d6"   # + SHARD-COVERAGE-01; CCFILTER-1 repin (was 020e0b44f92f...); CONSENSUS-1 repin (was ad4ac7e6e266...)
 # EXPLORE-FLOOR: root-declared deliberate TraceEvent extension, the "retrieval.floor" variant (investigator.impact@v2
 # exploration floor). Subtracted with host.stop below and pinned on its own; LIVE_TRACEEVENT_DIGEST is repinned.
 FLOOR_VARIANT_DIGEST = "sha256:0fb4102187fc677248b4d7f3e78d0054cbbef7de6e6f8a61456afe465fa3df5f"
@@ -124,7 +124,8 @@ def budget_minus_live(b):
 
 # SPECIALISTS-01: root-declared deliberate StagePayload extension, the optional INVESTIGATE "merges" list
 # (investigator.impact@v3 specialist merge record). Subtracted below and pinned on its own.
-MERGES_DIGEST = "sha256:6e2a2c911a4a0e3387b96358b74f1e8036bffb0008fc2445aec2b579df0e7a22"
+# TOURNAMENT-V7 S2 (declared for root acceptance): SpecialistMerge.rule also admits "cross-model-merge@1" (impact@v7).
+MERGES_DIGEST = "sha256:55e653f1b217273ee76eccd512df9bfdea48f7afe034e8f7d6a3577243430fe3"
 # SHARD-COVERAGE-01 (declared for root acceptance): deliberate additive extensions for investigator.impact@v4 diff-shard
 # sweeps: the optional INVESTIGATE "sweep" (SweepCoverage) and the TraceEvent variants "sweep.disposition" and
 # "investigate.coverage". Subtracted below and pinned on their own; LIVE_TRACEEVENT_DIGEST is repinned.
@@ -153,13 +154,157 @@ def investigate_merges(sp):
     return next(v for v in sp["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")["properties"]["merges"]
 
 
+# TOURNAMENT-V7 (declared for root acceptance): the optional ModelProfile "alternates" (impact@v7 alternate investigator
+# model) and its "alternate-pinning" invariant. Subtracted below and pinned on their own.
+ALTERNATES_DIGEST = "sha256:2d91dc56710b6406d53a76373337977e651ad7853009335b6fb2669508dd87c1"
+ALTERNATE_INVARIANT = "alternate-pinning: an alternate changes only the model of its role"
+
+
+def modelprofile_minus_live(mp):
+    mp = copy.deepcopy(mp)
+    assert "alternates" in mp["properties"] and "alternates" not in mp["required"]
+    del mp["properties"]["alternates"]
+    assert mp["x-invariants"][-1] == ALTERNATE_INVARIANT
+    del mp["x-invariants"][-1]
+    return mp
+
+
+# OPENCODE-FREE-PROVIDER (declared for root acceptance, NOT self-approved): the shared provider enum PROVIDERS gains a
+# trailing "opencode" (RoleSpec.provider in ModelProfile roles/alternates, ModelRequest.provider, SpendAuthorization
+# .providers items). Exactly that enum member is subtracted below before the legacy pins are compared, and the three new
+# definition digests are pinned on their own, so no other change is excused. Documents' digests are unaffected.
+LEGACY_PROVIDERS = ["anthropic", "openai", "synthetic"]
+OPENCODE_DEFS = ("ModelProfile", "ModelRequest", "SpendAuthorization")
+OPENCODE_DEF_DIGESTS = {
+    "ModelProfile": "sha256:f767e02477467707db7b154d6634d83a8186932a1cffd9a0527f2f7517d0b5d4",
+    "ModelRequest": "sha256:89fbb204472fc01c2a485ad66190e37e61d0106b15bfac6c8d94d468f317dd6e",
+    "SpendAuthorization": "sha256:9c4e73890e57aecd0defca2cf8ef9cb5b62550f33501312aad051cf7a629f81a",
+}
+
+
+# CLAUDE-CLI-PROVIDER (declared for root acceptance, NOT self-approved): the same shared provider enum gains one more trailing
+# member, "claude-cli", after "opencode" (the same six enum sites). `minus_claude_cli` removes exactly that member; the
+# opencode-era digests above must still hold on the result (so the gated opencode delta is unchanged), and the three
+# definitions' new digests are pinned on their own, so no other change is excused.
+CLAUDE_CLI_DEF_DIGESTS = {
+    "ModelProfile": "sha256:1e49d1b30b6ea7c46fbeb10d54c1ae7e81c0bf9afde0ca950e876e7f124f1201",
+    "ModelRequest": "sha256:5ec5b97442857df344232ff36e64826921ba8b5c21e1a3e88fc6cfddffe77a34",
+    "SpendAuthorization": "sha256:f99cb801e7e4c5fdbcbb85e4526c1f12c9b8b1bb8fbe44b98e100993eee3a09f",
+}
+
+
+def minus_claude_cli(d):
+    """Remove the one trailing "claude-cli" member (right after "opencode") from every provider enum (asserting where)."""
+    d = copy.deepcopy(d)
+    hits = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            e = n.get("enum")
+            if isinstance(e, list) and e[:3] == LEGACY_PROVIDERS and "claude-cli" in e:
+                assert e == LEGACY_PROVIDERS + ["opencode", "claude-cli"], e
+                n["enum"] = LEGACY_PROVIDERS + ["opencode"]
+                hits.append(1)
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+    walk(d)
+    assert hits, "no provider enum carries the declared claude-cli member"
+    return d
+
+
+def minus_opencode(d):
+    """Remove the one trailing "opencode" member from every provider enum (asserting where it sits); the claude-cli
+    member after it is removed first."""
+    d = minus_claude_cli(d)
+    hits = []
+
+    def walk(n):
+        if isinstance(n, dict):
+            e = n.get("enum")
+            if isinstance(e, list) and e[:3] == LEGACY_PROVIDERS and "opencode" in e:
+                assert e == LEGACY_PROVIDERS + ["opencode"], e
+                n["enum"] = list(LEGACY_PROVIDERS)
+                hits.append(1)
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+    walk(d)
+    assert hits, "no provider enum carries the declared opencode member"
+    return d
+
+
+# CCFILTER-1 (declared for gate acceptance, NOT self-approved): investigator.impact@v24's additive extensions (the optional
+# Hypothesis/Finding "seedRef", a Finding's "sourceCallId" optional with exactly one of the two, the optional INVESTIGATE "seed"
+# record and the TraceEvent "seed.input" variant), subtracted exactly here; the new shapes are pinned on their own (as
+# tests/score_contracts: CCFILTER_DEF_DIGESTS, SEED_INPUT_VARIANT_DIGEST, SEED_PAYLOAD_DIGEST).
+CCFILTER_DEFS = ("Hypothesis", "Finding")
+CCFILTER_DEF_DIGESTS = {"Hypothesis": "sha256:8f9e498e74ae10678ee3f10aa9ee6f796cfe73aa213968256d5f1570e6f65e97",
+                        "Finding": "sha256:1ee62c9afb3f76306eac3abf8fd283f2fba995cdb7ac63d0bace6254571f5e66"}
+SEED_INPUT_VARIANT_DIGEST = "sha256:2df38661a5f36f645bbe4f1e9090b80181a0cce62e3a5738e964428ab3343867"
+SEED_PAYLOAD_DIGEST = "sha256:3b65cce8085477038bcd6bee489f33318a39c8febd1e3c740f1b37502133813d"
+
+
+def minus_ccfilter(name, d):
+    d = copy.deepcopy(d)
+    if name in CCFILTER_DEFS:
+        assert "seedRef" in d["properties"] and "seedRef" not in d["required"]
+        del d["properties"]["seedRef"]
+        if name == "Finding":
+            assert "sourceCallId" in d["properties"] and "sourceCallId" not in d["required"]
+            d["required"].insert(d["required"].index("verification"), "sourceCallId")
+    if name == "StagePayload":
+        inv = next(v for v in d["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")
+        assert "seed" in inv["properties"] and "seed" not in inv["required"]
+        del inv["properties"]["seed"]
+    return d
+
+
+# CONSENSUS-1 (declared for gate acceptance, NOT self-approved): investigator.impact@v26's additive extensions - Finding.verification
+# becomes a union on verdict (the unchanged "confirmed" object, or "witness-supported": the v26 rule and witness refs, no call and no
+# verifier evidence; check_finding_provenance admits it only against a seed.input consensus record), the optional INVESTIGATE
+# "consensus" record and the optional seed.input "consensus" field. Exactly these are subtracted here (before CCFILTER-1's); the
+# new shapes are pinned on their own (CONSENSUS_FINDING_DIGEST, CONSENSUS_PAYLOAD_DIGEST, CONSENSUS_SEED_INPUT_VARIANT_DIGEST).
+CONSENSUS_FINDING_DIGEST = "sha256:726e048308549cc22441da3cdb414b3a3e8f8ae2451a9a66187efd73136be690"
+CONSENSUS_PAYLOAD_DIGEST = "sha256:03127214ec7d4008c53567d40a1f8e8cbf38e2f656abcead02ccf4a4cfe495ef"
+CONSENSUS_SEED_INPUT_VARIANT_DIGEST = "sha256:389ffae6034c6adbfd5067d78a3247f2570924c2f91f6d8bd632883358a41da8"
+
+
+def minus_consensus(name, d):
+    d = copy.deepcopy(d)
+    if name == "Finding":
+        v = d["properties"]["verification"]
+        assert [x["properties"]["verdict"]["const"] for x in v["oneOf"]] == ["confirmed", "witness-supported"]
+        d["properties"]["verification"] = v["oneOf"][0]
+    if name == "StagePayload":
+        inv = next(v for v in d["oneOf"] if v["properties"]["stage"].get("const") == "INVESTIGATE")
+        assert "consensus" in inv["properties"] and "consensus" not in inv["required"]
+        del inv["properties"]["consensus"]
+    return d
+
+
+def seed_input_minus_consensus(v):
+    v = copy.deepcopy(v)
+    assert "consensus" in v["properties"] and "consensus" not in v["required"]
+    del v["properties"]["consensus"]
+    return v
+
+
 def minus_live(name, d):
-    return budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload" else d
+    d = minus_ccfilter(name, minus_consensus(name, d))
+    if name in OPENCODE_DEFS:
+        d = minus_opencode(d)
+    return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
+            else modelprofile_minus_live(d) if name == "ModelProfile" else d)
 
 
 def traceevent_minus_live(te):
     te = copy.deepcopy(te)
-    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS):
+    for kind in ("host.stop", "retrieval.floor", *SWEEP_VARIANT_DIGESTS, "seed.input"):   # + CCFILTER-1
         hits = [i for i, v in enumerate(te["oneOf"]) if v["properties"]["type"]["const"] == kind]
         assert len(hits) == 1, (kind, hits)
         del te["oneOf"][hits[0]]
@@ -318,9 +463,21 @@ class L1L2Compatibility(Base):
                    if v["properties"]["stage"].get("const") == "INVESTIGATE")
         self.assertEqual(C.digest(inv["properties"]["sweep"]), SWEEP_PAYLOAD_DIGEST)
         self.assertEqual(C.digest(inv["properties"]["collapses"]), COLLAPSES_DIGEST)
+        self.assertEqual(C.digest(minus_opencode(REGISTRY["ModelProfile"].to_json()["properties"]["alternates"])),
+                         ALTERNATES_DIGEST)                                     # OPENCODE-FREE-PROVIDER enum subtracted
+        for name, want in OPENCODE_DEF_DIGESTS.items():                         # the opencode-era shapes, unchanged
+            self.assertEqual(C.digest(minus_claude_cli(REGISTRY[name].to_json())), want, name)
+        for name, want in CLAUDE_CLI_DEF_DIGESTS.items():                       # CLAUDE-CLI-PROVIDER: the new shapes, exactly
+            self.assertEqual(C.digest(REGISTRY[name].to_json()), want, name)
         self.assertEqual(C.digest(REGISTRY["SweepCoverage"].to_json()), SWEEP_COVERAGE_DEF_DIGEST)
         for kind, want in SWEEP_VARIANT_DIGESTS.items():
             self.assertEqual(C.digest(next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == kind)), want)
+        self.assertEqual(C.digest(inv["properties"]["seed"]), SEED_PAYLOAD_DIGEST)                 # CCFILTER-1
+        seed_input = next(v for v in te["oneOf"] if v["properties"]["type"]["const"] == "seed.input")
+        self.assertEqual(C.digest(seed_input_minus_consensus(seed_input)), SEED_INPUT_VARIANT_DIGEST)
+        self.assertEqual({n: C.digest(minus_consensus(n, REGISTRY[n].to_json())) for n in CCFILTER_DEFS}, CCFILTER_DEF_DIGESTS)
+        self.assertEqual((C.digest(REGISTRY["Finding"].to_json()), C.digest(inv["properties"]["consensus"]), C.digest(seed_input)),   # CONSENSUS-1
+                         (CONSENSUS_FINDING_DIGEST, CONSENSUS_PAYLOAD_DIGEST, CONSENSUS_SEED_INPUT_VARIANT_DIGEST))
 
     def test_CostRecord_changes_only_by_appending_score_to_kind(self):
         cr = REGISTRY["CostRecord"].to_json()

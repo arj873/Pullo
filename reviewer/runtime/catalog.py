@@ -9,7 +9,7 @@ import math
 
 PRICE_VERSION = "openrouter-catalog@2026-10-25T1952Z"
 TERRA_PRICE_VERSION = "openai-terra-list@2026-10-25"
-TRIAL_TOTAL_USD_MICROS = 50_000_000
+TRIAL_TOTAL_USD_MICROS = 150_000_000          # $50 -> $150 (CAP150, 2026-11-01: user raised the OpenRouter key limit to $150)
 TERRA_MODEL = "gpt-5.6-terra"
 # GPT Terra 6 ("you can use gpt terra 6", user 2026-10-29). Id from the installed codex-cli 0.163.0 model catalog:
 # `codex debug models` (server-refreshed, metadata only, no inference) lists slug gpt-6.1-terra, display "GPT-6.1 Terra",
@@ -132,3 +132,136 @@ def terra_api_equivalent_micros(uncached: int, cached: int, output: int, prompt_
     ox = t["tierOutputX"] if prompt_tokens > t["tierAbovePromptTokens"] else 1.0
     return math.ceil(_ceil_cost(uncached, t["input"]) * ix + _ceil_cost(cached, t["cached"]) * ix
                      + _ceil_cost(output, t["output"]) * ox)
+
+
+# ---------------------------------------------------------------- opencode free models (OPENCODE-FREE-PROVIDER)
+# provider=opencode: OpenCode Zen FREE models through the installed `opencode run` (no account, no key: the CLI's built-in
+# `opencode` provider uses the public free-tier key). Model ids as `opencode models --standalone` lists them in a
+# credential-less, network-less isolated home of opencode 2.1.4 (embedded catalog, models fetch disabled), checked
+# 2026-11-01 without any inference: beam-free, big-pickle, deepseek-v4.1-flash-free, flint-40b-free, glm-5.3-flash-free,
+# mimo-v2.6-flash-free, nemotron-3-ultra-free, nemotron-3.5-lightning-free, nemotron-3.5-super-vl-free. Only the entries
+# below are allowed (exact ids). Catalog facts (opencode/models.dev entry, public): openai-compatible chat completions at
+# opencode.ai/inference, $0 input/output, structured_output true, context 200000 / output 32000 tokens.
+OPENCODE_CLI_VERSION = "2.1.4"                 # exact: the adapter's argv/config/event/DB parsing is pinned to this CLI
+OPENCODE_ISOLATION_VERSION = "opencode-isolated-home@2"
+OPENCODE_MODELS: dict[str, dict] = {
+    "opencode/deepseek-v4.1-flash-free": {"cliModel": "opencode/deepseek-v4.1-flash-free", "family": "deepseek",
+                                          "contextTokens": 200_000, "outputTokens": 32_000, "structured": "json-schema"},
+    "opencode/glm-5.3-flash-free": {"cliModel": "opencode/glm-5.3-flash-free", "family": "glm",
+                                    "contextTokens": 200_000, "outputTokens": 32_000, "structured": "json-schema"},
+}
+OPENCODE_DEFAULT_MODEL = "opencode/deepseek-v4.1-flash-free"
+# The free models cost $0 (`billingKind` free-model: no bill, no key, no SpendBook). The engine still needs a nonzero
+# price to PACE a run (Plan ceiling, INVESTIGATE share, unit reserves, VERIFY/JUDGE floors), so the ModelProfile carries
+# a PACING price: the GPT-6.1-Terra list rates already pinned above (TERRA_6_PRICE), so a free-model arm is paced like the
+# Terra arm it replaces. These numbers are NOT an estimate of what the free model would cost anywhere, and never money.
+OPENCODE_PACING_PRICE_VERSION = "opencode-free-pacing@terra6-list-2026-10-29"
+OPENCODE_PACING_PRICE = {k: TERRA_6_PRICE[k] for k in ("input", "cached", "write", "output")}
+
+
+def opencode_gateway_price(model: str) -> dict:
+    if model not in OPENCODE_MODELS:
+        raise ValueError("unknown opencode free model")
+    p = OPENCODE_PACING_PRICE
+    return {"priceVersion": OPENCODE_PACING_PRICE_VERSION, "inputPerMTokUsdMicros": p["input"],
+            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write"],
+            "outputPerMTokUsdMicros": p["output"]}
+
+
+def opencode_worst_case_micros(model: str, request_bytes: int, max_output_tokens: int) -> int:
+    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearer input rate plus the full output
+    cap at the output rate (no long-context tier: the free models' context is 200K)."""
+    if model not in OPENCODE_MODELS:
+        raise ValueError("unknown opencode free model")
+    p = OPENCODE_PACING_PRICE
+    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write"]))
+            + _ceil_cost(max_output_tokens, p["output"]))
+
+
+def opencode_pacing_micros(uncached: int, cached: int, write: int, output: int) -> int:
+    """Pacing-rate arithmetic for measured opencode usage (receipts only; the actual charge is $0)."""
+    p = OPENCODE_PACING_PRICE
+    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write, p["write"])
+            + _ceil_cost(output, p["output"]))
+
+
+# ---------------------------------------------------------------- Claude Code CLI on the subscription (CLAUDE-CLI-PROVIDER)
+# provider=claude-cli: Claude Opus 5.5 / Sonnet 5.5 through the installed Claude Code CLI (`claude -p`, exactly 2.1.322) on
+# the user's Claude subscription (OAuth), with NO tools. Pullo-side ids are namespaced `claude-cli/<cli model id>` so the
+# allowlists stay disjoint (the model alone names its provider) and the bare `claude-opus-5-5` stays a development-only id
+# (contracts.DEV_ONLY_MODELS) for every other path. Only these entries are allowed (exact ids); the CLI gets `cliModel`.
+CLAUDE_CLI_VERSION = "2.1.322"                 # exact: the adapter's argv/env/stream-json parsing is pinned to this CLI (CLI322: was 2.1.317)
+CLAUDE_CLI_ISOLATION_VERSION = "claude-cli-isolated@5"     # @5 (CLI317; CLI322 re-proved on 2.1.322 with no code delta): Claude Code 2.1.317 - its builtin privacy plugin and the builtin plugins' own state store admitted; @4 (TIMEOUT-FIX): max_tokens = the role cap, a max_tokens stop is a cut answer; @3: adaptive thinking admitted
+CLAUDE_CLI_MODELS: dict[str, dict] = {
+    "claude-cli/claude-opus-5-5": {"cliModel": "claude-opus-5-5", "family": "claude", "contextTokens": 1_000_000,
+                                   "outputTokens": 128_000},
+    "claude-cli/claude-sonnet-5-5": {"cliModel": "claude-sonnet-5-5", "family": "claude", "contextTokens": 1_000_000,
+                                     "outputTokens": 128_000},
+}
+CLAUDE_CLI_DEFAULT_MODEL = "claude-cli/claude-sonnet-5-5"
+# The subscription costs $0 per call (`billingKind` claude-subscription: no bill, no key, no SpendBook). The engine still needs a
+# nonzero price to PACE a run (Plan ceiling, INVESTIGATE share, unit reserves, VERIFY/JUDGE floors), so the ModelProfile carries a
+# PACING price: the SAME GPT-6.1-Terra list rates the opencode arm uses (TERRA_6_PRICE; root decision 2026-11-01, phase A2), so
+# impact@v3/v12/v13 spend-based budgets and the $4 Plan ceiling behave exactly as on the Terra arm and a cc arm differs from it in
+# the model only. These numbers are NOT an estimate of what Claude would cost anywhere, and never money.
+CLAUDE_CLI_PRICE_VERSION = "claude-cli-pacing@terra6-list-2026-10-29"
+CLAUDE_CLI_PACING_PRICE = {k: TERRA_6_PRICE[k] for k in ("input", "cached", "write", "output")}
+
+
+def _claude_cli_rates(model: str) -> dict:
+    if model not in CLAUDE_CLI_MODELS:
+        raise ValueError("unknown claude-cli model")
+    return CLAUDE_CLI_PACING_PRICE
+
+
+def claude_cli_gateway_price(model: str) -> dict:
+    p = _claude_cli_rates(model)
+    return {"priceVersion": CLAUDE_CLI_PRICE_VERSION, "inputPerMTokUsdMicros": p["input"],
+            "cachedInputPerMTokUsdMicros": p["cached"], "cacheWriteInputPerMTokUsdMicros": p["write"],
+            "outputPerMTokUsdMicros": p["output"]}
+
+
+def claude_cli_worst_case_micros(model: str, request_bytes: int, max_output_tokens: int) -> int:
+    """Pre-send PACING upper bound (plan disclosure): `worst_case_input_tokens` at the dearer input rate plus the full output cap
+    at the output rate (as opencode_worst_case_micros)."""
+    p = _claude_cli_rates(model)
+    return (_ceil_cost(worst_case_input_tokens(request_bytes), max(p["input"], p["write"]))
+            + _ceil_cost(max_output_tokens, p["output"]))
+
+
+# AGENTIC READ-ONLY mode (claude-cli-isolated@6; root BUILD GO 2026-11-03T16:10Z; reviewer.runtime.claude_agentic): a profile role
+# opts in with params.agentic (default off: every role without it keeps claude-cli-isolated@5 byte-unchanged). The ONE call then is
+# a bounded CLI session with ONLY Read / Grep / Glob over the run's PR snapshot (head, + base), up to maxRequests relayed requests
+# within sessionDeadlineSec, each admitted by the forwarder against budgetUsdMicros (PACING; the gateway reserves exactly that).
+# @7 (SPILL, root runtime card 2026-11-09T01:02Z): + the CLI's own tool-results spill admitted, exactly <home>/.claude/projects/-pullo-head/
+# <the init session id>/tool-results/<an audited tool_use id>.txt|.json, regular single-link files, size-capped, token-scanned
+# (claude_agentic.spill_only, SPILL_RULE); @6: the agentic mode as built.
+CLAUDE_CLI_AGENTIC_ISOLATION_VERSION = "claude-cli-isolated@7"
+CLAUDE_CLI_AGENTIC_KEYS = frozenset({"mode", "maxRequests", "sessionDeadlineSec", "budgetUsdMicros"})
+CLAUDE_CLI_AGENTIC_MAX_REQUESTS = 30           # root: N cap per session
+CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC = 900      # root: session deadline 15 min
+CLAUDE_CLI_AGENTIC_MAX_BUDGET = 10_000_000     # root: the $10 PACING ceiling (CC_AUTH_V2)
+
+
+def claude_cli_agentic_spec(params) -> dict | None | str:
+    """params.agentic of a claude-cli request: None (no agentic mode), the validated spec, or a refusal string."""
+    if not isinstance(params, dict) or "agentic" not in params:
+        return None
+    a = params["agentic"]
+    if not isinstance(a, dict) or set(a) != CLAUDE_CLI_AGENTIC_KEYS or a.get("mode") != "read-only":
+        return "params.agentic must be exactly {mode: read-only, maxRequests, sessionDeadlineSec, budgetUsdMicros}"
+    n, d, b = a["maxRequests"], a["sessionDeadlineSec"], a["budgetUsdMicros"]
+    if type(n) is not int or not 2 <= n <= CLAUDE_CLI_AGENTIC_MAX_REQUESTS:
+        return f"params.agentic.maxRequests must be an integer in 2..{CLAUDE_CLI_AGENTIC_MAX_REQUESTS}"
+    if type(d) is not int or not 60 <= d <= CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC:
+        return f"params.agentic.sessionDeadlineSec must be an integer in 60..{CLAUDE_CLI_AGENTIC_MAX_DEADLINE_SEC}"
+    if type(b) is not int or not 1 <= b <= CLAUDE_CLI_AGENTIC_MAX_BUDGET:
+        return f"params.agentic.budgetUsdMicros must be an integer in 1..{CLAUDE_CLI_AGENTIC_MAX_BUDGET} (PACING micros)"
+    return dict(a)
+
+
+def claude_cli_pacing_micros(model: str, uncached: int, cached: int, write: int, output: int) -> int:
+    """Pacing-rate arithmetic for measured claude-cli usage (receipts only; the actual charge is $0)."""
+    p = _claude_cli_rates(model)
+    return (_ceil_cost(uncached, p["input"]) + _ceil_cost(cached, p["cached"]) + _ceil_cost(write, p["write"])
+            + _ceil_cost(output, p["output"]))

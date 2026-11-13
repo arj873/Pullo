@@ -23,6 +23,7 @@ from reviewer.pilot import positive as P
 from reviewer.pipeline import PipelineError
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.openrouter import HttpResponse
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pilot.test_repository import USAGE, entries
 from tests.pipeline.helpers import tcid
@@ -537,13 +538,14 @@ class Admission(Rig):
         self.assertFalse(self.out.exists())
 
     def test_committed_plus_run_ceiling_over_the_aggregate_refuses(self):
-        self.seed(committed=46_000_001)
-        self.refused_before_key(baseline_micros=46_000_001)
+        self.seed(committed=TRIAL_TOTAL_USD_MICROS - 4_000_000 + 1)
+        self.refused_before_key(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000 + 1)
 
     def test_exactly_at_the_aggregate_is_admitted_through_preflight(self):
-        self.seed(committed=46_000_000)
+        self.write_auth({**AUTH, "maxUsdMicrosTotal": TRIAL_TOTAL_USD_MICROS})   # gate-sync: the authorization at the trial total
+        self.seed(committed=TRIAL_TOTAL_USD_MICROS - 4_000_000)
         m = self.model(MISS)
-        rep = P.run_positive(self.live_options(baseline_micros=46_000_000), transport=m, key_loader=self.loader)
+        rep = P.run_positive(self.live_options(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000), transport=m, key_loader=self.loader)
         self.assertEqual(len(m.requests), 2)                # the draft + its one exploration-floor continuation
         self.assertIn(rep["status"], ("completed", "pipeline-refused"))
 

@@ -28,6 +28,7 @@ from reviewer.repoimport.fsio import force_remove
 from reviewer.repoimport.remote import local_fixture_remote
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.openrouter import HttpResponse
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET
 from tests.pipeline.helpers import tcid
 from tests.repoimport.helpers import ENV as GIT_ENV, git
@@ -542,7 +543,7 @@ class LiveTests(Base):
                  ("wrong baseline", dict(baseline_micros=BASELINE + 1), {}),
                  ("book mismatch", dict(), dict(book_committed=BASELINE - 5)),
                  ("in-flight", dict(), dict(inflight=500)),
-                 ("cannot cover the ceiling", dict(baseline_micros=47_000_000), dict(committed=47_000_000))]
+                 ("cannot cover the ceiling", dict(baseline_micros=TRIAL_TOTAL_USD_MICROS - 3_000_000), dict(committed=TRIAL_TOTAL_USD_MICROS - 3_000_000))]
         for name, over, seed in cases:
             with self.subTest(name):
                 w = World(self.tmp / ("w-" + name.replace(" ", "-")))

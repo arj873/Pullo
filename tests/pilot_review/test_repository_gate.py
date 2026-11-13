@@ -39,6 +39,7 @@ from reviewer.repoimport.fsio import force_remove  # noqa: E402
 from reviewer.repoimport.remote import local_fixture_remote  # noqa: E402
 from reviewer.runtime import RuntimeLedger, Secret  # noqa: E402
 from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E402
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import AUTH, FAKE_KEY, SONNET  # noqa: E402
 from tests.pilot.test_repository import USAGE, Model  # noqa: E402  (author's fake OpenRouter, happy path only)
 from tests.repoimport.helpers import git  # noqa: E402
@@ -541,14 +542,14 @@ class Live(Base):
 
     def test_CONTROL_aggregate_boundary_46_000_000_is_allowed_and_one_micro_more_is_refused(self):
         w = self.world("wa")
-        w.seed(committed=46_000_000)
-        rep = R.run_repository(w.live_options(baseline_micros=46_000_000), transport=self.model(w), key_loader=self.loader)
+        w.seed(committed=TRIAL_TOTAL_USD_MICROS - 4_000_000)
+        rep = R.run_repository(w.live_options(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000), transport=self.model(w), key_loader=self.loader)
         self.assertIn(rep["status"], ("completed", "failed", "incomplete"))          # admitted; the engine may still stop on admission
         w2 = self.world("wb")
-        w2.seed(committed=46_000_001)
+        w2.seed(committed=TRIAL_TOTAL_USD_MICROS - 4_000_000 + 1)
         before = w2.state_bytes()
         with self.assertRaises(R.RepositoryError):
-            R.run_repository(w2.live_options(baseline_micros=46_000_001), transport=self.model(w2), key_loader=self.boom)
+            R.run_repository(w2.live_options(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000 + 1), transport=self.model(w2), key_loader=self.boom)
         self.assertEqual(w2.state_bytes(), before)
 
     def test_CONTROL_every_hop_is_one_provider_contact_one_ledger_intent_and_result_one_trace_model_call_and_one_book_settlement(self):

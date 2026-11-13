@@ -41,7 +41,8 @@ from reviewer.runtime import EnvFileError, RuntimeLedger, Secret, TRIAL_TOTAL_US
 from reviewer.runtime.openrouter import OpenRouterProvider
 from reviewer.runtime.turn_canary import Refused, open_state
 
-from .providers import ReviewProviders, live_terra, needs, plan_providers, scrub_of, worst_case
+from .profile import profile_repairs
+from .providers import ReviewProviders, live_terra, needs, plan_providers, repair_bound, scrub_of, worst_case
 from .launcher import REPO, PilotError, _Unused, _force_cleanup, gateway_costs, ledger_costs, utc_now
 
 from .repository import (BOOK_NAME, RepositoryError, LEDGER_NAME, STRICT_REPLAY_ONLY, CapturingTransport, _check_ceiling,
@@ -457,13 +458,18 @@ def plan_mode(o: PositiveOptions, prep: Prepared, *, runner=run_review, cfg=None
     if worst is not None and worst > ceiling:
         planned = False
         unmet.insert(0, f"worst-case admission {worst} micros exceeds the {ceiling} run ceiling")
+    repair, gate = repair_bound(profile, first, worst, ceiling)        # CLAUDE-CLI-REPAIR1 ({} / None without repairs)
+    if gate is not None:
+        planned = False
+        unmet.insert(0, gate)
     if not first:
         unmet.insert(0, "no first request was captured: the pipeline never reached a model call")
     return {**header(prep), "schema": REPORT_SCHEMA, "mode": "plan", "status": "planned" if planned else "plan-failed",
             "ok": planned,
             "plan": {"model": cfg.models.summary(), "models": cfg.report()["roles"], "retrievalPolicy": policy.to_doc(), "profile": f"{profile['id']}@{profile['version']}",
                      "capturedRequests": first, "capturedCount": len(first), "firstRequest": first[0] if first else None,
-                     "worstCaseAdmissionUsdMicros": worst, "runCeilingUsdMicros": ceiling, "retries": 0, "repairs": 0,
+                     "worstCaseAdmissionUsdMicros": worst, "runCeilingUsdMicros": ceiling, "retries": 0,
+                     "repairs": profile_repairs(profile), **repair,
                      "toolBudget": {k: plan["budget"][k] for k in ("maxToolCalls", "maxToolCallsPerAgent")},
                      "outputCaps": {r: s["caps"]["maxOutputTokens"] for r, s in profile["roles"].items()},
                      "providerCalls": 0, "networkCalls": 0, "keyRead": False, "scratchOnly": True,
@@ -500,6 +506,12 @@ def live_mode(o: PositiveOptions, prep: Prepared, *, transport=None, key_loader=
     if needs(profile, "openai"):                  # gate S1: this host's state is the OpenRouter trial state
         raise PositiveError("live Terra arms run through the repository/benchmark hosts with their own Terra state "
                             "dir; the positive-control host only plans them")
+    if needs(profile, "opencode"):                # OPENCODE-FREE-PROVIDER: same rule for the free-model CLI arm
+        raise PositiveError("live opencode arms run through the repository/benchmark hosts with their own CLI-arm "
+                            "state dir; the positive-control host only plans them")
+    if needs(profile, "claude-cli"):              # CLAUDE-CLI-PROVIDER: same rule for the subscription CLI arm
+        raise PositiveError("live claude-cli arms run through the repository/benchmark hosts with their own CLI-arm "
+                            "state dir; the positive-control host only plans them")
     handle = trusted_authorization(o.auth, forbidden_roots=[REPO, out, *_control_roots(o)])
     try:
         book, ledger = open_state(o.state_dir, handle, o.baseline_micros,

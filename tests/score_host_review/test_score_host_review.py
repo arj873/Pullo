@@ -7,6 +7,7 @@ from tests.score_host_review.common import CFG, EVR, EVR2, OPUS, ROOT, S, SCOPE,
 from reviewer.runtime import RuntimeLedger
 from reviewer.runtime.catalog import worst_case_router_micros
 from reviewer.runtime.scoring_budget import SCORING_AGGREGATE_CEILING_MAX, SCORING_CATEGORY_CAP_MAX
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 
 NEAR_CAP = SCORING_CATEGORY_CAP_MAX - 300_000          # prior scoring spend: phase 1/2 fit, the 12-pair set does not
 
@@ -15,7 +16,7 @@ NAMES = lambda t: [b["response_format"]["json_schema"]["name"] for b in t.bodies
 
 def preload(env, micros):
     """Known processed scoring spend (retained exposure) on the scratch ledger before the run."""
-    L = RuntimeLedger(env.ledger_path, 50_000_000)
+    L = RuntimeLedger(env.ledger_path, TRIAL_TOTAL_USD_MICROS)
     assert L.admit("old", 1, model=OPUS, **SCOPE) is None
     L.finish("old", outcome="processed", routerCostUsdMicros=micros, tokenPricedUsdMicros=micros, upstreamInferenceCostUsdMicros=None, isByok=None)
 
@@ -78,7 +79,7 @@ class Boundaries(Env):
 
     def test_aggregate_20m_and_book_total_stop_without_pairs(self):
         self.setUp()
-        L = RuntimeLedger(self.ledger_path, 50_000_000)
+        L = RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS)
         self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
         L.finish("rev", outcome="processed", routerCostUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 1_000, tokenPricedUsdMicros=SCORING_AGGREGATE_CEILING_MAX - 1_000, upstreamInferenceCostUsdMicros=None, isByok=None)
         r = self.host().execute_offline()
@@ -100,7 +101,7 @@ class Boundaries(Env):
 
         def run(review):
             self.setUp()
-            L = RuntimeLedger(self.ledger_path, 50_000_000)
+            L = RuntimeLedger(self.ledger_path, TRIAL_TOTAL_USD_MICROS)
             self.assertIsNone(L.admit("rev", 1, model="anthropic/claude-sonnet-5.5"))
             L.finish("rev", outcome="processed", routerCostUsdMicros=review, tokenPricedUsdMicros=review, upstreamInferenceCostUsdMicros=None, isByok=None)
             return self.host().execute_offline()

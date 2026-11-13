@@ -28,6 +28,7 @@ from reviewer.repoimport.fsio import force_remove
 from reviewer.repoimport.remote import local_fixture_remote
 from reviewer.runtime import RuntimeLedger, Secret
 from reviewer.runtime.openrouter import HttpResponse
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 from tests.pilot.helpers import AUTH, SONNET
 from tests.repoimport.helpers import git
 
@@ -363,10 +364,10 @@ class Composed(Base):
             self.assertNotIn(claim, blob)
 
     def test_aggregate_and_run_ceilings_refuse_before_the_key(self):
-        self.w.seed(47_000_000)
+        self.w.seed(TRIAL_TOTAL_USD_MICROS - 3_000_000)
         before = self.w.state_bytes()
         with self.assertRaises(R.RepositoryError):
-            O.run_ordinary(self.w.live(47_000_000), transport=self.wire(), key_loader=self.no_key)
+            O.run_ordinary(self.w.live(TRIAL_TOTAL_USD_MICROS - 3_000_000), transport=self.wire(), key_loader=self.no_key)
         self.assertEqual((self.w.state_bytes(), self.w.out.exists()), (before, False))
 
     def test_provider_failure_is_one_attempt_with_no_retry_or_fallback(self):

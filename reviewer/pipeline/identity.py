@@ -19,7 +19,7 @@ from reviewer.contracts.redaction import MAX_PASSES, PROTECTED_PATTERNS, REDACTI
 from reviewer.tools import Limits
 from reviewer import impactmap as impact_mod
 
-from . import lanes, prompts, repocov, retrieval, specialists, sweeps
+from . import agentic, consensus, deepcov, dual, lanes, prompts, repocov, retrieval, seeded, specialists, sweeps, whole
 from .errors import PipelineError
 from .judging import ISSUE_KEY_VERSION
 
@@ -99,8 +99,16 @@ def plan_specialists(spec) -> list[str]:
     """The Plan.specialists the selected investigator needs: the v3 specialist ids (impact@v4: followed by the
     diff-shard sweep marker), else the one generalist."""
     pol = retrieval_policy(spec)
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.dual_pass and "investigator" in turn_roles(spec.profile):
+        return dual.plan_specialists()           # impact@v21: the two passes and the agentic marker
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.agentic_review and "investigator" in turn_roles(spec.profile):
+        return agentic.plan_specialists()        # impact@v19: the agentic reviewer and its marker
+    if isinstance(pol, retrieval.RetrievalPolicy) and pol.whole_change and "investigator" in turn_roles(spec.profile):
+        return whole.plan_specialists()          # impact@v16: the one whole-change reviewer
     if isinstance(pol, retrieval.RetrievalPolicy) and pol.specialists is not None \
             and "investigator" in turn_roles(spec.profile):
+        if pol.coverage_forced:                  # impact@v12: the lens lanes, then the coverage-unit marker
+            return deepcov.plan_specialists()
         return sweeps.plan_specialists() if pol.diff_sweep else list(pol.specialists)
     return ["generalist"]
 
@@ -157,7 +165,33 @@ def config_snapshot_id(spec) -> str:
         if pol.exploration_floor:                # absent for impact@v1 => its run ids are unchanged
             extra["impact"]["floor"] = {"behavior": FLOOR_BEHAVIOR, "version": prompts.EXPLORATION_FLOOR_VERSION,
                                         "maxContinuationHops": FLOOR_MAX_HOPS}
-        if pol.five_lanes:                       # investigator.impact@v5 only => v1-v4 run ids are unchanged
+        if pol.whole_change:                     # investigator.impact@v16 only => v1-v12 run ids are unchanged
+            extra["impact"]["whole"] = whole.identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                          spec.host.comment_cap)
+        if pol.agentic_review:                   # investigator.impact@v19 only => v1-v16 run ids are unchanged
+            extra["impact"]["agentic"] = agentic.identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                              spec.host.comment_cap)
+        if pol.dual_pass:                        # investigator.impact@v21 only => v1-v20 run ids are unchanged
+            extra["impact"]["dual"] = dual.identity_doc(pol, spec.plan["budget"], lim.max_calls, spec.host.comment_cap)
+        if pol.seeded and not pol.consensus:     # investigator.impact@v24 only => v1-v21 run ids are unchanged
+            if not isinstance(spec.seed, dict):
+                raise PipelineError("invalid-input", "investigator.impact@v24 needs its seed document (seed_candidates)")
+            extra["impact"]["seeded"] = seeded.identity_doc(spec.seed)
+        if pol.consensus:                        # investigator.impact@v26 only => v1-v24 run ids are unchanged
+            if not isinstance(spec.seed, dict) or spec.seed.get("schema") != consensus.SEED_SCHEMA:
+                raise PipelineError("invalid-input", "investigator.impact@v26 needs its seed document (seed_candidates, "
+                                    f"{consensus.SEED_SCHEMA})")
+            extra["impact"]["consensus"] = consensus.identity_doc(spec.seed)
+        if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
+            extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                                  spec.host.comment_cap)
+        elif pol.cross_v3:                       # investigator.impact@v10 only => v1-v7 run ids are unchanged
+            extra["impact"]["specialists"] = lanes.v10_identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                                    spec.profile)
+        elif pol.cross_model:                    # investigator.impact@v7 only => v1-v5 run ids are unchanged
+            extra["impact"]["specialists"] = lanes.cross_identity_doc(pol, spec.plan["budget"], lim.max_calls,
+                                                                      spec.profile)
+        elif pol.five_lanes:                     # investigator.impact@v5 only => v1-v4 run ids are unchanged
             extra["impact"]["specialists"] = lanes.identity_doc(pol, spec.plan["budget"], lim.max_calls)
         elif pol.specialists is not None:        # investigator.impact@v3/@v4 only => v1/v2 run ids are unchanged
             extra["impact"]["specialists"] = specialists.identity_doc(pol, spec.plan["budget"], lim.max_calls)

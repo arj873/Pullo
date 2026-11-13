@@ -24,7 +24,12 @@ from reviewer.tools.ops import Outcome
 
 from .prompts import INVESTIGATOR_IMPACT_PROMPT, VERIFIER_IMPACT_PROMPT  # noqa: F401 - impact mode prompt ids
 from .prompts import (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                      INVESTIGATOR_IMPACT_V5_PROMPT, SPECIALIST_AGENTS, V5_AGENTS)
+                      INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT,
+                      INVESTIGATOR_IMPACT_V12_PROMPT, INVESTIGATOR_IMPACT_V16_PROMPT, INVESTIGATOR_IMPACT_V19_PROMPT,
+                      INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT,
+                      INVESTIGATOR_IMPACT_V26_PROMPT, AGENTIC_PROMPTS,
+                      SPECIALIST_AGENTS, V5_AGENTS,
+                      V7_AGENTS, V10_AGENTS)
 from .prompts import VERIFIER_CONTEXT_CHECK_PROMPT  # noqa: F401 - the opt-in experiment's verifier prompt id
 
 RETRIEVAL_VERSION = "retrieval@2"
@@ -79,14 +84,17 @@ class RetrievalPolicy:
         prompt id alone (impact@v1, @v2, @v3 or @v4); every other id keeps the frozen retrieval@2 behaviour byte for byte."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_PROMPT, INVESTIGATOR_IMPACT_V2_PROMPT,
                                             INVESTIGATOR_IMPACT_V3_PROMPT, INVESTIGATOR_IMPACT_V4_PROMPT,
-                                            INVESTIGATOR_IMPACT_V5_PROMPT)
+                                            INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT,
+                                            INVESTIGATOR_IMPACT_V10_PROMPT, INVESTIGATOR_IMPACT_V12_PROMPT,
+                                            INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS)
 
     @property
     def exploration_floor(self) -> bool:
         """The engine-enforced exploration floor (investigator.impact@v2, and every specialist of @v3 and @v4; see
         Engine._investigator_chain). A v4 diff-shard sweep has its disposition continuation instead."""
         return self.investigator_prompt in (INVESTIGATOR_IMPACT_V2_PROMPT, INVESTIGATOR_IMPACT_V3_PROMPT,
-                                            INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT)
+                                            INVESTIGATOR_IMPACT_V4_PROMPT, INVESTIGATOR_IMPACT_V5_PROMPT,
+                                            INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT)
 
     @property
     def specialists(self) -> tuple | None:
@@ -94,13 +102,80 @@ class RetrievalPolicy:
         id: one `generalist` investigator, unchanged)."""
         if self.investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT:
             return V5_AGENTS                      # impact@v5: the v3 specialists, then consistency and hygiene
+        if self.investigator_prompt == INVESTIGATOR_IMPACT_V7_PROMPT:
+            return V7_AGENTS                      # impact@v7: the five v5 lanes, then the alternate-model lanes
+        if self.investigator_prompt == INVESTIGATOR_IMPACT_V10_PROMPT:
+            return V10_AGENTS                     # impact@v10: the three v3 specialists, then their alternate-model lanes
+        if self.investigator_prompt == INVESTIGATOR_IMPACT_V12_PROMPT:
+            return SPECIALIST_AGENTS              # impact@v12: the three v3 lenses (its coverage units: coverage_forced)
         return (SPECIALIST_AGENTS if self.investigator_prompt in (INVESTIGATOR_IMPACT_V3_PROMPT,
                                                                   INVESTIGATOR_IMPACT_V4_PROMPT) else None)
 
     @property
     def five_lanes(self) -> bool:
-        """investigator.impact@v5: five specialist lanes with the lanes.py budget split and near-duplicate cap."""
-        return self.investigator_prompt == INVESTIGATOR_IMPACT_V5_PROMPT
+        """investigator.impact@v5 (and @v7, which runs the v5 lanes plus alternate-model lanes): specialist lanes with
+        the lanes.py budget split, near-duplicate cap and value-ordered round-robin VERIFY."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V5_PROMPT, INVESTIGATOR_IMPACT_V7_PROMPT)
+
+    @property
+    def cross_model(self) -> bool:
+        """Alternate-model lanes on ModelProfile.alternates.investigator: investigator.impact@v7 (the v5 lanes, then
+        prompts.V7_ALT_LENSES again) and investigator.impact@v10 (the v3 specialists, then the same three lenses again;
+        see cross_v3)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V7_PROMPT, INVESTIGATOR_IMPACT_V10_PROMPT)
+
+    @property
+    def cross_v3(self) -> bool:
+        """investigator.impact@v10: the v3 specialists with the v3 budget split, VERIFY and verifier unchanged, plus
+        their lenses on the alternate investigator model (lanes.py v10 rules, restatement-only cross-lane merge)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V10_PROMPT
+
+    @property
+    def coverage_forced(self) -> bool:
+        """investigator.impact@v12: the v3 lenses with a depth floor, then one coverage investigator per unit of the
+        deterministic changed-file partition (reviewer.pipeline.deepcov); primary investigator model only. Its depth
+        floor replaces the v2 exploration floor (exploration_floor is False)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V12_PROMPT
+
+    @property
+    def whole_change(self) -> bool:
+        """investigator.impact@v16: one whole-change reviewer (reviewer.pipeline.whole); primary investigator model
+        only; no exploration floor, lanes or units (specialists stays None). investigator.impact@v19 runs it as one agentic
+        read-only session (agentic_review), and so does investigator.impact@v20."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V16_PROMPT, *AGENTIC_PROMPTS)
+
+    @property
+    def agentic_review(self) -> bool:
+        """investigator.impact@v19: v16's reviewer as one agentic read-only claude-cli session and the JUDGE
+        concrete-behaviour rule (reviewer.pipeline.agentic); investigator.impact@v20 too (broad_agentic)."""
+        return self.investigator_prompt in AGENTIC_PROMPTS
+
+    @property
+    def broad_agentic(self) -> bool:
+        """investigator.impact@v20: v19 with the reviewer's task replaced by v16's broad task plus the confirm rule
+        (prompts.V20_WHOLE_TASK, agentic.BROAD_RULE); everything else is v19's. investigator.impact@v21's agentic pass
+        runs that task too, and so does investigator.impact@v24 (v21's policy exactly) and @v26 (v24's)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V20_PROMPT, INVESTIGATOR_IMPACT_V21_PROMPT,
+                                            INVESTIGATOR_IMPACT_V24_PROMPT, INVESTIGATOR_IMPACT_V26_PROMPT)
+
+    @property
+    def dual_pass(self) -> bool:
+        """investigator.impact@v21 (reviewer.pipeline.dual): v16's whole pass and v20's agentic pass, a claim-aware
+        union, an agentic verifier per candidate and v20's JUDGE; investigator.impact@v24 too (seeded), and @v26 (v24's policy)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V21_PROMPT, INVESTIGATOR_IMPACT_V24_PROMPT,
+                                            INVESTIGATOR_IMPACT_V26_PROMPT)
+
+    @property
+    def seeded(self) -> bool:
+        """investigator.impact@v24 (reviewer.pipeline.seeded): v21 exactly, with INVESTIGATE replaced by a host-supplied seed
+        (one plain baseline answer's comments) and no investigator model call; investigator.impact@v26 too (its seed ingest)."""
+        return self.investigator_prompt in (INVESTIGATOR_IMPACT_V24_PROMPT, INVESTIGATOR_IMPACT_V26_PROMPT)
+
+    @property
+    def consensus(self) -> bool:
+        """investigator.impact@v26 (reviewer.pipeline.consensus): v24's seed ingest kept to the candidates a plain witness answer
+        supports (k6-plain-witness@1), published verbatim; no VERIFY or JUDGE model call (the run makes none)."""
+        return self.investigator_prompt == INVESTIGATOR_IMPACT_V26_PROMPT
 
     @property
     def diff_sweep(self) -> bool:
@@ -204,6 +279,7 @@ class ChainEnd:
     stop: tuple | None = None              # (incomplete reason, TypedError) from a gate during execution
     hops: int = 0
     tool_calls: int = 0
+    forced_final: bool = False             # impact@v10 alternate lane: a hop was sent as its final-answer turn
 
 
 class Chain:
@@ -377,6 +453,11 @@ class Chain:
             if self.dispositions is not None:
                 state["dispositionCallsRemaining"] = self.disposition_left()
             req = build(hop, state)
+            forced = False
+            if not state["lastTurn"] and eng.final_answer_due(self.stage, self.role, self.agent, req):
+                state["lastTurn"] = forced = True       # impact@v10 alternate lane: its final-answer reserve
+                req = build(hop, state)
+                end.forced_final = True
             ordinal = eng.next_ordinal(self.stage, self.role, self.agent)
             out, err, attempts = eng.model_call(self.stage, self.role, self.agent, ordinal, req)
             end.call_ids += [a.call_id for a in attempts if a.call_id]
@@ -390,7 +471,7 @@ class Chain:
                 end.tool_calls = self.requested_calls
                 return end
             requests = out["contextRequests"]
-            if hop == self.turns - 1:
+            if hop == self.turns - 1 or forced:
                 end.exhausted, end.unread = "turns", requests
                 end.tool_calls = self.requested_calls
                 return end
