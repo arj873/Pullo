@@ -14,7 +14,8 @@ htmlcov/
 .agents/
 .codex/
 .aws/
-.claude/
+.claude/*
+!.claude/skills/
 orchestration/state/
 orchestration/operator/
 operator/

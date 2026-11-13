@@ -494,13 +494,15 @@ class Gateway:
         refusal = self._guard_check(c)
         if refusal is not None:      # D4: nothing reserved, nothing sent; recorded as a zero-cost refused call
             return self._finish_error(c, refusal, 0, 0, None, refused=True)
-        # A subscription (Codex CLI) review call is bounded by this run's Plan ceiling at its API-equivalent
-        # reservation, the adapter's per-run call cap and the per-call timeout, and recorded in the trace and runtime
-        # ledger. It never enters the SpendBook: that book is the paid-API aggregate (the $50 OpenRouter trial).
-        subscription = (self.family == "review" and req["provider"] == "openai" and
+        # A subscription review call (Codex CLI, or an SDK connector such as claude-sdk/codex-sdk on either provider
+        # slot) is bounded by this run's Plan ceiling at its API-equivalent reservation, the adapter's per-run call cap
+        # and the per-call timeout, and recorded in the trace and runtime ledger. It never enters the SpendBook: that
+        # book is the paid-API aggregate (the $50 OpenRouter trial). The adapter, chosen by the host, declares it.
+        subscription = (self.family == "review" and
                         getattr(provider, "billing_kind", None) == "subscription-consumption")
         if subscription:
             self._subscription_keys.add(rkey)
+            c["subscription"] = True
         refuse = self._reserve(rkey, stage, amount)
         if refuse is not None:
             return self._finish_error(c, refuse, amount, 0, None, refused=True)
@@ -624,10 +626,10 @@ class Gateway:
         return self._settled(c, book_err, self._finish_ok(c, resp, amount, usd, over, basis))
 
     # -- shared event/cost bookkeeping
-    def _basis(self, provider, settled_basis, *, known_none=False):
+    def _basis(self, provider, settled_basis, *, known_none=False, subscription=False):
         if provider == "synthetic":
             return "synthetic"
-        if provider == "openai" and not known_none:
+        if (provider == "openai" or subscription) and not known_none:
             return "estimated"          # subscription CLI usage priced at API-equivalent list rates: never a bill
         return settled_basis or ("measured" if known_none else "estimated")
 
@@ -679,7 +681,8 @@ class Gateway:
         info = c["info"]
         info.outcome = resp["status"]
         if replay_cost is None:
-            cost = self._cost_doc(c, amount, usd, resp["usage"], self._basis(c["req"]["provider"], basis), over)
+            cost = self._cost_doc(c, amount, usd, resp["usage"], self._basis(c["req"]["provider"], basis,
+                                                                         subscription=c.get("subscription", False)), over)
             self._account(c, usd, over, "live")
         else:
             cost = replay_cost
@@ -698,7 +701,7 @@ class Gateway:
             nulls = {k: None for k in ("uncachedInputTokens", "cachedInputTokens", "cacheWriteInputTokens",
                                        "outputTokens", "reasoningTokens")}
             basis = self._basis(c["req"]["provider"], "estimated" if (retained or billed) else None,
-                                known_none=not retained and not billed)
+                                known_none=not retained and not billed, subscription=c.get("subscription", False))
             # a billed wrong-model answer keeps its usage: it is the only input to recompute that charge
             cost = self._cost_doc(c, amount, usd, usage if billed else nulls, basis, over)
             self._account(c, usd, over, "live")

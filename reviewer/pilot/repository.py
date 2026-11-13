@@ -22,8 +22,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from reviewer import historical
+from reviewer import connectors, historical
 from reviewer.config import ConfigError, EffectiveConfig, resolve_config
+from reviewer.connectors import ConnectorUnavailable
 from reviewer.contracts import require
 from reviewer.contracts.canonical import canonical_json, digest, idempotency_key_eval, run_id, sha256_hex
 from reviewer.gateway import AuthorizationError, DisabledProvider, SpendBook, trusted_authorization
@@ -40,7 +41,8 @@ from reviewer.runtime.turn_canary import Refused, open_state
 
 from .launcher import QUALITY, REPO, gateway_costs, ledger_costs, load_baseline, utc_now
 from .launcher import PilotError, _Unused, _force_cleanup
-from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, live_arm, live_terra, needs,
+from .providers import (TERRA_STATE_NOTE, ReviewProviders, TerraStateError, check_connector_roles,
+                        connector_state_note, live_arm, live_connector, live_terra, needs, open_connector_state,
                         open_terra_state, plan_providers, scrub_of, worst_case)
 from .profile import RUN_CEILING_USD_MICROS
 from .repository_profile import repository_plan, repository_policy, repository_profile
@@ -80,6 +82,7 @@ class RepositoryOptions:
     retrieval: bool = True
     repeat: int = 0
     config: str | None = None
+    connector: str = connectors.DEFAULT
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,8 @@ def check_options(o: RepositoryOptions) -> None:
             raise RepositoryError(f"{name} is required")
     if type(o.repeat) is not int or not 0 <= o.repeat <= 1000:
         raise RepositoryError("repeat must be 0..1000")
+    if o.connector not in connectors.CHOICES:
+        raise RepositoryError(f"--connector must be one of {', '.join(connectors.CHOICES)}")
     live, replay = o.mode == "live", o.mode == "replay"
     state_args = (o.state_dir, o.env_file, o.baseline_micros, o.book_baseline_micros)
     if live:
@@ -381,7 +386,15 @@ def plan_mode(o: RepositoryOptions, ing: Ingested, *, runner=run_review, cfg=Non
     unmet = ["live: durable book/ledger state, --baseline-micros and in-flight are checked only by --mode live",
              "live: independent pipeline, tools and launcher acceptance, then root's explicit invocation",
              STRICT_REPLAY_ONLY]
-    if needs(profile, "openai"):
+    conn_cls = connectors.get(o.connector)
+    if conn_cls is not None:
+        unmet.insert(0, connector_state_note(o.connector))
+        try:
+            check_connector_roles(profile, conn_cls)
+        except TerraStateError as e:
+            planned = False
+            unmet.insert(0, str(e)[:300])
+    elif needs(profile, "openai"):
         unmet.insert(0, TERRA_STATE_NOTE)
     if worst is not None and worst > ceiling:
         planned = False
@@ -440,9 +453,12 @@ def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader
     out = check_out(o, ing)
     profile, plan, policy = _profile_parts(o, cfg)
     handle = trusted_authorization(o.auth, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO])
+    conn_cls = connectors.get(o.connector)
     try:
-        arm = live_arm(profile)
-        if arm == "terra":       # its own Terra state dir; the OpenRouter trial state is never opened or written
+        if conn_cls is not None:  # an SDK connector arm: its own subscription state dir, no key, no trial state
+            check_connector_roles(profile, conn_cls)
+            book, ledger = open_connector_state(o.state_dir, handle, o.baseline_micros)
+        elif live_arm(profile) == "terra":  # its own Terra state dir; the OpenRouter trial state is never opened or written
             book, ledger = open_terra_state(o.state_dir, handle, o.baseline_micros)
         else:
             if not o.env_file:
@@ -458,16 +474,27 @@ def live_mode(o: RepositoryOptions, ing: Ingested, *, transport=None, key_loader
         RecordBackend(handle, book, _providers(DisabledProvider("anthropic")), utc_now).preflight(profile, plan["budget"])
     except PipelineError as e:
         raise RepositoryError(f"authorization does not cover this profile/Plan: {str(e)[:300]}") from None
-    terra = live_terra(profile, ledger, provider_scope(evr, ing, o.repeat))
+    scope = provider_scope(evr, ing, o.repeat)
+    if conn_cls is not None:      # loads the SDK and checks billing env before any output exists
+        try:
+            conn_providers = live_connector(conn_cls, ledger, scope)
+        except ConnectorUnavailable as e:
+            raise RepositoryError(str(e)[:300]) from None
+        terra = None
+    else:
+        terra = live_terra(profile, ledger, scope)
     runs = make_out(out)
     key = None
     try:
-        router = DisabledProvider("anthropic")
-        if needs(profile, "anthropic"):
-            key = key_loader(o.env_file, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO / "reviewer"])
-            router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
-                                        transport=transport, run_scope=provider_scope(evr, ing, o.repeat))
-        provider = ReviewProviders(router, terra)
+        if conn_cls is not None:
+            provider = conn_providers
+        else:
+            router = DisabledProvider("anthropic")
+            if needs(profile, "anthropic"):
+                key = key_loader(o.env_file, forbidden_roots=[ing.case_dir.parent, ing.store, out, REPO / "reviewer"])
+                router = OpenRouterProvider(enabled=True, key=key, authorization=handle, book=book, ledger=ledger,
+                                            transport=transport, run_scope=scope)
+            provider = ReviewProviders(router, terra)
         backend = RecordBackend(handle, book, provider.mapping, utc_now)
         spec = build_spec(o, ing, backend, runs, profile, plan, policy)
         before = ledger.totals()
@@ -556,7 +583,17 @@ def run_repository(o: RepositoryOptions, *, transport=None, key_loader=load_open
     else:
         rep = replay_mode(o, ing, runner=runner, cfg=cfg)
     rep["reviewModels"] = cfg.report()
+    rep["connector"] = connector_doc(o)
     return rep
+
+
+def connector_doc(o: RepositoryOptions) -> dict:
+    """Disclosure only (not part of the run identity): which adapter family answered and how it bills."""
+    cls = connectors.get(o.connector)
+    if cls is None:
+        return {"id": connectors.DEFAULT, "billing": "openrouter paid key (anthropic); codex CLI subscription (openai)"}
+    return {"id": cls.connector_id, "slot": cls.name, "billing": "subscription-consumption (API-equivalent estimate)",
+            "isolation": cls.isolation_version}
 
 
 def render(rep: dict) -> str:
@@ -615,6 +652,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--retrieval", choices=("on", "off"), default="on", help="Turn retrieval roles (ablation switch)")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
+    ap.add_argument("--connector", choices=connectors.CHOICES, default=connectors.DEFAULT,
+                    help="who answers model calls: openrouter (default, paid key), claude-sdk (your Claude "
+                         "subscription via the Claude Agent SDK) or codex-sdk (your ChatGPT subscription via the Codex SDK)")
     ap.add_argument("--json", action="store_true")
     return ap
 
@@ -627,7 +667,7 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                           out_dir=a.out, auth=a.auth, state_dir=a.state_dir, env_file=a.env,
                           baseline_micros=a.baseline_micros, book_baseline_micros=a.book_baseline_micros,
                           confirm_live=a.confirm_live, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
-                          retrieval=a.retrieval == "on", repeat=a.repeat, config=a.config)
+                          retrieval=a.retrieval == "on", repeat=a.repeat, config=a.config, connector=a.connector)
     try:
         rep = run_repository(o, transport=transport, key_loader=key_loader, runner=runner)
     except (RepositoryError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:

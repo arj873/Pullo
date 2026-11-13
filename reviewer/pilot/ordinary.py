@@ -204,6 +204,7 @@ def run_ordinary(o: R.RepositoryOptions, *, transport=None, key_loader=load_open
     else:
         rep = R.replay_mode(o, ing, runner=runner, cfg=cfg)
     rep["reviewModels"] = cfg.report()
+    rep["connector"] = R.connector_doc(o)
     rep["origin"] = origin = origin_doc(ing)
     if o.mode != "plan":
         rep["originPath"] = _write_origin(o.out_dir, origin)
@@ -240,6 +241,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--retrieval", choices=("on", "off"), default="on", help="Turn retrieval roles (ablation switch)")
     ap.add_argument("--repeat", type=int, default=0)
     ap.add_argument("--config", help="review-model config (pullo.toml format); default: Pullo's own pullo.toml")
+    ap.add_argument("--connector", choices=R.connectors.CHOICES, default=R.connectors.DEFAULT,
+                    help="who answers model calls: openrouter (default, paid key), claude-sdk (your Claude "
+                         "subscription via the Claude Agent SDK) or codex-sdk (your ChatGPT subscription via the Codex SDK)")
     ap.add_argument("--json", action="store_true")
     return ap
 
@@ -252,7 +256,8 @@ def main(argv=None, *, transport=None, key_loader=load_openrouter_key, out=sys.s
                             out_dir=a.out, auth=a.auth, state_dir=a.state_dir, env_file=a.env,
                             baseline_micros=a.baseline_micros, book_baseline_micros=a.book_baseline_micros,
                             confirm_live=a.confirm_live, replay_trace=a.replay_trace, trace_digest=a.trace_digest,
-                            retrieval=a.retrieval == "on", repeat=a.repeat, config=a.config)
+                            retrieval=a.retrieval == "on", repeat=a.repeat, config=a.config,
+                            connector=a.connector)
     try:
         rep = run_ordinary(o, transport=transport, key_loader=key_loader, runner=runner)
     except (R.RepositoryError, ConfigError, PilotError, EnvFileError, AuthorizationError, PipelineError) as e:

@@ -79,6 +79,29 @@ The supported IDs are `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5
 
 The historical, repository and synthetic review commands accept `--config /path/to/pullo.toml`. By default they read Pullo's own file, independently of the current directory or reviewed repository. Model selection does not change spending limits or permissions. Keep API keys outside this file.
 
+## SDK connectors (use your own Claude or ChatGPT subscription)
+
+By default, Claude roles go through OpenRouter on the paid key, and GPT Terra roles go through the hardened `codex exec` adapter. With `--connector`, the repository and ordinary review hosts can answer roles through an agent SDK under your own login instead:
+
+| `--connector` | Answers | Install and log in | Isolation (configured, not proven) |
+| :- | :- | :- | :- |
+| `openrouter` (default) | unchanged: `anthropic` via OpenRouter, `openai` via `codex exec` | `.env` key / Codex CLI | `codex-isolated-home@2` for Terra |
+| `claude-sdk` | `anthropic/claude-*` roles, through the Claude Agent SDK (Claude subscription) | `pip install claude-agent-sdk`; run `claude` once and `/login` | `claude-sdk-no-tools@1` |
+| `codex-sdk` | `gpt-*-terra` roles, through the Codex Python SDK (ChatGPT subscription) | `pip install openai-codex`; `codex login` | `codex-sdk-no-tools@1` |
+
+```sh
+python3 -m reviewer.pilot.ordinary --mode live --connector claude-sdk ... --state-dir SUBSCRIPTION_STATE \
+  --baseline-micros 0 --confirm-live
+```
+
+- **All roles must use the connector's provider.** For `codex-sdk`, set every role in `pullo.toml` to a Terra model. Mixed arms are refused.
+- **A connector arm uses its own state directory.** It must be operator-created, hold an empty `subscription-ledger.jsonl`, and not be the OpenRouter trial state. `--env` is not read.
+- **Billing is subscription consumption.** Receipts show an API-equivalent estimate, never a bill, and the paid spend book is not touched. A connector refuses to start if `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or a similar variable is set, because the SDK would bill that key instead.
+- **The model gets no tools.** It gets no tools, MCP, skills, plugins or settings, a single turn, and a fresh empty working directory for each call. The SDK message stream is audited, and any tool or action item discards the output and disables the connector for the run. Unlike `codex-isolated-home@2`, there is no offline isolation proof yet, so treat these as experimental.
+- **Plan and replay are unchanged.** Plan still sends nothing. Replay reads the trace and never loads an SDK.
+
+To add another SDK, ask Claude Code to use the project skill in `.claude/skills/add-sdk-connector/`, or read it yourself. It walks through subclassing `reviewer/connectors/base.py`, registering the connector and testing it with a fake SDK.
+
 ## Run the offline smoke suite
 
 ```sh

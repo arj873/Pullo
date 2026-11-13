@@ -32,8 +32,43 @@ TERRA_STATE_NOTE = ("live: a Terra arm uses --state-dir as its own operator-crea
                     "--env is not read; --baseline-micros is that ledger's committed total (0 for subscription calls)")
 
 
+# An SDK connector arm (claude-sdk, codex-sdk, ...) also keeps its OWN operator-created state dir: a subscription
+# ledger (may start empty) and an unused spend book. Never the OpenRouter trial state.
+CONNECTOR_LEDGER_NAME = "subscription-ledger.jsonl"
+CONNECTOR_BOOK_NAME = "subscription-spend-book.jsonl"
+
+
+def connector_state_note(connector: str) -> str:
+    return (f"live: connector {connector} uses --state-dir as its own operator-created subscription state dir holding "
+            f"{CONNECTOR_LEDGER_NAME} (may start empty) - never the OpenRouter trial state; --env is not read; "
+            "--baseline-micros is that ledger's committed total (0 for subscription calls)")
+
+
 class TerraStateError(ValueError):
     pass
+
+
+def open_connector_state(state_dir, handle, baseline: int) -> tuple:
+    return open_terra_state(state_dir, handle, baseline, ledger_name=CONNECTOR_LEDGER_NAME,
+                            book_name=CONNECTOR_BOOK_NAME)
+
+
+def check_connector_roles(profile, connector_cls) -> None:
+    """Every role must use the provider slot the connector answers (no mixed arms: one subscription ledger per run)."""
+    wrong = sorted(r for r, s in profile["roles"].items() if s["provider"] != connector_cls.name)
+    if wrong:
+        raise TerraStateError(f"connector {connector_cls.connector_id} answers only provider={connector_cls.name} "
+                              f"roles; set {', '.join(wrong)} in pullo.toml to one of "
+                              f"{sorted(connector_cls.models())}")
+
+
+def live_connector(connector_cls, ledger, scope):
+    """-> ReviewProviders with the connector in its slot and the other slot disabled. Constructing the connector loads
+    its SDK and checks billing environment; a ConnectorUnavailable propagates as a refusal before any output."""
+    conn = connector_cls(enabled=True, ledger=ledger, run_scope=scope)
+    router = conn if connector_cls.name == "anthropic" else DisabledProvider("anthropic")
+    terra = conn if connector_cls.name == "openai" else DisabledProvider("openai")
+    return ReviewProviders(router, terra)
 
 
 class ReviewProviders:
@@ -59,32 +94,33 @@ def live_arm(profile) -> str:
     return "terra" if terra else "router"
 
 
-def open_terra_state(state_dir, handle, baseline: int) -> tuple:
-    """-> (SpendBook, RuntimeLedger) of a Terra state dir. Refuses a symlink, a missing dir or ledger file (the operator
-    creates both), a directory holding OpenRouter trial state, and a ledger whose committed total differs from
-    `baseline`."""
+def open_terra_state(state_dir, handle, baseline: int, *, ledger_name: str = TERRA_LEDGER_NAME,
+                     book_name: str = TERRA_BOOK_NAME) -> tuple:
+    """-> (SpendBook, RuntimeLedger) of a Terra (or SDK-connector) subscription state dir. Refuses a symlink, a missing
+    dir or ledger file (the operator creates both), a directory holding OpenRouter trial state, and a ledger whose
+    committed total differs from `baseline`."""
     state = Path(state_dir)
     if os.path.islink(state) or not state.is_dir():
         raise TerraStateError("--state-dir must be an existing directory (not a symlink)")
     if any(os.path.lexists(state / n) for n in TRIAL_STATE_NAMES):
-        raise TerraStateError("--state-dir holds OpenRouter trial state; a Terra arm needs its own Terra state dir")
-    led = state / TERRA_LEDGER_NAME
+        raise TerraStateError("--state-dir holds OpenRouter trial state; a subscription arm needs its own state dir")
+    led = state / ledger_name
     try:
         st = os.lstat(led)
     except OSError:
-        raise TerraStateError(f"Terra state dir lacks the operator-created {TERRA_LEDGER_NAME}") from None
+        raise TerraStateError(f"state dir lacks the operator-created {ledger_name}") from None
     if not stat.S_ISREG(st.st_mode):
-        raise TerraStateError(f"{TERRA_LEDGER_NAME} is not a regular file")
+        raise TerraStateError(f"{ledger_name} is not a regular file")
     ledger = RuntimeLedger(led, TRIAL_TOTAL_USD_MICROS)
     try:
         t = ledger.totals()
     except (ValueError, KeyError, TypeError, OSError):
-        raise TerraStateError("Terra subscription ledger is unreadable") from None
+        raise TerraStateError("subscription ledger is unreadable") from None
     if t["committedUsdMicros"] != baseline:
-        raise TerraStateError(f"Terra ledger committed {t['committedUsdMicros']} != --baseline-micros {baseline}")
-    if os.path.lexists(state / TERRA_BOOK_NAME) and not os.path.isfile(state / TERRA_BOOK_NAME):
-        raise TerraStateError(f"{TERRA_BOOK_NAME} is not a regular file")
-    return SpendBook(handle, state / TERRA_BOOK_NAME), ledger
+        raise TerraStateError(f"subscription ledger committed {t['committedUsdMicros']} != --baseline-micros {baseline}")
+    if os.path.lexists(state / book_name) and not os.path.isfile(state / book_name):
+        raise TerraStateError(f"{book_name} is not a regular file")
+    return SpendBook(handle, state / book_name), ledger
 
 
 def live_terra(profile, ledger, scope, *, factory=CodexTerraProvider):
