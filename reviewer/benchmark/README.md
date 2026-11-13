@@ -123,7 +123,7 @@ The common judge (`allpairs.py`, `score_prompts.py`, `pullo-score.toml`) extract
 The pair cap was 256 until 2026-10-29. Opus 5.5 counts its reasoning tokens against `max_tokens`. In 492 real pair calls the median was 17 output tokens and 7 calls used more than 200. Three calls stopped with `finish_reason` `length` at 255-256 reasoning tokens and produced no JSON. Each became invalid output, and because the campaign is all-or-nothing it had no headline. The cap is now 1024. Sampling and effort stay omitted, and retries stay 0.
 
 - The raise bumps the score profile to `pullo-score@2`. It also changes the config digest and the host policy digest, because `policy_digest` now covers `MAX_OUTPUT` and the profile ref. Traces, canaries and witnesses recorded at 256 (`pullo-score@1`) do not verify under the new pins. That holds even with a tighter 256 config, whose config digest equals the @1 one: the gateway refuses the trace on its profile, and the baseline refuses the receipt on its policy pin. `ScoreHost` refuses a `profile_ref` other than the profile's `id@version` (`profile-ref-mismatch`).
-- The complete-set pair fit (`score_host._fit`) reserves the full 1024 output tokens for every pair. That is 768 more tokens per pair than before. The 4M run and 20M aggregate ceilings are unchanged; the scoring sub-cap was raised from 8M to 16M by the user (2026-10-29).
+- The complete-set pair fit (`score_host._fit`) reserves the full 1024 output tokens for every pair. That is 768 more tokens per pair than before. The 4M run ceiling is unchanged; the scoring sub-cap was raised from 8M to 16M by the user (2026-10-29), then to 30M (2026-10-30), with the scoring-time aggregate ceiling raised by the same +14M from 20M to 34M.
 
 Admission impact, measured on the offline host test's synthetic pairs (12 pairs, invented test price):
 
@@ -133,7 +133,7 @@ Admission impact, measured on the offline host test's synthetic pairs (12 pairs,
 | Adapter worst case | 29,224 micros | 44,592 micros | about 1.5x |
 
 - The 4M run ceiling now admits about 144 synthetic-size pairs. It admitted about 473 before.
-- At the old 8M scoring cap the 1024 cap admitted about 179 pairs in total (about 273 at 256); the 16M cap roughly doubles that headroom, still inside the 20M scoring-time aggregate ceiling.
+- At the old 8M scoring cap the 1024 cap admitted about 179 pairs in total (about 273 at 256); the 16M cap roughly doubled that headroom, still inside the then 20M scoring-time aggregate ceiling (now 30M inside 34M).
 - At the pinned Opus gateway price, the reservation is 6,755 -> 22,120 micros per pair, which is about 180 pairs per run. The adapter worst case does not depend on the profile price.
 - Real campaigns so far peaked at 84 pairs, so they still fit. A larger declared set is refused whole (`does-not-fit`) and is never split.
 
