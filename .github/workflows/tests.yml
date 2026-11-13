@@ -29,6 +29,9 @@ jobs:
 
       - name: Unit tests (default discovery)
         shell: bash
+        # The sandbox tests assert the child sees an empty /tmp, so scratch dirs must not live in /tmp.
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: nice -n 19 python3 -m unittest discover -s tests -t .
 
       - name: Contract export is up to date
