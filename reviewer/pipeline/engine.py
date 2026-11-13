@@ -1675,8 +1675,11 @@ class Engine:
         supported = {r["index"] for r in rows if r["supported"]}
         dropped = [{"index": r["index"], "id": r["seedId"], "reason": "no-witness", "votes": r["votes"]}
                    for r in rows if not r["supported"]]
+        base = None
+        if self.spec.base_side_anchors:          # V27-D (off by default): a deleted file's candidate anchors on the base snapshot
+            base = (lambda p: snaps.head_lines(self.spec.base.root, self.spec.base.manifest, p), self.base_id, self.deleted_base_paths())
         located, gone, _ = seeded.drafts({"items": cands}, lambda p: snaps.head_lines(self.spec.head.root, self.spec.head.manifest, p),
-                                         self.head_id, self.changed_head_paths())
+                                         self.head_id, self.changed_head_paths(), base=base)
         dropped += [{"index": d["index"], "id": cands[d["index"]]["id"], "reason": d["reason"]} for d in gone
                     if d["index"] in supported]
         drafts = []
@@ -2014,6 +2017,16 @@ class Engine:
         if art.get("incomplete") and self.cov is None:
             return None
         return {f["path"] for f in art["payload"]["files"] if f["status"] != "deleted"}
+
+    def deleted_base_paths(self) -> set:
+        """V27-D (base_side_anchors only): the paths this change DELETES - PREPARE 'deleted', present in the pinned base manifest and
+        absent from the head manifest, and not an exact rename (no head path holds the same blob). A rename with edits is a delete +
+        an add in PREPARE's rows and is not told apart."""
+        bm = {e["path"]: e["sha256"] for e in self.spec.base.manifest["entries"]}
+        hm = {e["path"]: e["sha256"] for e in self.spec.head.manifest["entries"]}
+        heads = set(hm.values())
+        return {f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"]
+                if f["status"] == "deleted" and f["path"] in bm and f["path"] not in hm and bm[f["path"]] not in heads}
 
     def _agent_failed(self, err: dict, reason: str | None = None):
         payload = {"hypotheses": [], "agents": [{"agentId": SPECIALIST, "specialist": SPECIALIST,
@@ -2779,18 +2792,22 @@ class Engine:
                                                   + bad[0][:300], stage=stage))
                 return [], [], []
         tools = self.tool_calls()
-        head = self.spec.head
+        head, base = self.spec.head, self.spec.base
+        deleted = self.deleted_base_paths() if self.spec.base_side_anchors else set()   # V27-D: empty when off
         comments, drops, seen = [], [], {}
         for f in findings:
             loc = f["location"]
-            anchor = snaps.anchor_text(head.root, head.manifest, loc["path"], loc["line"], loc["line"])
+            on_base = loc["path"] in deleted                 # V27-D: a deleted file's comment anchors on the base snapshot
+            snap = base if on_base else head
+            anchor = snaps.anchor_text(snap.root, snap.manifest, loc["path"], loc["line"], loc["line"])
             if anchor is None:
                 drops.append({"subjectIds": [f["id"]], "stage": "JUDGE", "reason": "suppressed",
-                              "detail": "anchor lines do not exist in the pinned head file"})
+                              "detail": "anchor lines do not exist in the pinned " + ("base" if on_base else "head") + " file"})
                 continue
             body = cands[f["seedRef"]["index"]]["body"]
             c = judging.build_comment(f, run_id=self.run["id"], head_snapshot_id=self.head_id, anchor=anchor,
-                                      tool_calls=tools, title=consensus.title_of(body), body=body, suggestion=None)
+                                      tool_calls=tools, title=consensus.title_of(body), body=body, suggestion=None,
+                                      base_snapshot_id=self.base_id if on_base else None)
             if c["fingerprint"] in seen:          # identical category, path, anchor text AND claim: same claim twice
                 keeper = seen[c["fingerprint"]]
                 keeper["findingIds"] = (keeper["findingIds"] + [f["id"]])[:50]
@@ -2803,7 +2820,9 @@ class Engine:
         for c in comments:
             bad = judging.revalidate_comment(
                 c, head_snapshot_id=self.head_id, resolver=self.resolver,
-                anchor_ok=lambda p, a, b: snaps.anchor_text(head.root, head.manifest, p, a, b) is not None)
+                anchor_ok=lambda p, a, b: snaps.anchor_text(head.root, head.manifest, p, a, b) is not None,
+                base_snapshot_id=self.base_id if self.spec.base_side_anchors else None,          # V27-D
+                base_anchor_ok=lambda p, a, b: snaps.anchor_text(base.root, base.manifest, p, a, b) is not None)
             if bad:
                 self.set_fatal(stage, typed_error("contract-violation", "comment failed final validation: " + bad[0][:300],
                                                   stage=stage))

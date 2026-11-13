@@ -132,20 +132,25 @@ def digest(doc: dict) -> str:
     return hashlib.sha256(canonical(doc)).hexdigest()
 
 
-def drafts(doc: dict, head_lines, head_id: str, changed) -> tuple[list, list, int]:
+def drafts(doc: dict, head_lines, head_id: str, changed, *, base=None) -> tuple[list, list, int]:
     """DRAFT rule. `head_lines(path)` -> the pinned head file's redacted lines or None; `changed` = the head-side paths this
     change modified (None = unknown: the changed-file requirement is not applied, as Engine._hypotheses). ->
-    ([(item index, HypothesisDraft)], [{"index", "reason"}], number of truncated claims)."""
+    ([(item index, HypothesisDraft)], [{"index", "reason"}], number of truncated claims).
+    V27-D (BASE_SIDE_RULE; `base` is given ONLY when base_side_anchors is on): base = (base_lines, base_id, deleted). An item on a path
+    the change DELETES (`deleted`: base present, head absent, not an exact rename) anchors on the BASE snapshot: its line must exist
+    in the pinned base file (else 'no-such-line'), and its one code citation is that base line (commit = base_id). The draft itself
+    is unchanged in shape (Location has no side: the engine derives it from `deleted`). Every other path is exactly as before."""
     out, dropped, cut = [], [], 0
     for n, it in enumerate(doc["items"]):
         path, line = it["file"], it["line"]
         if not _PATH.fullmatch(path):
             dropped.append({"index": n, "reason": "bad-path"})
             continue
-        if changed is not None and path not in changed:
+        on_base = base is not None and path in base[2]
+        if changed is not None and path not in changed and not on_base:
             dropped.append({"index": n, "reason": "not-a-changed-file"})
             continue
-        lines = head_lines(path)
+        lines = base[0](path) if on_base else head_lines(path)
         if lines is None or line > len(lines):
             dropped.append({"index": n, "reason": "no-such-line"})
             continue
@@ -153,9 +158,12 @@ def drafts(doc: dict, head_lines, head_id: str, changed) -> tuple[list, list, in
         cut += claim != it["body"]
         out.append((n, {"claim": claim, "category": CATEGORY, "suspectedSeverity": SEVERITY, "impact": IMPACT,
                         "location": {"path": path, "line": line},
-                        "evidence": [{"kind": "code", "path": path, "lines": [line, line], "commit": head_id,
+                        "evidence": [{"kind": "code", "path": path, "lines": [line, line], "commit": base[1] if on_base else head_id,
                                       "excerpt": lines[line - 1]}]}))
     return out, dropped, cut
+
+
+BASE_SIDE_RULE = "base-side-anchors@1"   # V27-D: a deleted file's item anchors on the base snapshot (base_side_anchors; identity only when on)
 
 
 def comment_seed_ids(comments: list, findings: list) -> dict:

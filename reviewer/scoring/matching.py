@@ -64,7 +64,8 @@ def _distance(c: tuple[str, int, int], b: dict) -> int | None:
 
 
 def match_comments(comments: list[dict], bugs: list[dict], tolerance: int, *,
-                   head_snapshot_id: str | None = None, run_id: str | None = None) -> MatchResult:
+                   head_snapshot_id: str | None = None, run_id: str | None = None,
+                   base_snapshot_id: str | None = None) -> MatchResult:
     if not isinstance(tolerance, int) or isinstance(tolerance, bool) or not 0 <= tolerance <= 20:
         raise ScoringError("tolerance must be an integer 0..20")
     ids = [c.get("id") for c in comments]
@@ -80,7 +81,9 @@ def match_comments(comments: list[dict], bugs: list[dict], tolerance: int, *,
     bugs_by_id = {b["id"]: b for b in bugs}
 
     def is_foreign(c: dict) -> bool:
-        return ((head_snapshot_id is not None and c["anchor"].get("snapshotId") != head_snapshot_id)
+        a = c["anchor"]                          # V27-D: a side-'base' comment belongs to the run's base snapshot, when one is given
+        want = base_snapshot_id if a.get("side") == "base" and base_snapshot_id is not None else head_snapshot_id
+        return ((head_snapshot_id is not None and a.get("snapshotId") != want)
                 or (run_id is not None and c.get("runId") != run_id))
 
     foreign = {c["id"] for c in scored if is_foreign(c)}

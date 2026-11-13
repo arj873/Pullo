@@ -122,6 +122,7 @@ class BenchmarkOptions:
     live_stage_timing: bool = False   # opt-in: versioned live stage ceilings + host-stop recording (binds the plan)
     impact_version: int | None = None  # investigator impact@vN (None = the profile default, today 2); binds via profile
     seed_candidates: str | None = None  # impact@v24 / @v26 only: the seed document (seeded / consensus SEED_SCHEMA); binds the run identity
+    base_side_anchors: bool = False     # V27-D: impact@v26 only, OFF by default: a deleted file's candidate anchors on the base snapshot
 
 
 @dataclass(frozen=True)
@@ -139,6 +140,7 @@ class BenchIngested:
     hashes: dict                     # proofSha256, admissionDigest, decisionSha256, baselineDigest
     store: Path
     seed: dict | None = None         # impact@v24 / @v26: the checked seed document (seeded.load); None for every other version
+    base_side_anchors: bool = False  # V27-D: impact@v26 only (BenchmarkOptions.base_side_anchors)
 
 
 # ------------------------------------------------------------------ options
@@ -170,6 +172,8 @@ def check_options(o: BenchmarkOptions) -> None:
         raise BenchmarkLaunchError("impact_version 24 needs seed_candidates (its candidate list)")
     if v26 and o.seed_candidates is None:                  # consensus.RULE: v26 never runs without its seed
         raise BenchmarkLaunchError("impact_version 26 needs seed_candidates (its candidate and witness answers)")
+    if o.base_side_anchors is not False and (o.base_side_anchors is not True or not v26):   # V27-D
+        raise BenchmarkLaunchError("base_side_anchors is only for impact_version 26 (a bool, False by default)")
     for name in ("case_url", "cutoff_proof", "admission", "decision", "launch_baseline", "store", "base_import_pins",
                  "head_import_pins", "out_dir"):
         if not isinstance(getattr(o, name), str) or not getattr(o, name):
@@ -522,7 +526,7 @@ def ingest(o: BenchmarkOptions, cfg: EffectiveConfig) -> BenchIngested:
         except seeded.SeedError as e:
             raise BenchmarkLaunchError(f"seed candidates refused: {str(e)[:200]}") from None
     return BenchIngested(o.case_url, case["id"], case, repo, proof, adm, base, head, {"base": bpins, "head": hpins},
-                         changed, hashes, store, seed)
+                         changed, hashes, store, seed, o.base_side_anchors is True)
 
 
 def _zero_request(impact_version) -> bool:
@@ -593,6 +597,8 @@ def config_identity(ing: BenchIngested, profile: dict, plan: dict, policy, retri
         ident["reviewModelsAlternates"] = cfg.models.alternates_doc()
     if ing.seed is not None:                         # impact@v24 / @v26 only => every other identity is unchanged
         ident["seedCandidates"] = _seed_identity(ing.seed)
+    if ing.base_side_anchors:                        # V27-D: only when on => every other identity is unchanged
+        ident["baseSideAnchors"] = seeded.BASE_SIDE_RULE
     if experiment != prompts.EXPERIMENT_BASELINE:    # absent for the baseline => the default identity is unchanged
         ident["experiment"] = {"id": experiment, "tasks": prompts.experiment_task_digests(),
                                "verifierPrompt": profile["roles"]["verifier"]["promptVersion"],
@@ -617,7 +623,7 @@ def build_spec(o: BenchmarkOptions, ing: BenchIngested, backend, runs: Path, pro
                       head=SnapshotInput(ing.head.root, copy.deepcopy(ing.head.manifest)), profile=profile, plan=plan,
                       host=host, backend=backend,
                       imports=RepositoryImports(copy.deepcopy(ing.base.record), copy.deepcopy(ing.head.record)),
-                      seed=copy.deepcopy(ing.seed))
+                      seed=copy.deepcopy(ing.seed), base_side_anchors=ing.base_side_anchors)
 
 
 # ------------------------------------------------------------------ disclosure and output
