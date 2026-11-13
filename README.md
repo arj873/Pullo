@@ -39,7 +39,7 @@ python3 -I ~/.claude/skills/pullo-review/scripts/pullo_review.py review my-branc
 
 - **Targets:** a PR URL, `OWNER/REPO#N`, a GitHub `tree/BRANCH` or `compare/BASE...HEAD` URL, or a local branch.
 - **Output:** `review.md`, `review.json` (all three answers, the votes and the drops) and `diff.patch`, in `~/.cache/pullo-review/<label>-<UTC>/`.
-- **Cost and time:** three `claude -p` calls on your Claude Code subscription, never `ANTHROPIC_API_KEY`. A small diff takes 10–30 s; about 80 KB takes 1–2 minutes; near 1 MB takes up to about 5 minutes.
+- **Cost and time:** three `claude -p` calls on your Claude Code subscription, never `ANTHROPIC_API_KEY`. A few-KB diff takes 7–30 s, about 80 KB about 1.5 minutes, and 0.8–0.9 MB 1.5–5.5 minutes.
 - **Posting:** only on request. `pullo_review.py post <review-dir>` is a dry run. Add `--yes` to post one comment-only review; it never approves or requests changes.
 
 ## Results so far
@@ -124,7 +124,7 @@ Next: HELDOUT-PREP-07 (more Qodo PRs), a ReviewBench batch (187 new repos, with 
 | Vote | Keep an Opus comment when k = 2 of n = 2 witnesses raised the same defect |
 | Matcher | `res2-lexical-1to1@1`: deterministic, same file, line distance ≤ 3 / ≤ 15 / any, word and code-identifier overlap, greedy one-to-one (sha256 `30615796…`) |
 | Prompt | Fixed, about 50 words plus the diff (sha256 `4d63d991…`); no system prompt of ours |
-| Model settings | No tools; no thinking request key (`CLAUDE_CODE_DISABLE_THINKING=1`), though the models may still think adaptively (see reasoning tokens below); CLI default effort; max output 32,000 tokens |
+| Model settings | No tools; no thinking request key (`CLAUDE_CODE_DISABLE_THINKING=1`), though the models may still think adaptively (see reasoning tokens below); CLI default effort (the request carries effort medium on CLI 2.1.322); max output 32,000 tokens |
 | Runtime | Claude Code CLI (the benchmark pins 2.1.322), on the subscription; `gh` for GitHub diffs |
 | Limits | Diff ≤ 1.5 MB (skill) or a 2 MB prompt (benchmark adapter); 1,800 s per call; one repair and one retry per call |
 | Model calls in the vote | 0 (the vote is pure code) |
