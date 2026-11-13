@@ -182,6 +182,8 @@ def config_snapshot_id(spec) -> str:
                 raise PipelineError("invalid-input", "investigator.impact@v26 needs its seed document (seed_candidates, "
                                     f"{consensus.SEED_SCHEMA})")
             extra["impact"]["consensus"] = consensus.identity_doc(spec.seed)
+            if spec.base_side_anchors:           # V27-D: only when on => every flag-off v26 run id is unchanged
+                extra["impact"]["baseSideAnchors"] = seeded.BASE_SIDE_RULE
         if pol.coverage_forced:                  # investigator.impact@v12 only => v1-v10 run ids are unchanged
             extra["impact"]["specialists"] = deepcov.identity_doc(pol, spec.plan["budget"], lim.max_calls,
                                                                   spec.host.comment_cap)

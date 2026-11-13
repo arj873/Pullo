@@ -108,6 +108,7 @@ class ReviewSpec:
     stage_replay: StageReplay | None = None
     fork: ForkFrom | None = None
     seed: dict | None = None         # investigator.impact@v24: the host-checked seed document (reviewer.pipeline.seeded)
+    base_side_anchors: bool = False  # V27-D (impact@v26 only, OFF by default): a deleted file's candidate anchors on the base snapshot
 
 
 @dataclass
