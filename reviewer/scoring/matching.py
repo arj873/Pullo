@@ -18,7 +18,9 @@ Rules
 - Anchor provenance: when the caller names the case's head snapshot (and the run), a scored comment
   anchored to any other snapshot, or belonging to another run, is *foreign*. A foreign comment can
   never match a bug; it is booked as a plain false positive (never a duplicate) and listed in
-  `foreign`, so a base-side or stale comment cannot earn a true positive.
+  `foreign`, so a base-side or stale comment cannot earn a true positive. V27-D: a side-'base' comment is
+  checked against the base snapshot id when the caller names one (and against the head id otherwise); a
+  caller naming only the base id checks side-'base' comments and leaves head-side ones unchecked.
 - Result tuples are canonical (sorted); they do not depend on the order labels or comments arrive in.
 """
 
@@ -64,7 +66,8 @@ def _distance(c: tuple[str, int, int], b: dict) -> int | None:
 
 
 def match_comments(comments: list[dict], bugs: list[dict], tolerance: int, *,
-                   head_snapshot_id: str | None = None, run_id: str | None = None) -> MatchResult:
+                   head_snapshot_id: str | None = None, run_id: str | None = None,
+                   base_snapshot_id: str | None = None) -> MatchResult:
     if not isinstance(tolerance, int) or isinstance(tolerance, bool) or not 0 <= tolerance <= 20:
         raise ScoringError("tolerance must be an integer 0..20")
     ids = [c.get("id") for c in comments]
@@ -80,7 +83,9 @@ def match_comments(comments: list[dict], bugs: list[dict], tolerance: int, *,
     bugs_by_id = {b["id"]: b for b in bugs}
 
     def is_foreign(c: dict) -> bool:
-        return ((head_snapshot_id is not None and c["anchor"].get("snapshotId") != head_snapshot_id)
+        a = c["anchor"]                          # V27-D: a side-'base' comment belongs to the run's base snapshot, when one is given
+        want = base_snapshot_id if a.get("side") == "base" and base_snapshot_id is not None else head_snapshot_id
+        return ((want is not None and a.get("snapshotId") != want)          # gate-v27d I-D1: a base-only caller is checked too
                 or (run_id is not None and c.get("runId") != run_id))
 
     foreign = {c["id"] for c in scored if is_foreign(c)}

@@ -11,6 +11,7 @@ import http.client
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -463,6 +464,16 @@ class ForwarderRoundTrip(unittest.TestCase):
         self.assertEqual((plain.forwarded, plain.facts()["version"]), (1, "claude-loopback-forwarder@3"))
 
 
+def reap_group(p):
+    """Kill a test-spawned process group (start_new_session=True: pgid = the leader's pid) and reap the leader."""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if p.poll() is None:
+        p.wait(timeout=10)
+
+
 class Relay(unittest.TestCase):
     def test_bytes_pass_both_ways_through_the_unix_socket_and_the_cli_keeps_stdio(self):
         with tempfile.TemporaryDirectory() as d:
@@ -490,8 +501,13 @@ class Relay(unittest.TestCase):
                       "        break\n    except OSError:\n        time.sleep(0.05)\ns.sendall(sys.stdin.read().encode())\n"
                       "s.shutdown(socket.SHUT_WR)\nout=b''\nwhile True:\n    b=s.recv(4096)\n    if not b: break\n    out+=b\n"
                       "print(out.decode())" % port)
-            r = subprocess.run([sys.executable, "-I", str(A.RELAY_SCRIPT), str(port), path, "--", sys.executable, "-c", client],
-                               input="ping", capture_output=True, text=True, timeout=30)
+            # Its own session: outside a sandbox's PID namespace the relay's forked listener outlives the CLI, so the cleanup kills
+            # the whole process group (a full suite used to leave one idle claude_relay.py per run).
+            p = subprocess.Popen([sys.executable, "-I", str(A.RELAY_SCRIPT), str(port), path, "--", sys.executable, "-c", client],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+            self.addCleanup(reap_group, p)
+            out, err = p.communicate("ping", timeout=30)
+            r = subprocess.CompletedProcess(p.args, p.returncode, out, err)
             srv.close()
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "ECHO:ping"), r.stderr)
         self.assertEqual(subprocess.run([sys.executable, "-I", str(A.RELAY_SCRIPT), "x"], capture_output=True).returncode, 2)

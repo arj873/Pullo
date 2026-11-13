@@ -75,7 +75,8 @@ def severity_for(f: dict, tool_calls: dict) -> tuple[str, str]:
 
 
 def build_comment(f: dict, *, run_id: str, head_snapshot_id: str, anchor: str, tool_calls: dict, title: str,
-                  body: str, suggestion: str | None) -> dict:
+                  body: str, suggestion: str | None, base_snapshot_id: str | None = None) -> dict:
+    """V27-D: `base_snapshot_id` (base_side_anchors, a deleted file only) anchors the comment on the base snapshot, side 'base'."""
     sev, ceiling = severity_for(f, tool_calls)
     loc = f["location"]
     fp = comment_fingerprint(f["category"], loc["path"], anchor, f["claim"])
@@ -84,7 +85,8 @@ def build_comment(f: dict, *, run_id: str, head_snapshot_id: str, anchor: str, t
          "evidenceStrength": evidence_strength(f["evidence"], tool_calls, f["verification"]["evidence"]),
          "category": f["category"],
          "anchor": {"path": loc["path"], "startLine": loc["line"], "endLine": loc.get("endLine", loc["line"]),
-                    "snapshotId": head_snapshot_id},
+                    "snapshotId": head_snapshot_id if base_snapshot_id is None else base_snapshot_id,
+                    **({} if base_snapshot_id is None else {"side": "base"})},
          "title": title[:200], "body": body[:4000],
          "evidence": (f["evidence"] + f["verification"]["evidence"])[:50],
          "qualityScore": None, "fingerprint": fp, "state": "draft"}
@@ -104,14 +106,21 @@ def disabled_by_config(f: dict) -> bool:
     return f["category"] in DISABLED_BY_DEFAULT
 
 
-def revalidate_comment(c: dict, *, head_snapshot_id: str, resolver, anchor_ok) -> list[str]:
+def revalidate_comment(c: dict, *, head_snapshot_id: str, resolver, anchor_ok, base_snapshot_id: str | None = None,
+                       base_anchor_ok=None) -> list[str]:
     """Final checks on a Comment: contract, head anchor, anchor lines exist in the pinned head file, every code
-    evidence still resolves against the two pinned snapshots, draft state."""
+    evidence still resolves against the two pinned snapshots, draft state. V27-D: a side-'base' comment is admitted only with
+    `base_snapshot_id` (base_side_anchors on), anchored on exactly that snapshot, its lines in the pinned base file."""
     problems = [str(i) for i in validate("Comment", c)]
     if c["state"] != "draft":
         problems.append("comment is not a draft")
     a = c["anchor"]
-    if a["snapshotId"] != head_snapshot_id:
+    if a.get("side") == "base":
+        if base_snapshot_id is None or a["snapshotId"] != base_snapshot_id:
+            problems.append("a base-side comment needs base_side_anchors and the base snapshot")
+        elif not base_anchor_ok(a["path"], a["startLine"], a["endLine"]):
+            problems.append("anchor lines do not exist in the pinned base file")
+    elif a["snapshotId"] != head_snapshot_id:
         problems.append("comment is not anchored to the head snapshot")
     elif not anchor_ok(a["path"], a["startLine"], a["endLine"]):
         problems.append("anchor lines do not exist in the pinned head file")

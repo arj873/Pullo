@@ -295,8 +295,23 @@ def seed_input_minus_consensus(v):
     return v
 
 
+# V27-D (declared for gate acceptance, NOT self-approved): the optional Comment.anchor "side" (Enum "base": a DELETED file's line,
+# anchored on the base snapshot; BenchmarkOptions.base_side_anchors, impact@v26 only, off by default). Exactly this is subtracted
+# below before the legacy pins are compared; the new Comment definition is pinned on its own (V27D_COMMENT_DIGEST).
+V27D_COMMENT_DIGEST = "sha256:f555d32102457f89391abcf6dc1e99a8984c65f536ddc376968293dd02ff4bb4"
+
+
+def minus_v27d(name, d):
+    d = copy.deepcopy(d)
+    if name == "Comment":
+        a = d["properties"]["anchor"]
+        assert a["properties"]["side"] == {"enum": ["base"]} and "side" not in a["required"]
+        del a["properties"]["side"]
+    return d
+
+
 def minus_live(name, d):
-    d = minus_ccfilter(name, minus_consensus(name, d))
+    d = minus_ccfilter(name, minus_consensus(name, minus_v27d(name, d)))   # + V27-D
     if name in OPENCODE_DEFS:
         d = minus_opencode(d)
     return (budget_minus_live(d) if name == "Budget" else stagepayload_minus_live(d) if name == "StagePayload"
@@ -430,7 +445,9 @@ class Compatibility(Base):
         changed = sorted(n for n, want in BASELINE_DEF_DIGESTS.items() if dig(REGISTRY[n].to_json()) != want)
         self.assertEqual(changed, sorted((*self.CHANGED_LEGACY_DEFS, "Budget", "ModelProfile", *CCFILTER_DEFS,   # + TOURNAMENT-V7, CCFILTER-1
                                           "StagePayload",     # + LIVE-DEADLINE-04 Budget, SPECIALISTS-01 merges
-                                          "ModelRequest", "SpendAuthorization")))   # + OPENCODE-FREE-PROVIDER
+                                          "ModelRequest", "SpendAuthorization",     # + OPENCODE-FREE-PROVIDER
+                                          "Comment")))        # + V27-D
+        self.assertEqual(dig(REGISTRY["Comment"].to_json()), V27D_COMMENT_DIGEST)             # V27-D: the new Comment, pinned on its own
 
     def test_live_stage_budget_and_host_stop_shapes_are_pinned_independently(self):
         self.assertEqual(dig(REGISTRY["Budget"].to_json()), LIVE_BUDGET_DIGEST)

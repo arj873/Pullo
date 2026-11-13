@@ -927,7 +927,8 @@ Comment = define("Comment", Obj(
               "severity": Severity, "proposedSeverity": Severity, "severityCeiling": Severity,
               "evidenceStrength": Strength, "category": Category,
               "anchor": Obj(required={"path": RelPath(), "startLine": Line, "endLine": Line,
-                                      "snapshotId": SnapshotId}),
+                                      "snapshotId": SnapshotId},
+                            optional={"side": Enum("base")}),          # V27-D: a deleted file's line (base_side_anchors only)
               "title": Str(min_len=1, max_len=200), "body": Str(min_len=1, max_len=4000),
               "evidence": Arr(Evidence, min_items=1, max_items=50),
               "qualityScore": Nullable(Num(0, 1)), "fingerprint": Fingerprint,
