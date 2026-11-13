@@ -16,6 +16,60 @@ The recommended path is to do steps 1 to 4 (your own marketplace) now and step 6
 
 ---
 
+## Fastest path: let Claude do all of it
+
+You don't have to follow the steps below by hand. Claude Code can write the files, validate and test them, open the PR, and then use your Chrome browser to fill in Anthropic's directory submission form. You only step in for logins, the license choice and the final **Submit** click.
+
+### One-time setup (about 2 minutes)
+
+1. Install the **Claude in Chrome** extension (version 1.0.36 or later): https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn
+2. In Chrome, sign in to **claude.ai** with the same account and organization that Claude Code uses. Run `/status` in Claude Code to check which one that is. Submitting to the directory needs a paid plan (Pro, Max, Ultra, or a Team/Enterprise Owner).
+3. Sign Claude Code in with `/login`. Chrome integration stays off when Claude Code uses an API key.
+4. From your Pullo checkout, start Claude Code with the browser connected:
+   ```sh
+   cd Pullo && claude --chrome
+   ```
+   Run `/chrome` and confirm that it shows **Status: Enabled** and **Extension: Installed**. If it doesn't, choose "Reconnect extension" or restart Chrome once.
+
+### Paste this prompt into Claude Code
+
+```text
+Read docs/claude-plugin.md and do everything in it for this repo, end to end.
+
+Part A, in the terminal:
+1. Create a branch, then add .claude-plugin/plugin.json, .claude-plugin/marketplace.json,
+   skills/smoke/SKILL.md and skills/review-pr/SKILL.md exactly as step 1 of the guide shows.
+2. Ask me which license to use (suggest MIT or Apache-2.0). Add the LICENSE file and the
+   "license" field to plugin.json, and update the License line in README.md to match.
+3. Run `claude plugin validate --strict --profile directory .` and fix everything until it passes.
+   If the only remaining problem is a missing icon, tell me and keep going.
+4. Test it: `claude --plugin-dir .` is interactive, so instead run
+   `claude plugin marketplace add .`, `claude plugin install pullo@pullo-marketplace`,
+   `claude plugin details pullo`, and check that the skills smoke and review-pr are listed.
+   Then run the smoke suite the way skills/smoke/SKILL.md describes, and clean up with
+   `claude plugin marketplace remove pullo-marketplace`.
+5. Add the install lines from step 4 of the guide to README.md, commit, push and open a PR.
+   Show me the PR link. Once I merge it, the plugin is live on our own marketplace.
+
+Part B, in Chrome (use the Claude in Chrome tools):
+6. Open https://claude.ai/directory/manage in a new tab. If you hit a login page or a CAPTCHA,
+   stop and let me handle it.
+7. Start a new plugin submission. Point it at the GitHub repo https://github.com/arj873/Pullo
+   (main branch, plugin at the repo root), and fill in every field from
+   .claude-plugin/plugin.json and README.md. Upload .claude-plugin/icon.png if it exists.
+   If the portal asks for something you can't get from the repo (support email, privacy
+   policy URL, screenshots), ask me. Don't make anything up.
+8. If the portal's own validation reports problems, fix them in the repo, push, and retry.
+9. STOP before the final Submit or Publish button. Show me a summary of every field you
+   filled in and wait for me to say "submit". Never click Submit without that.
+```
+
+Claude asks for permission before acting on each new site. Choose "allow for this site" on `claude.ai` and `github.com` so it can work without interruptions. The portal sends the submission to Anthropic for review and a safety scan, and it can take a while to go live. Claude will tell you what status the portal shows.
+
+If anything in the portal looks different from what the prompt expects, Claude should pause and ask. You can also say "take a screenshot" at any point to see what it sees.
+
+---
+
 ## 1. Add the plugin files
 
 The plugin root is the **repo root**, so `${CLAUDE_PLUGIN_ROOT}` contains the `reviewer/` package and skills can run `python3 -m reviewer ...` with no install step. That works because Pullo uses only the standard library.
