@@ -1,63 +1,168 @@
 # Pullo
 
-Read-only AI code review with independent verification. Pullo investigates a change, asks a separate pass to challenge each finding, and produces local review comments with pinned evidence. Authors decide which changes to make.
+Pullo is a read-only AI code reviewer. It reviews a pull request and returns comments: each names a file and a line and explains a concrete problem. Authors decide what to change. Pullo never pushes, posts or runs code from the reviewed repository unless you explicitly ask it to post.
 
-**Status: pre-alpha.** Review quality has not been measured. There is no precision/recall figure, no competitive-quality claim and no cost-per-review claim (including any mid-sized-review price target). Treat everything below as mechanics, not capability.
+**Status: pre-alpha, measured offline.** The current method (v26) matched CodeRabbit and beat Greptile on a sealed, preregistered batch of 10 benchmark PRs (table below). That is one small batch, scored by our own judge, against historical comparator reviews. It is not a vendor leaderboard result.
 
-This repository state is a **checkpoint for review, not a release**. Historical evidence: the earlier public checkpoint `c2b8ef758cecfe92984f963c929d0fb35cd6c46e` had a default test suite that exited successfully, with explicit optional skips and expected-failure repros (see Tests). Those counts describe that checkpoint, not a tree that adds the offline benchmark scorer.
+The Python package is named `reviewer`; the product name is Pullo. The package is stdlib-only (Python 3.14).
 
-The Python package is named `reviewer`; the product name is Pullo. Everything is stdlib-only (tested on Python 3.14).
+**License:** none chosen yet. Until one is added, all rights are reserved.
 
-**License:** none chosen yet. Until one is added, all rights are reserved; this checkpoint is not licensed open source.
+## How it reviews (v26)
 
-## What exists
+1. **One Opus review.** Pullo gives Claude Opus 5.5 a fixed prompt and the PR diff, and asks for a JSON list of `{file, line, body}` problems.
+2. **Two Sonnet reviews.** Claude Sonnet 5.5 gets the same prompt and diff twice, as two independent "witnesses".
+3. **The vote.** An Opus comment is kept only when **both** witnesses raised the same defect. A deterministic matcher compares same file, nearby line, and overlapping words and code identifiers, one-to-one per witness.
+4. **The location check.** Kept comments on files the PR doesn't change, or on lines that don't exist, are dropped.
+5. **Publish.** Each kept comment is published in Opus's words, unedited. The vote makes no extra model call.
 
-- Typed contracts, a canonical-JSON/digest layer, a model gateway with a trace and strict replay, read-only repository tools, a staged pipeline (investigate, verify, judge) and local review output. Citation provenance checks require complete logged excerpts rendered at an eligible hop of the same retrieval chain; verifier citation templates use references the host can materialize. These controls were hardened in [PR #10](https://github.com/arj873/Pullo/pull/10) and [PR #13](https://github.com/arj873/Pullo/pull/13).
-- Read-only importers that pin a historical commit pair or a repository head/base by object ID. Reviewed code is data: nothing from a reviewed repository is executed, and nothing is posted upstream.
-- Bounded live trials through trusted-host launchers (`reviewer.runtime`, `reviewer.pilot`) against Anthropic Sonnet via OpenRouter, with a hard spend cap, an exact model allowlist, no retries and no fallback. These need a key and a trusted host; they are not run by anything below, and no key is bundled.
-- An experimental **offline benchmark scorer** (`reviewer.benchmark`) that counts and pools externally supplied judgments over a pinned source, with a runnable invented-data recipe. See [Offline benchmark scorer](#offline-benchmark-scorer-experimental). It has no live producer and no benchmark score is claimed.
+The vote is what raises precision: plain Opus finds most issues, but it also raises many false alarms, and two independent reviews rarely invent the same false alarm. See [HOW-IT-WORKS.md](HOW-IT-WORKS.md) for the full flow, and how it is evaluated.
 
-## What has actually been observed
+## Review a PR
 
-- Synthetic smoke suite: six scripted cases record and strictly replay offline (19/19 replayed calls, zero live calls, zero spend). This checks mechanics only.
-- First repository-backed trial (a real pinned public pull request, one bounded Sonnet run): it completed and replayed identically, with no hypotheses and no comments. An independent read found no concrete defect in what the model was shown. That is not a clean-repository claim and not a recall measurement.
-- First synthetic positive trial (a planted clock-unit bug): the investigator found the intended hypothesis, but invalid verifier evidence identifiers were refused. The run was partial, with one dropped hypothesis and no finding or comment; strict replay was identical.
-- A subsequent bounded Sonnet positive control on the planted clock-unit bug completed all stages: one hypothesis, one verification, one finding and one local comment, with no drops. Four model calls and nine tool calls were reproduced by strict offline replay, with no new model calls or spend during replay. Independent adjudication accepted the trigger, impact, location and excerpts. This establishes full-chain mechanics on one synthetic case; it does not measure real-review quality, model-family independence or cost per review.
+With [Claude Code](https://claude.com/claude-code) installed and `gh` logged in:
 
-## Known open limits
+```sh
+# one-time: install the skill and its subagent
+cp -r integrations/claude-code/skills/pullo-review ~/.claude/skills/
+cp integrations/claude-code/agents/pullo-reviewer.md ~/.claude/agents/
+```
 
-- General live fork and stage-replay run-mode binding are not implemented. There is no CLI resume of an interrupted evaluation.
-- Preventive isolation for the second (Terra-tier) model path is not done; that path is not claimed to work.
-- Retrieval quality, model-vs-model comparison and the benchmark pipeline are unmeasured. The benchmark package has no live producer, no paid scoring, no historical-eligibility proof from its CLI and no quality or competitive claim.
-- The hosted public suite at the earlier checkpoint passed, but its 30 skips and 22 expected failures left meaningful gates open (see Tests). The benchmark package adds two native-scorer expected failures; its own counts are reconciled from hosted CI, not stated here.
-- Source docstrings still mention private project-coordination documents that are not in this repository.
+Then, in Claude Code, ask for a review with a link: `/pullo-review https://github.com/OWNER/REPO/pull/123`. A subagent takes the link, runs the review, and returns the comments. Several links get one subagent each, in parallel.
 
-## Impact mode (repository reviews)
+Or run the script directly:
 
-With retrieval on, the repository pilot reviews in impact mode by default (`investigator.impact@v2` and `verifier.impact@v1`; `impact_version=1` selects the earlier `investigator.impact@v1`). `impact_version=3` selects `investigator.impact@v3`. It is explicit only and stays off by default until it has been measured.
+```sh
+python3 -I ~/.claude/skills/pullo-review/scripts/pullo_review.py review https://github.com/OWNER/REPO/pull/123
+python3 -I ~/.claude/skills/pullo-review/scripts/pullo_review.py review my-branch --repo . --base main
+```
 
-In v3, INVESTIGATE runs three specialist investigators one after another, always in the order `contracts`, `logic`, `safety`. Each is a v2 investigator with the same prefetched context and the v2 exploration floor. Its task is the v2 task plus one host-written lens paragraph: contracts and dependents; logic and edge cases inside the changed code; or failure paths and safety (error handling, resource, lock and transaction lifecycle, concurrency, security, data integrity).
+- **Targets:** a PR URL, `OWNER/REPO#N`, a GitHub `tree/BRANCH` or `compare/BASE...HEAD` URL, or a local branch.
+- **Output:** `review.md`, `review.json` (all three answers, the votes and the drops) and `diff.patch`, in `~/.cache/pullo-review/<label>-<UTC>/`.
+- **Cost and time:** three `claude -p` calls on your Claude Code subscription, never `ANTHROPIC_API_KEY`. A small PR takes about 10 s.
+- **Posting:** only on request. `pullo_review.py post <review-dir>` is a dry run. Add `--yes` to post one comment-only review; it never approves or requests changes.
 
-The three share the budget of one v2 investigator through cumulative ceilings, and unused room rolls forward:
-- Tool calls: 20, 40 and 60 calls (the 60-call per-agent pool).
-- Spend: $0.93, $1.87 and $2.80 (the investigation share). The check runs before each call, so one call can end above the ceiling.
-- Time: 100, 200 and 300 seconds of the live INVESTIGATE ceiling. This is a recorded `stage-deadline` gate stop. A stopped specialist falls back to its floor draft when it has one.
+## Results so far
 
-Per-agent caps still apply to each specialist. The run-wide tool cap (160), the run ceiling and the stage deadlines are unchanged.
+Held-out batches: each one is selected and sealed before the Pullo version runs, the version's rule is preregistered (a write-once file pinned by sha256), and it runs once. F1 is micro-averaged over each batch's core gold issues, scored by a common judge (Opus 5.5, bench.extract / dedup / pair).
 
-Before VERIFY, a later specialist's hypothesis is merged into the first kept hypothesis of an earlier specialist when both have the same head path and category and their start lines are at most 3 apart. Merges are kept in the INVESTIGATE `merges` list, which load re-derives and checks. VERIFY takes the kept hypotheses round-robin across the specialists and verifies at most 20; the rest are dropped as `over-cap`. When a kept hypothesis yields no finding, its first merged duplicate is verified instead, within the same cap. Other duplicates are dropped as `merged`.
+| Batch | PRs | Pullo version | Pullo | CodeRabbit | Greptile | Cubic |
+|---|---:|---|---:|---:|---:|---:|
+| HELDOUT-PREP-02 (Martian set) | 10 | v13 (staged pipeline) | 0.386 | 0.581 | 0.489 | 0.821 |
+| HELDOUT-PREP-03 (Martian set) | 7 | v16 (staged pipeline) | 0.350 | 0.480 | 0.535 | 0.615 |
+| HELDOUT-PREP-04 (Qodo set) | 10 | v21 (staged pipeline) | 0.698 | 0.577 | 0.735 | n/a |
+| HELDOUT-PREP-05 (Qodo set) | 10 | v21 (staged pipeline) | 0.523 | 0.493 | 0.538 | n/a |
+| **HELDOUT-PREP-06 (Qodo set)** | 10 | **v26 (consensus)** | **0.706** | 0.687 | 0.525 | n/a |
 
-If a specialist fails, is stopped or is not started, the run is marked partial, and `review.md` lists each specialist's status. A failure that would repeat for every specialist, or one with an unknown provider outcome, starts no further specialist. Replay, cancellation, internal and spend-book failures fail the run, as in v2.
+On PREP-06, v26 had precision .727 and recall .686: 24 of 35 core issues found, 9 false positives. Over all 58 gold issues, F1 was .624, CodeRabbit .614 and Greptile .507.
 
-Expected cost: about three times the investigator calls of v2. Measured v2 runs used 1 to 4 investigator calls, so v3 should use about 3 to 12. Verifier calls rise with the number of distinct hypotheses (up to 20, plus duplicate fallbacks), and the judge words more findings. The estimated cost is $0.3 to $1.2 more per review, not yet measured, all within the same $4 ceiling.
+```mermaid
+xychart-beta
+    title "HELDOUT-PREP-06: core F1 (10 sealed Qodo PRs)"
+    x-axis ["Pullo v26", "CodeRabbit", "Greptile"]
+    y-axis "F1" 0 --> 1
+    bar [0.706, 0.687, 0.525]
+```
 
-In v2 the engine enforces an exploration floor: a final answer given on the first hop, before any context request, is treated as a draft. If turns and tool budget remain, the host sends one fixed continuation (at most 3 more hops) that asks the model to test the draft against dependents. The next final answer is used. The floor guarantees one extra prompt, not that the model actually opens dependents. If the continuation fails or reaches its limits, the draft is used; only a deadline stop or the run ceiling also marks the run partial. A spend-book failure still fails the run, as in v1. Each decision is a `retrieval.floor` trace event. PREPARE logs one host-only `impact_scan`: a bounded, heuristic map of changed or removed definitions and their whole-word references outside the changed lines. The investigator may also request `find_references`. The prompts ask the investigator to check dependents and to cite both the changed code and the dependent code. `review.md` and the receipt disclose how many changed symbols were analysed, how many references were found, and how many dependent files were opened. Scans stop only on deterministic caps; a wall-clock safety abort fails the call outright. Lockfiles, generated or minified files, and files over 5000 lines are skipped for symbol extraction, and each skip is disclosed.
+```mermaid
+xychart-beta
+    title "PREP-06: precision and recall (core)"
+    x-axis ["Pullo P", "Pullo R", "CodeRabbit P", "CodeRabbit R", "Greptile P", "Greptile R"]
+    y-axis "value" 0 --> 1
+    bar [0.727, 0.686, 0.688, 0.686, 0.765, 0.400]
+```
 
-There is no `--no-impact` CLI flag. Runs recorded before impact mode (Cal 14740, Grafana 94942, Sentry 95633 and earlier) are replayed only with their own frozen exports, never with this tree. In code, `repository_profile(..., impact=False)` and `repository_policy(..., impact=False)` still give the earlier retrieval@2 profile and policy byte for byte.
+Pullo F1 on each held-out batch (bars), with the best comparator on that batch (line):
 
-## Review models
+```mermaid
+xychart-beta
+    title "Held-out F1 by batch: Pullo (bars) vs the best comparator (line)"
+    x-axis ["PREP-02 v13", "PREP-03 v16", "PREP-04 v21", "PREP-05 v21", "PREP-06 v26"]
+    y-axis "F1" 0 --> 1
+    bar [0.386, 0.350, 0.698, 0.523, 0.706]
+    line [0.821, 0.615, 0.735, 0.538, 0.687]
+```
 
-Set the investigator, verifier and judge models in `pullo.toml`. Each role can use a different model:
+The best comparator on PREP-02 and PREP-03 is Cubic (Martian set), on PREP-04 and PREP-05 Greptile, and on PREP-06 CodeRabbit.
+
+On the 12 QTUNE-1 tuning PRs (39 gold), this is why the vote replaced the staged verifier:
+
+```mermaid
+xychart-beta
+    title "QTUNE-1 tuning PRs: F1 by arm"
+    x-axis ["Opus + 1 witness", "v26 live", "Plain Opus", "Greptile", "CodeRabbit", "v24 verifier"]
+    y-axis "F1" 0 --> 1
+    bar [0.707, 0.654, 0.639, 0.611, 0.582, 0.495]
+```
+
+Read these numbers with their limits:
+- Each batch has 2–5 gold issues per PR, so one hit moves F1 a lot, and there is no uncertainty estimate. On PREP-06 the lead over CodeRabbit is a single true positive.
+- **Comparator reviews:** these are historical artifacts from the public benchmark forks, not current vendor versions. Cubic has no arm on the Qodo set.
+- **The judge:** a common Opus 5.5 judge may be biased, and its versions differ between batches (the scoring logic is the same; only the budget constants change).
+- **The sources:** the PRs are public benchmark cases ([Martian code-review benchmark](https://codereview.withmartian.com), [Qodo PR-Review-Bench](https://github.com/agentic-review-benchmarks)). Martian's gold is curated review comments. Qodo's gold defects were injected by an LLM and then validated twice by humans.
+- The full reports, with every disclosure, are kept in the operator's private evaluation archive, along with the benchmark harness, receipts and preregistrations. They are not in this repository.
+
+Next: HELDOUT-PREP-07 (more Qodo PRs), a ReviewBench batch (187 new repos, with Cubic and Greptile reviews), and v27 work on recall.
+
+## Specs
+
+| Item | v26 |
+|---|---|
+| Candidate model | Claude Opus 5.5 (`claude-opus-5-5`), one call |
+| Witness models | Claude Sonnet 5.5 (`claude-sonnet-5-5`), two independent calls |
+| Vote | Keep an Opus comment when k = 2 of n = 2 witnesses raised the same defect |
+| Matcher | `res2-lexical-1to1@1`: deterministic, same file, line distance ≤ 3 / ≤ 15 / any, word and code-identifier overlap, greedy one-to-one (sha256 `30615796…`) |
+| Prompt | Fixed, about 50 words plus the diff (sha256 `4d63d991…`); no system prompt of ours |
+| Model settings | No tools, no thinking (`CLAUDE_CODE_DISABLE_THINKING=1`), CLI default effort, max output 32,000 tokens |
+| Runtime | Claude Code CLI (the benchmark pins 2.1.322), on the subscription; `gh` for GitHub diffs |
+| Limits | Diff ≤ 1.5 MB (skill) or a 2 MB prompt (benchmark adapter); 1,800 s per call; one repair and one retry per call |
+| Model calls in the vote | 0 (the vote is pure code) |
+| Language | Python 3.14, standard library only |
+| Benchmark judge | Claude Opus 5.5 via OpenRouter: bench.extract@v3, bench.dedup@v2, bench.pair@v2; metric `native-graph@1` |
+
+## Token usage and cost
+
+Measured on 66 real v26 calls: 22 PRs (QTUNE-1 and PREP-06) × 3 calls, from the benchmark's settle receipts.
+
+| Per call | Input tokens (mean / median / max) | Output tokens (mean / max) | Reasoning tokens (mean) |
+|---|---:|---:|---:|
+| Opus 5.5 candidate | 12,881 / 9,821 / 51,123 | 1,577 / 2,794 | 845 |
+| Sonnet 5.5 witness 1 | 12,809 / 9,749 / 51,048 | 1,328 / 3,081 | 401 |
+| Sonnet 5.5 witness 2 | 12,809 / 9,749 / 51,050 | 1,268 / 2,158 | 274 |
+
+- **Per PR (3 calls):** about 38,500 input and 4,200 output tokens on average. The largest PR used 153,000 input tokens.
+- **Money:** the reviews run on the Claude Code subscription, so a review costs $0 extra. At API list prices, one PR would cost about $0.052 on average and $0.151 at most (the receipts' pacing estimate).
+- **Time:** a small PR takes about 10 s end to end. On the benchmark, 4 parallel workers finished 10 PRs per model in about 3.5 minutes.
+- **Scoring (benchmark only):** the judge cost $3.50 for the 30 PREP-06 campaigns, about $0.12 per tool per PR, from the operator's OpenRouter key.
+
+```mermaid
+xychart-beta
+    title "Mean tokens per call (v26, 66 calls)"
+    x-axis ["Opus input", "Sonnet W1 input", "Sonnet W2 input", "Opus output", "Sonnet W1 output", "Sonnet W2 output"]
+    y-axis "tokens" 0 --> 14000
+    bar [12881, 12809, 12809, 1577, 1328, 1268]
+```
+
+## What is in this repository
+
+| Path | What it is |
+|---|---|
+| `reviewer/` | The `reviewer` package: contracts, model gateway with trace and strict replay, read-only repository tools, the staged pipeline (INVESTIGATE, VERIFY, JUDGE, PUBLISH) and the offline benchmark scorer. |
+| `integrations/claude-code/` | The `pullo-review` skill and its subagent. |
+| `tests/` | The offline test suite. |
+| `fixtures/`, `examples/` | Synthetic smoke cases and an invented-data benchmark demo. |
+
+The benchmark harness that produced the results above (review drivers, the scorer, receipts and reports) is kept private, outside this repository. [DEVELOPERS.md](DEVELOPERS.md) explains the code, the tests, the development workflow and the safety rules.
+
+## Safety model
+
+- **Read-only.** Nothing from a reviewed repository is executed. Nothing is posted upstream unless the user asks.
+- **Untrusted data.** Reviewed code, PR text and instruction files are data. They cannot change permissions, suppress findings or authorize tools. The review calls run with no tools, no settings, no CLAUDE.md and no MCP servers.
+- **Keys stay out.** No key is in this repository. Reviews run on the Claude Code subscription; the benchmark judge uses an operator-held OpenRouter key under hard spend caps, with no retries and no fallback.
+
+## Staged pipeline (v3–v21) and `pullo.toml`
+
+The earlier pipeline, INVESTIGATE → VERIFY → JUDGE → PUBLISH, is still in `reviewer/`. It runs bounded live trials through trusted-host launchers (`reviewer.runtime`, `reviewer.pilot`). `pullo.toml` selects the model for each of its roles, by exact id:
 
 ```toml
 schema = "pullo-config@1"
@@ -65,44 +170,31 @@ schema = "pullo-config@1"
 [review.investigator]
 provider = "anthropic"
 model = "anthropic/claude-sonnet-5.5"
-
-[review.verifier]
-provider = "anthropic"
-model = "anthropic/claude-sonnet-5.5"
-
-[review.judge]
-provider = "anthropic"
-model = "anthropic/claude-sonnet-5.5"
 ```
 
-The supported IDs are `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5` and `anthropic/claude-opus-5.5`, through OpenRouter. The OpenAI CLI path remains pending its isolation checks.
-
-The historical, repository and synthetic review commands accept `--config /path/to/pullo.toml`. By default they read Pullo's own file, independently of the current directory or reviewed repository. Model selection does not change spending limits or permissions. Keep API keys outside this file.
+The supported ids are `anthropic/claude-sonnet-5.5`, `anthropic/claude-haiku-5.5` and `anthropic/claude-opus-5.5`, through OpenRouter. Model selection never changes spending limits or permissions. `pullo.toml` does not configure v26: v26 uses Opus 5.5 and Sonnet 5.5 through the Claude Code CLI.
 
 ## Run the offline smoke suite
 
 ```sh
-nice -n 19 python3 -m reviewer smoke record --out /tmp/smoke-rec
-nice -n 19 python3 -m reviewer smoke replay --recording /tmp/smoke-rec --out /tmp/smoke-rep --manifest-digest sha256:REPLACE_WITH_DIGEST_PRINTED_BY_RECORD
+nice -n 19 python3 -m reviewer smoke record --out /var/tmp/smoke-rec
+nice -n 19 python3 -m reviewer smoke replay --recording /var/tmp/smoke-rec --out /var/tmp/smoke-rep --manifest-digest sha256:DIGEST_FROM_RECORD
 ```
 
-`record` runs every case in `fixtures/smoke` through the pipeline with a scripted synthetic provider, scores each result and writes a validated report. `replay` re-executes all cases offline against the recorded traces, with zero provider calls, and compares hypotheses, findings, comments, statuses and call counts.
+- **record** runs each case in `fixtures/smoke` through the pipeline with a scripted synthetic provider, scores it, and writes a report.
+- **replay** re-runs every case offline against the recorded traces, with zero provider calls, and compares the results.
 
-Replace `REPLACE_WITH_DIGEST_PRINTED_BY_RECORD` with the hexadecimal digest from the last line of `record` output. Both need a new or empty `--out` directory outside the suite (and, for replay, outside the recording). Options: `--suite DIR`; `replay --manifest-digest sha256:...` pins the recording's `eval.json` bytes (printed on `record`'s last line). Exit codes: `0` all cases ran and every expectation/comparison held; `1` a report was written but something failed; `2` refused before any case ran.
-
-No credential, network call or paid spend is possible from these commands. Prices in the cost lines are synthetic. Comments are local drafts.
+Both need a new, empty `--out` directory. Exit codes: `0` all expectations held; `1` a report was written but something failed; `2` refused before any case ran. No credential, network call or spend is possible from these commands.
 
 ## Offline benchmark scorer (experimental)
 
-`reviewer.benchmark` verifies a pinned benchmark source and counts judgments that someone else produced. It never calls a model, network or provider. Ordinary structured report fields omit gold and comment text, evidence bodies and free pair-error messages, but ids, case URLs, tool names, the judge block and other source metadata are caller-controlled, echoed unverified and can contain any text, and error diagnostics may echo malformed input. Keep reports and diagnostics scorer-side and review them before sharing; they are not proved opaque.
+`reviewer.benchmark` verifies a pinned benchmark source and counts judgments that someone else produced. It never calls a model or the network.
 
 ```sh
 nice -n 19 python3 -B examples/benchmark_demo.py
 ```
 
-The demo builds an **invented** source, pins it, writes all-pairs judgments, runs `python3 -m reviewer.benchmark reference-score` in-process and checks hand-derived counts, then shows the refusal and incomplete/missing/error/hidden controls. Two scorers stay separate: the native view (`score`) and the reference-count view (`reference-score`, all-pairs judgments, undefined ratios reported as a named zero). Neither is a quality measurement. Names and settings of a judge model are declarations the package does not verify; only the raw source files are verified, against pins. The `select` CLI has no `--admissions` option yet (the API supports admission documents).
-
-Exact flags, the pinning/store/output boundary, the judgments schema and the known limits are in [reviewer/benchmark/README.md](reviewer/benchmark/README.md). Nothing here reads real benchmark data.
+The demo builds an **invented** source, then scores it and shows the refusal paths. The flags, schemas and limits are in [reviewer/benchmark/README.md](reviewer/benchmark/README.md). The live benchmark results above come from the private operator harness, not from this package.
 
 ## Tests
 
@@ -110,11 +202,4 @@ Exact flags, the pinning/store/output boundary, the judgments schema and the kno
 nice -n 19 python3 -B -m unittest discover -s tests -t .
 ```
 
-The suite is offline and needs no credentials or network. Historical evidence for the earlier public checkpoint: [hosted CI for PR #13](https://github.com/arj873/Pullo/actions/runs/40324991362) completed on 2026-10-26: **2,441 tests, OK, 30 skips, 22 expected failures**, with zero errors or unexpected failures. Contract export and all six smoke record/replay cases also passed. Its head commit and the public checkpoint above share tree `d1e467637f6a8ad173bd855d084680c0c519a728`; these counts include the citation-provenance hardening. Limits remain visible:
-
-- Raw third-party pull-request fixtures and private operator evidence are not published. Corpus-only test modules are left out of this repository; included tests requiring those inputs use explicit skips. Static historical import-boundary tests run without the private corpus.
-- Known defects are kept as expected-failure tests so the repro stays in the tree.
-- Some tests skip when a private fixture is absent.
-- Local tests under `/tmp` can encounter an unrelated intermittent `/tmp/.git`, which makes the importer correctly reject a temporary store. Use a verified non-Git `TMPDIR` locally; hosted CI did not encounter this.
-
-See [KNOWN_TEST_ISSUES.md](KNOWN_TEST_ISSUES.md) for the exact public test IDs, reasons and counts at this checkpoint.
+The suite is offline and needs no credentials. Use a non-Git `TMPDIR` (not `/tmp`). Known defects are kept as expected-failure tests, and tests that need private fixtures skip; see [KNOWN_TEST_ISSUES.md](KNOWN_TEST_ISSUES.md).
