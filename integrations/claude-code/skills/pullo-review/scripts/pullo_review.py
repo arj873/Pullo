@@ -274,7 +274,8 @@ def parse_diff(diff: str) -> dict:
             # Forms: a/X b/Y, and "a/X" "b/Y" when core.quotePath quotes a name.
             m = re.match(r'^diff --git ("a/.*?(?<!\\)"|a/.+?) ("b/.*(?<!\\)"|b/.+)$', line)
             if m:
-                cur['old'], cur['new'] = (git_path(x).removeprefix('a/').removeprefix('b/') for x in m.groups())
+                cur['old'] = git_path(m.group(1)).removeprefix('a/')
+                cur['new'] = git_path(m.group(2)).removeprefix('b/')
             continue
         if cur is None:
             continue

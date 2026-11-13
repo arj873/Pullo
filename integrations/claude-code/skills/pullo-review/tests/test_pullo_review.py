@@ -117,9 +117,18 @@ class EndToEnd(unittest.TestCase):
         self.assertFalse(rec['rule']['degraded'])
 
     def test_option_like_target_is_refused(self):
-        p = subprocess.run([sys.executable, '-I', str(SCRIPT), 'review', '--output=/tmp/x', '--repo', str(self.repo)],
-                           capture_output=True, text=True, env=self.env, timeout=60)
-        self.assertNotEqual(p.returncode, 0)
+        out = self.tmp / 'written-by-git'
+        for argv in (['review', '--repo', str(self.repo), '--', f'--output={out}'],
+                     ['review', 'feature', '--repo', str(self.repo), f'--base=--output={out}']):
+            p = subprocess.run([sys.executable, '-I', str(SCRIPT), *argv], capture_output=True, text=True, env=self.env, timeout=60)
+            res = json.loads(p.stdout.strip().splitlines()[-1])
+            self.assertEqual(res['status'], 'error')
+            self.assertIn('starts with "-"', res['error'])
+            self.assertFalse(out.exists())
+
+    def test_mode_only_fallback_keeps_each_prefix(self):
+        f = PR.parse_diff('diff --git a/b/run.sh b/b/run.sh\nold mode 100644\nnew mode 100755\n')
+        self.assertEqual(sorted(f), ['b/run.sh'])
 
     def test_same_second_reviews_get_distinct_dirs(self):
         _, a = self.run_review()
