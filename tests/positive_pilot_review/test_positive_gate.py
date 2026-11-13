@@ -542,9 +542,10 @@ class Admission(Rig):
         self.refused_before_key(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000 + 1)
 
     def test_exactly_at_the_aggregate_is_admitted_through_preflight(self):
-        self.seed(committed=46_000_000)
+        self.write_auth({**AUTH, "maxUsdMicrosTotal": TRIAL_TOTAL_USD_MICROS})   # gate-sync: the authorization at the trial total
+        self.seed(committed=TRIAL_TOTAL_USD_MICROS - 4_000_000)
         m = self.model(MISS)
-        rep = P.run_positive(self.live_options(baseline_micros=46_000_000), transport=m, key_loader=self.loader)
+        rep = P.run_positive(self.live_options(baseline_micros=TRIAL_TOTAL_USD_MICROS - 4_000_000), transport=m, key_loader=self.loader)
         self.assertEqual(len(m.requests), 2)                # the draft + its one exploration-floor continuation
         self.assertIn(rep["status"], ("completed", "pipeline-refused"))
 
