@@ -9,7 +9,7 @@ import math
 
 PRICE_VERSION = "openrouter-catalog@2026-10-25T1952Z"
 TERRA_PRICE_VERSION = "openai-terra-list@2026-10-25"
-TRIAL_TOTAL_USD_MICROS = 50_000_000
+TRIAL_TOTAL_USD_MICROS = 150_000_000          # $50 -> $150 (CAP150, 2026-11-01: user raised the OpenRouter key limit to $150)
 TERRA_MODEL = "gpt-5.6-terra"
 # GPT Terra 6 ("you can use gpt terra 6", user 2026-10-29). Id from the installed codex-cli 0.163.0 model catalog:
 # `codex debug models` (server-refreshed, metadata only, no inference) lists slug gpt-6.1-terra, display "GPT-6.1 Terra",

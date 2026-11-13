@@ -40,6 +40,7 @@ from reviewer.repoimport.fsio import force_remove  # noqa: E402
 from reviewer.repoimport.remote import local_fixture_remote  # noqa: E402
 from reviewer.runtime import RuntimeLedger, Secret  # noqa: E402
 from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E402
+from reviewer.runtime.catalog import TRIAL_TOTAL_USD_MICROS
 
 # The exact public source/test bytes this gate reviewed (ticket BENCH-REVIEW-03-review, re-gate of the BENCH-REVIEW-02 fixes). A
 # later edit must be re-gated, not inherited. The interface document's acceptance pin is kept in private orchestration evidence,
@@ -72,7 +73,7 @@ from reviewer.runtime.openrouter import HttpResponse, TransportError  # noqa: E4
 # Previous (CCFILTER-1) pin: 121d3194e13d6e63367501eb78969453b69ec468a277ff6c93ad46a14af0e9ca.
 GATED = {"reviewer/pilot/benchmark.py": "02b927d2a5a2c6241f036f216095003cff14d388ca58af7609475d4886cd767d",   # CONSENSUS-1 re-pin (impact@v26), pending ccf-gate
          "reviewer/pilot/ancestry.py": "b1d30c74892c1916c4ca3cee33ea606eba0405594173b300c2a1cc1fcef4552f",
-         "tests/pilot/test_benchmark_host.py": "b07839c35d06cf2971e198a9b306297ab1d7ef2000a9490c024f61887b15f748",
+         "tests/pilot/test_benchmark_host.py": "57538874c63f70eb2a87bcd208a7b88c0582a4d2598455028cd76d5f31261b23",   # CAP150: 47M boundary -> trial total - 3M (was b07839c3...f748)
          "tests/benchmark_ancestry/test_ancestry.py": "18ac01b6ec9b2c80bda73804dde3f785dca25786a2c7aa08a5582fde3278c56e",
          "tests/benchmark_ancestry_review/test_ancestry_review.py":
              "a8dd6ba279e3cf547b2bbdf6ee50cb540ad04865d18ff092192ab1f4b1e814f3"}
@@ -870,7 +871,7 @@ class Live(Base):
         self.assertEqual(bytes(wire.requests[0].body), bodies[0])
         self.assertTrue(all(b["model"] == SONNET and b["provider"]["allow_fallbacks"] is False and "tools" not in b
                             for b in wire.bodies))
-        self.assertEqual(rep["costs"]["runtime"]["capUsdMicros"], 50_000_000)
+        self.assertEqual(rep["costs"]["runtime"]["capUsdMicros"], TRIAL_TOTAL_USD_MICROS)
         self.assertEqual(rep["costs"]["runtime"]["cumulative"]["accountable"]["usdMicros"], COMMITTED + 4 * PER_CALL)
         self.assertEqual(p.ledger()["committedUsdMicros"], COMMITTED + 4 * PER_CALL)
         self.assertEqual(self.keys, [str(p.env)])
@@ -941,7 +942,7 @@ class Live(Base):
                 self.assertIn("authorizationSha256", self.refused(p, mode="live", auth=str(f)))
         q = self.pair("over50")
         f = q.op / "auth-over50.json"
-        Pair.write_auth(f, {**AUTH, "maxUsdMicrosTotal": 60_000_000})
+        Pair.write_auth(f, {**AUTH, "maxUsdMicrosTotal": TRIAL_TOTAL_USD_MICROS + 10_000_000})
         q.seed(auth=f)
         q.roots(auth=f, tag="over50-")                                   # even when root pins it
         from reviewer.gateway import AuthorizationError
@@ -954,11 +955,15 @@ class Live(Base):
         self.assertEqual((len(self.keys), len(wire.requests), q.state_bytes()), (1, 0, before))
         self.assertTrue(os.path.isdir(q.out))
         self.assertEqual([f for _, _, fs in os.walk(q.out) for f in fs], [])
-        for committed, ok in ((46_000_000, True), (46_000_001, False)):
+        edge = TRIAL_TOTAL_USD_MICROS - 4_000_000                       # the trial total minus the $4 run ceiling (was 46M of 50M)
+        for committed, ok in ((edge, True), (edge + 1, False)):
             with self.subTest(committed=committed):
                 q = self.pair(f"agg{committed}")
-                q.seed(committed=committed)
-                o = q.live_options(baseline_micros=committed)
+                f = q.op / "auth-trial-total.json"                         # book limit = the trial total, so the aggregate is what binds
+                Pair.write_auth(f, {**AUTH, "maxUsdMicrosTotal": TRIAL_TOTAL_USD_MICROS})
+                q.seed(auth=f, committed=committed)
+                q.roots(auth=f, tag=f"agg{committed}-")
+                o = q.live_options(auth=str(f), baseline_micros=committed)
                 if ok:
                     self.assertEqual(B.run_benchmark(o, transport=Wire(*happy(q.imports["head"].snapshot_id)),
                                                      key_loader=self.loader)["status"], "completed")

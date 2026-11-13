@@ -214,12 +214,24 @@ class RuntimeLedger:
     def _hold(cls, rows) -> dict | None:
         """Startup-hold decision over parsed rows (raises ValueError on an unrecognised stored category). An unresolved
         scoring call is passed over only when an `acknowledge` row names its call key AND the generation id of its
-        result row; an intent without a result (or a result without a generation id) is never acknowledged."""
+        result row; an intent without a result is never acknowledged.
+        V6D (ack of an unknown call with no generation): a call whose last result row has outcome `unknown`, a null
+        generation id and no cost facts at all (unknown-worst-case, no reconcile row) is passed over when an
+        `acknowledge` row names its call key with a null generation id. Any other result without a generation id is
+        never acknowledged."""
         acks = cls._acknowledged(rows)
-        for k, (res, _m, _b) in cls._unresolved_scoring(rows).items():
+        recon = {r.get("callKey") for r in rows if r["type"] == "reconcile"}
+        facts = ("routerCostUsd", "routerCostUsdMicros", "upstreamInferenceCostUsd", "upstreamInferenceCostUsdMicros",
+                 "tokenPricedUsdMicros", "accountableUsdMicros", "accountableBasis", "isByok")
+        for k, (res, _m, b) in cls._unresolved_scoring(rows).items():
             gid = res.get("generationId") if res is not None else None
-            if not (isinstance(gid, str) and gid and (k, gid) in acks):
-                return {"reason": "prior-unresolved-scoring-exposure"}
+            if isinstance(gid, str) and gid and (k, gid) in acks:
+                continue
+            if (res is not None and "generationId" in res and gid is None and res.get("outcome") == "unknown"
+                    and b == "unknown-worst-case" and all(res.get(f) is None for f in facts) and k not in recon
+                    and (k, None) in acks):
+                continue
+            return {"reason": "prior-unresolved-scoring-exposure"}
         return None
 
     @staticmethod
@@ -388,8 +400,12 @@ class RuntimeLedger:
         cap and the review reserve are exactly as before (`before == after` in the result). Evidence is an audit
         record and a consistency gate only; it never lowers a charge (key usage/remaining is not proof of $0).
 
+        V6D: `generation_id` None acknowledges a call whose last result row has outcome `unknown`, a null generation
+        id and no cost facts at all (e.g. an HTTP 503 with no generation: nothing to look up), named by call key alone;
+        the row records a null generation id. Every other rule below is unchanged.
+
         Refuses (ValueError) unless: the ledger exists (never created); the call's last result row carries
-        `generation_id`; the call is a scoring intent; its cost basis is `unknown-worst-case` (no cost facts at all,
+        `generation_id` (None: the V6D shape above); the call is a scoring intent; its cost basis is `unknown-worst-case` (no cost facts at all,
         not overlaid by a reconcile row; estimated bases are refused); and the evidence is
         consistent: keyRemainingBefore - keyRemainingAfter - sumOtherOfficial (the implied charge of this call) lies
         within [0, the amount the ledger counts for it]. A repeat with the same evidence appends nothing; a repeat
@@ -400,8 +416,8 @@ class RuntimeLedger:
             raise ValueError("ledger does not exist; refusing to create a new book")
         if not isinstance(call_key, str) or not call_key:
             raise ValueError("call key must be a non-empty string")
-        if not isinstance(generation_id, str) or not generation_id or len(generation_id) > 200:
-            raise ValueError("generation id must be a non-empty string")
+        if generation_id is not None and (not isinstance(generation_id, str) or not generation_id or len(generation_id) > 200):
+            raise ValueError("generation id must be a non-empty string (or None for an unknown call with no generation)")
         if type(apply) is not bool:
             raise ValueError("apply must be a bool")
         ev = self._ack_evidence(evidence)
@@ -416,6 +432,13 @@ class RuntimeLedger:
             res = [r for r in rows if r["type"] == "result" and r.get("callKey") == call_key]
             if not res or res[-1].get("generationId") != generation_id:
                 raise ValueError("no result row for this call key carries that generation id")
+            if generation_id is None:                        # V6D: only the unknown / no-generation / no-cost-facts shape
+                last = res[-1]
+                facts = ("routerCostUsd", "routerCostUsdMicros", "upstreamInferenceCostUsd", "upstreamInferenceCostUsdMicros",
+                         "tokenPricedUsdMicros", "accountableUsdMicros", "accountableBasis", "isByok")
+                if not ("generationId" in last and last.get("outcome") == "unknown" and all(last.get(x) is None for x in facts)
+                        and not any(r["type"] == "reconcile" and r.get("callKey") == call_key for r in rows)):
+                    raise ValueError("without a generation id only an unknown call with no cost facts can be acknowledged")
             intent = next((r for r in reversed(rows) if r["type"] == "intent" and r.get("callKey") == call_key), None)
             if intent is None or intent.get("category") != "scoring":
                 raise ValueError("not a scoring call; only the scoring startup hold can be acknowledged")

@@ -173,7 +173,7 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
             with tempfile.TemporaryDirectory() as scratch:      # scratch accounting only: the original state is never opened
                 zero = H.LaunchBaseline(launch.declared, launch.config_digest, launch.prompt_sha256, 0, 0)
                 host = H.ScoreHost(cfg, zero, units, profile_ref=PROFILE_REF, price=price, auth=handle,
-                                   book=SpendBook(handle, Path(scratch) / "book.jsonl"), ledger=RuntimeLedger(Path(scratch) / "ledger.jsonl", 50_000_000),
+                                   book=SpendBook(handle, Path(scratch) / "book.jsonl"), ledger=RuntimeLedger(Path(scratch) / "ledger.jsonl", 150_000_000),
                                    key=Secret(H.PLACEHOLDER_KEY), transport=H.CaptureTransport(), store_dir=store, eval_run_id=evr)
                 rep = host.execute_offline()
             rep.update(plan=True, synthetic=True, realScoring=False)
@@ -204,7 +204,7 @@ def main(argv=None, *, out=sys.stdout, now=None, _transport_factory=None, _key_l
             transport = _transport_factory()
             b.state_dir.mkdir(parents=True, exist_ok=True)
             host = H.ScoreHost(cfg, launch, units, profile_ref=PROFILE_REF, price=price, auth=handle,
-                               book=SpendBook(handle, b.book_path), ledger=RuntimeLedger(b.ledger_path, 50_000_000), key=key,
+                               book=SpendBook(handle, b.book_path), ledger=RuntimeLedger(b.ledger_path, 150_000_000), key=key,
                                transport=transport, store_dir=store, eval_run_id=evr, lock_path=b.lock_path)
             host.baseline_file_sha256 = b.file_sha256
             run = host.execute_canary if a.cmd == "canary" else host.execute_live
