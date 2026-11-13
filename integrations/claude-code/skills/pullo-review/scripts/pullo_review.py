@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """pullo-review: review a GitHub PR or a branch with Pullo v26 (K6 consensus).
 
-The method is Pullo v26 (impact@v26, k6-plain-witness@1), the version that beat CodeRabbit and Greptile on the sealed
-HELDOUT-PREP-06 benchmark batch (core F1 .706 vs .687 / .525):
+The method is Pullo v26 (impact@v26, k6-plain-witness@1), the version that matched CodeRabbit and beat Greptile on the
+sealed HELDOUT-PREP-06 benchmark batch (all-gold F1 .624 vs .614 / .507; core .706 vs .687 / .525):
   1. ONE plain Opus 5.5 answer (the candidate) and TWO plain Sonnet 5.5 answers (the witnesses), each a single `claude -p`
      call on the same fixed prompt plus the PR diff (no tools, no system prompt of ours, no repo access), run in parallel.
   2. A candidate comment is kept when BOTH witnesses raised the same defect (the deterministic matcher below, vendored byte
@@ -197,6 +197,8 @@ def resolve(target: str, base: str | None, repo_dir: str | None) -> dict:
         return {'kind': 'github-branch', 'title': f'{h} vs {b}', 'url': f'https://github.com/{o}/{r}/compare/{b}...{h}',
                 'owner': o, 'repo': r, 'number': None, 'base': b, 'head': h, 'headSha': sha, 'diff': diff,
                 'label': f'{o}-{r}-' + re.sub(r'[^A-Za-z0-9._-]+', '_', h)[:60]}
+    if target.startswith('-') or (base or '').startswith('-'):
+        fail('a target or --base that starts with "-" is refused (it would reach git as an option)')
     d = Path(repo_dir or '.').resolve()
     g = lambda *a: run(['git', '-C', str(d), *a])                  # noqa: E731
     if g('rev-parse', '--git-dir').returncode != 0:
@@ -224,6 +226,25 @@ def resolve(target: str, base: str | None, repo_dir: str | None) -> dict:
 HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
 
 
+def git_path(raw: str) -> str:
+    """A path as git prints it in a diff header: drop the trailing TAB git adds after a name with a space, and undo
+    core.quotePath's C-style quoting (\"caf\\303\\251.py\" -> café.py)."""
+    raw = raw.rstrip('\t')
+    if len(raw) >= 2 and raw[0] == raw[-1] == '"':
+        out, i, body = bytearray(), 0, raw[1:-1]
+        esc = {'n': 10, 't': 9, 'r': 13, '"': 34, '\\': 92, 'a': 7, 'b': 8, 'f': 12, 'v': 11}
+        while i < len(body):
+            c = body[i]
+            if c == '\\' and i + 1 < len(body):
+                if len(body[i + 1:i + 4]) == 3 and all(x in '01234567' for x in body[i + 1:i + 4]):
+                    out.append(int(body[i + 1:i + 4], 8)); i += 4; continue
+                if body[i + 1] in esc:
+                    out.append(esc[body[i + 1]]); i += 2; continue
+            out += c.encode(); i += 1
+        raw = out.decode('utf-8', 'replace')
+    return raw
+
+
 def parse_diff(diff: str) -> dict:
     """{path: {status, old, new, newLines:set, oldLines:set}} keyed by both the new and the old path.
     Inside a hunk, lines are counted against the header's lengths, so content that starts with '--- ' or '+++ ' (an SQL
@@ -249,9 +270,11 @@ def parse_diff(diff: str) -> dict:
         if line.startswith('diff --git '):
             register()
             cur = {'status': 'modified', 'old': None, 'new': None, 'newLines': set(), 'oldLines': set()}
-            m = re.match(r'^diff --git a/(.+) b/(.+)$', line)
+            # a fallback for entries with no ---/+++ lines (binary, mode-only); the ---/+++ lines win when present.
+            # Forms: a/X b/Y, and "a/X" "b/Y" when core.quotePath quotes a name.
+            m = re.match(r'^diff --git ("a/.*?(?<!\\)"|a/.+?) ("b/.*(?<!\\)"|b/.+)$', line)
             if m:
-                cur['old'], cur['new'] = m.group(1), m.group(2)
+                cur['old'], cur['new'] = (git_path(x).removeprefix('a/').removeprefix('b/') for x in m.groups())
             continue
         if cur is None:
             continue
@@ -260,13 +283,15 @@ def parse_diff(diff: str) -> dict:
         elif line.startswith('deleted file mode'):
             cur['status'] = 'deleted'
         elif line.startswith('rename from '):
-            cur['status'], cur['old'] = 'renamed', line[len('rename from '):]
+            cur['status'], cur['old'] = 'renamed', git_path(line[len('rename from '):])
         elif line.startswith('rename to '):
-            cur['new'] = line[len('rename to '):]
+            cur['new'] = git_path(line[len('rename to '):])
         elif line.startswith('--- '):
-            cur['old'] = None if line[4:] == '/dev/null' else line[4:].removeprefix('a/')
+            v = git_path(line[4:])
+            cur['old'] = None if v == '/dev/null' else v.removeprefix('a/')
         elif line.startswith('+++ '):
-            cur['new'] = None if line[4:] == '/dev/null' else line[4:].removeprefix('b/')
+            v = git_path(line[4:])
+            cur['new'] = None if v == '/dev/null' else v.removeprefix('b/')
         elif (m := HUNK.match(line)):
             o, n = int(m.group(1)), int(m.group(3))
             left_o = 1 if m.group(2) is None else int(m.group(2))
@@ -369,7 +394,8 @@ def plain_answer(role: str, model: str, diff: str, workdir: Path) -> dict:
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             last_err = str(e)
             calls.append({'error': last_err})
-            time.sleep(20)
+            if attempt == 0:
+                time.sleep(20)
     else:
         return {'role': role, 'model': model, 'status': 'failed', 'error': last_err, 'calls': calls, 'items': []}
     calls.append({k: c[k] for k in ('rc', 'sec', 'usage')})
@@ -392,7 +418,10 @@ def plain_answer(role: str, model: str, diff: str, workdir: Path) -> dict:
 # ---------------------------------------------------------------- review
 def review(args) -> None:
     _check_vendored()
-    t = resolve(args.target, args.base, args.repo)
+    try:
+        t = resolve(args.target, args.base, args.repo)
+    except (RuntimeError, FileNotFoundError, KeyError, json.JSONDecodeError, subprocess.TimeoutExpired) as e:
+        fail(f'could not get the diff: {e}')
     diff = t['diff']
     if not diff.strip():
         fail('the diff is empty (nothing to review)')
@@ -400,8 +429,14 @@ def review(args) -> None:
         fail(f"the diff is {len(diff.encode())} bytes, over the {args.max_diff_bytes} limit (--max-diff-bytes)")
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     root = Path(args.out or os.environ.get('PULLO_REVIEW_DIR') or Path.home() / '.cache' / 'pullo-review')
-    out = root / f"{t['label']}-{stamp}"
-    out.mkdir(parents=True, exist_ok=False)
+    out, n = root / f"{t['label']}-{stamp}", 1
+    while True:
+        try:
+            out.mkdir(parents=True, exist_ok=False)
+            break
+        except FileExistsError:
+            n += 1
+            out = root / f"{t['label']}-{stamp}-{n}"
     (out / 'diff.patch').write_text(diff)
     roles = [('candidate', CANDIDATE_MODEL)] + [(f'witness{j + 1}', WITNESS_MODEL) for j in range(N_WITNESSES)]
     with cf.ThreadPoolExecutor(max_workers=len(roles)) as ex:
@@ -421,7 +456,10 @@ def review(args) -> None:
     items = cand['items']
     rows = [{'id': c['id'], 'votes': 0, 'support': []} for c in items]
     for w in live:
-        for i, j in assign_pairs(items, w['items']):
+        pairs = assign_pairs(items, w['items'])
+        if {i for i, _ in pairs} != assign(items, w['items']):      # the pinned matcher is the authority
+            fail('internal: assign_pairs disagrees with the pinned assign()', 4)
+        for i, j in pairs:
             rows[i]['votes'] += 1
             rows[i]['support'].append(w['items'][j]['id'])
     files, cache, kept, dropped = parse_diff(diff), {}, [], []
@@ -443,7 +481,8 @@ def review(args) -> None:
             if nlines is not None and c['line'] > nlines:
                 dropped.append({**c, 'votes': r['votes'], 'reason': 'no-such-line'})
                 continue
-        kept.append({**c, 'votes': r['votes'], 'support': r['support'], 'side': 'RIGHT', 'inDiff': in_diff})
+        extra = {'file': f['new'], 'note': f"renamed from {f['old']}"} if f['status'] == 'renamed' and c['file'] != f['new'] else {}
+        kept.append({**c, **extra, 'votes': r['votes'], 'support': r['support'], 'side': 'RIGHT', 'inDiff': in_diff})
     kept.sort(key=lambda x: (x['file'], x['line']))
     rec = {'schema': 'pullo-review@1', 'method': 'Pullo v26 K6 consensus (k6-plain-witness@1, matcher res2-lexical-1to1@1)',
            'at': stamp, 'target': {k2: v for k2, v in t.items() if k2 != 'diff'},

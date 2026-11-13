@@ -39,14 +39,14 @@ python3 -I ~/.claude/skills/pullo-review/scripts/pullo_review.py review my-branc
 
 - **Targets:** a PR URL, `OWNER/REPO#N`, a GitHub `tree/BRANCH` or `compare/BASE...HEAD` URL, or a local branch.
 - **Output:** `review.md`, `review.json` (all three answers, the votes and the drops) and `diff.patch`, in `~/.cache/pullo-review/<label>-<UTC>/`.
-- **Cost and time:** three `claude -p` calls on your Claude Code subscription, never `ANTHROPIC_API_KEY`. A small PR takes about 10 s.
+- **Cost and time:** three `claude -p` calls on your Claude Code subscription, never `ANTHROPIC_API_KEY`. A small diff takes 10–30 s; about 80 KB takes 1–2 minutes; near 1 MB takes up to about 5 minutes.
 - **Posting:** only on request. `pullo_review.py post <review-dir>` is a dry run. Add `--yes` to post one comment-only review; it never approves or requests changes.
 
 ## Results so far
 
-Held-out batches: each one is selected and sealed before the Pullo version runs, the version's rule is preregistered (a write-once file pinned by sha256), and it runs once. F1 is micro-averaged over each batch's core gold issues, scored by a common judge (Opus 5.5, bench.extract / dedup / pair).
+Held-out batches: each one is selected and sealed before the Pullo version runs, the version's rule is preregistered (a write-once file pinned by sha256), and it runs once. F1 is micro-averaged over each batch's **core** gold issues, so the batches compare. It is scored by a common judge (Opus 5.5, bench.extract / dedup / pair). PREP-06's preregistered headline was the all-gold F1, given below the table.
 
-| Batch | PRs | Pullo version | Pullo | CodeRabbit | Greptile | Cubic |
+| Batch | PRs | Pullo version | Pullo | CodeRabbit | Greptile (v4.1 arm on the Martian set) | Cubic |
 |---|---:|---|---:|---:|---:|---:|
 | HELDOUT-PREP-02 (Martian set) | 10 | v13 (staged pipeline) | 0.386 | 0.581 | 0.489 | 0.821 |
 | HELDOUT-PREP-03 (Martian set) | 7 | v16 (staged pipeline) | 0.350 | 0.480 | 0.535 | 0.615 |
@@ -54,7 +54,17 @@ Held-out batches: each one is selected and sealed before the Pullo version runs,
 | HELDOUT-PREP-05 (Qodo set) | 10 | v21 (staged pipeline) | 0.523 | 0.493 | 0.538 | n/a |
 | **HELDOUT-PREP-06 (Qodo set)** | 10 | **v26 (consensus)** | **0.706** | 0.687 | 0.525 | n/a |
 
-On PREP-06, v26 had precision .727 and recall .686: 24 of 35 core issues found, 9 false positives. Over all 58 gold issues, F1 was .624, CodeRabbit .614 and Greptile .507.
+**PREP-06 preregistered headline (all 58 gold issues): Pullo .624, CodeRabbit .614, Greptile .507. That is a pass:** the preregistered rule needed Pullo ≥ both.
+
+On core gold (the table), v26 had precision .727 and recall .686: 24 of 35 core issues found, 9 false positives. On PREP-02 and PREP-03 the reports also score a newer Greptile arm (v5: .536 and .341).
+
+```mermaid
+xychart-beta
+    title "HELDOUT-PREP-06 headline: all-gold F1 (58 gold issues, preregistered)"
+    x-axis ["Pullo v26", "CodeRabbit", "Greptile"]
+    y-axis "F1" 0 --> 1
+    bar [0.624, 0.614, 0.507]
+```
 
 ```mermaid
 xychart-beta
@@ -96,9 +106,10 @@ xychart-beta
 ```
 
 Read these numbers with their limits:
-- Each batch has 2–5 gold issues per PR, so one hit moves F1 a lot, and there is no uncertainty estimate. On PREP-06 the lead over CodeRabbit is a single true positive.
+- PRs have 1–6 gold issues each (2–5 on the Qodo batches), so one hit moves F1 a lot, and there is no uncertainty estimate. On PREP-06 the lead over CodeRabbit is a single true positive.
+- **Repo overlap:** PREP-06 shares its repositories (redis, dify, aspnetcore, prefect, tauri, Ghost) with the QTUNE-1 tuning PRs. The PRs themselves differ, and the v26 rule was tuned on QTUNE-1 only.
 - **Comparator reviews:** these are historical artifacts from the public benchmark forks, not current vendor versions. Cubic has no arm on the Qodo set.
-- **The judge:** a common Opus 5.5 judge may be biased, and its versions differ between batches (the scoring logic is the same; only the budget constants change).
+- **The judge:** a common Opus 5.5 judge may be biased. Its versions differ between and within batches (PREP-06 mixes v6d and v6e); the judge's prompts, schema and matcher are identical across versions; a successor version may change only budget constants or receipt accounting, proven file by file on every load.
 - **The sources:** the PRs are public benchmark cases ([Martian code-review benchmark](https://codereview.withmartian.com), [Qodo PR-Review-Bench](https://github.com/agentic-review-benchmarks)). Martian's gold is curated review comments. Qodo's gold defects were injected by an LLM and then validated twice by humans.
 - The full reports, with every disclosure, are kept in the operator's private evaluation archive, along with the benchmark harness, receipts and preregistrations. They are not in this repository.
 
@@ -113,7 +124,7 @@ Next: HELDOUT-PREP-07 (more Qodo PRs), a ReviewBench batch (187 new repos, with 
 | Vote | Keep an Opus comment when k = 2 of n = 2 witnesses raised the same defect |
 | Matcher | `res2-lexical-1to1@1`: deterministic, same file, line distance ≤ 3 / ≤ 15 / any, word and code-identifier overlap, greedy one-to-one (sha256 `30615796…`) |
 | Prompt | Fixed, about 50 words plus the diff (sha256 `4d63d991…`); no system prompt of ours |
-| Model settings | No tools, no thinking (`CLAUDE_CODE_DISABLE_THINKING=1`), CLI default effort, max output 32,000 tokens |
+| Model settings | No tools; no thinking request key (`CLAUDE_CODE_DISABLE_THINKING=1`), though the models may still think adaptively (see reasoning tokens below); CLI default effort; max output 32,000 tokens |
 | Runtime | Claude Code CLI (the benchmark pins 2.1.322), on the subscription; `gh` for GitHub diffs |
 | Limits | Diff ≤ 1.5 MB (skill) or a 2 MB prompt (benchmark adapter); 1,800 s per call; one repair and one retry per call |
 | Model calls in the vote | 0 (the vote is pure code) |
@@ -132,7 +143,7 @@ Measured on 66 real v26 calls: 22 PRs (QTUNE-1 and PREP-06) × 3 calls, from the
 
 - **Per PR (3 calls):** about 38,500 input and 4,200 output tokens on average. The largest PR used 153,000 input tokens.
 - **Money:** the reviews run on the Claude Code subscription, so a review costs $0 extra. At API list prices, one PR would cost about $0.052 on average and $0.151 at most (the receipts' pacing estimate).
-- **Time:** a small PR takes about 10 s end to end. On the benchmark, 4 parallel workers finished 10 PRs per model in about 3.5 minutes.
+- **Time:** observed skill runs: a few-KB diff in 7–30 s, about 80 KB in about 1.5 minutes, 0.8–0.9 MB in 1.5–5.5 minutes. On the benchmark, 4 parallel workers finished 10 PRs per model in about 3 minutes.
 - **Scoring (benchmark only):** the judge cost $3.50 for the 30 PREP-06 campaigns, about $0.12 per tool per PR, from the operator's OpenRouter key.
 
 ```mermaid

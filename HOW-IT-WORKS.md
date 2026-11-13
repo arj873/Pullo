@@ -95,7 +95,7 @@ flowchart LR
 - **Preregistration first.** Before a held-out run, a write-once file fixes the version (its export sha), the arm, the cases, the attempt rule, the judge and the pass rule. The tools refuse to run until that file's sha256 is pinned in them.
 - **One shot per version per batch.** A retry is allowed only after an attempt that settled without completing (for example, a provider outage). A PR whose review could not run scores as an **empty review**: 0 found, all its gold still counted as missed.
 - **Comparators first, sealed.** CodeRabbit and Greptile reviews of the same PRs are scored before the one shot and not read until after.
-- **A common judge.** Every tool is scored by the same judge. The judge's export is frozen and pinned. A new judge version may change only budget constants, and that is proven file by file on every load.
+- **A common judge.** Every tool is scored by the same judge. The judge's export is frozen and pinned. The judge's prompts, schema and matcher are identical across versions. A successor version may change only budget constants or receipt accounting, and that is proven file by file on every load.
 
 ### Scoring (the private benchmark harness)
 
@@ -109,7 +109,7 @@ flowchart LR
 ```
 
 - **Judge steps:** extract turns each review into candidate issues, dedup groups repeats, and pair matches each group against each gold issue.
-- **Metrics:** `native-graph@1`, a TP is a matched group and recall counts distinct gold recalled. There are three profiles: strict, core (the headline table) and all.
+- **Metrics:** `native-graph@1`, a TP is a matched group and recall counts distinct gold recalled. There are three profiles: strict, core (the report table) and all. Each prereg names its headline; for PREP-06 it was all.
 - **Report:** the campaigns are combined into one report, with one tool per case and every disclosure.
 
 ## 3. The change flow

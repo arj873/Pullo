@@ -58,11 +58,11 @@ cp integrations/claude-code/agents/pullo-reviewer.md ~/.claude/agents/
 - **Two deliberate differences from the benchmark arm:**
   - comments on files the PR deletes are kept, anchored on the base side;
   - a failed witness degrades to a flagged 1-of-1 review instead of an empty one.
-- **Tests:** after any change, run it on a small public PR and on a scratch local branch with a planted bug. Check `review.json` (all three answers, the votes and every drop).
+- **Tests:** `python3 -B -m unittest discover -s integrations/claude-code/skills/pullo-review/tests` runs offline: a fake CLI and a scratch git repo with tricky paths (non-ASCII, a space, a rename). After any change, also run it live on a small public PR, and check `review.json` (all three answers, the votes and every drop).
 
 ## 5. How versions are built and measured
 
-A *version* (v3 … v26) is a reviewer commit, frozen into an **export**: a manifest that lists every file with its sha256. The benchmark refuses to run an export whose manifest sha is not pinned. The judge is frozen the same way, and a new judge version may change only budget constants, which is proven on every load.
+A *version* (v3 … v26) is a reviewer commit, frozen into an **export**: a manifest that lists every file with its sha256. The benchmark refuses to run an export whose manifest sha is not pinned. The judge is frozen the same way. Its prompts, schema and matcher never change; a successor version may change only budget constants or receipt accounting, which is proven file by file on every load.
 
 Each change goes through:
 

@@ -54,6 +54,6 @@ Posting to GitHub is outward-facing. Do it only when the user explicitly asks, a
 - **The vote:** the deterministic matcher is vendored from Pullo (sha256 30615796…, self-checked at start). An Opus comment is kept when both Sonnet witnesses raised the same defect.
 - **The location check:** it drops kept comments outside the PR's changed files, or on a line the head file doesn't have. It keeps comments on deleted files (base side).
 - **Output:** `~/.cache/pullo-review/<label>-<UTC>/` holds `review.md`, `review.json` (all three answers, the votes, the drops) and `diff.patch`. Override the location with `--out` or `PULLO_REVIEW_DIR`. `--show-unconfirmed` also lists the Opus comments the witnesses did not confirm.
-- **Limits:** diffs over 1.5 MB are refused (`--max-diff-bytes`). A small PR takes about 10 s; a large one a few minutes.
+- **Limits:** diffs over 1.5 MB are refused (`--max-diff-bytes`). A few-KB diff takes 7–30 s, and a diff near 1 MB up to about 5 minutes.
 
-Benchmark provenance: this is the method that scored core F1 .706 on the sealed HELDOUT-PREP-06 batch (CodeRabbit .687, Greptile .525). Two differences from the benchmark arm: comments on deleted files are kept, and a failed witness degrades to 1-of-1 (flagged) instead of an empty review.
+Benchmark provenance: this is the method that matched CodeRabbit and beat Greptile on the sealed HELDOUT-PREP-06 batch: all-gold F1 .624 vs .614 / .507 (core .706 vs .687 / .525). Two differences from the benchmark arm: comments on deleted files are kept, and a failed witness degrades to 1-of-1 (flagged) instead of an empty review.
