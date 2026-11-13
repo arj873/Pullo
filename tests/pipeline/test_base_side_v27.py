@@ -9,7 +9,9 @@ change deletes src/old.py): no network, no credential, no model call.
      a line past the base file and an exact rename are not anchored;
   3. contracts / judging: anchor side is Enum('base') only; revalidate_comment refuses side 'base' without the flag's base snapshot,
      with a head snapshotId, and with lines past the base file; head-side comments are checked as before;
-  4. scoring: matching.is_foreign accepts the base snapshot for a side-'base' comment only when a base snapshot id is given;
+  4. scoring: matching.is_foreign accepts the base snapshot for a side-'base' comment only when a base snapshot id is given (gate-v27d
+     I-D1: also when it is the only id given);
+  4b. gate-v27d F-D1 / I-D2: an unchanged twin file is no rename target; _judge_v26 with the flag off never anchors on the base;
   5. benchmark options: base_side_anchors is a bool and impact_version 26's only; ReviewSpec / BenchmarkOptions default False."""
 from __future__ import annotations
 
@@ -87,6 +89,44 @@ class Deleted(unittest.TestCase):
                  {"path": "n.py", "status": "added"}, {"path": "x.py", "status": "deleted"}]   # x.py: not in the base manifest
         eng = types.SimpleNamespace(spec=spec, artifacts={"PREPARE": {"payload": {"files": files}}})
         self.assertEqual(Engine.deleted_base_paths(eng), {"b.py"})     # r.py: head n.py holds its blob (an exact rename); c.py: unlisted
+
+    def test_an_unchanged_twin_is_not_a_rename_target(self):
+        """gate-v27d F-D1: only an ADDED head path (absent from the base) can be a rename target; an unchanged file with the same
+        bytes (two identical __init__.py) leaves the delete a delete. ccb-gate's probe/fix_d1_check.py cases."""
+        def eng(base, head, files):
+            man = lambda d: types.SimpleNamespace(manifest={"entries": [{"path": p, "sha256": s} for p, s in d.items()]})
+            return types.SimpleNamespace(spec=types.SimpleNamespace(base=man(base), head=man(head)),
+                                         artifacts={"PREPARE": {"payload": {"files": files}}})
+        deleted, added = {"path": "a.py", "status": "deleted"}, {"path": "c.py", "status": "added"}
+        for name, e, want in (("plain delete", eng({"a.py": "1", "k.py": "9"}, {"k.py": "9"}, [deleted]), {"a.py"}),
+                              ("delete + unchanged twin", eng({"a.py": "1", "t.py": "1"}, {"t.py": "1"}, [deleted]), {"a.py"}),
+                              ("exact rename", eng({"a.py": "1"}, {"c.py": "1"}, [deleted, added]), set()),
+                              ("rename + unchanged twin", eng({"a.py": "1", "t.py": "1"}, {"c.py": "1", "t.py": "1"}, [deleted, added]), set())):
+            with self.subTest(name):
+                self.assertEqual(Engine.deleted_base_paths(e), want)
+
+
+class JudgeV26FlagOff(unittest.TestCase):
+    """gate-v27d I-D2: _judge_v26 itself, flag off, a finding on a DELETED path: it anchors on the head (where the file is absent) and
+    is dropped 'suppressed'; deleted_base_paths is never consulted (pins the gate's defence-in-depth line)."""
+    def test_deleted_path_finding_is_suppressed_on_the_head(self):
+        seed = {"candidates": {"items": [{"id": "ccbo-mini-6", "body": OLD}]}}
+        ref = "sha256:" + seeded.digest(seed)
+        f = {"id": "fnd_1", "location": {"path": "src/old.py", "line": 1}, "seedRef": {"seed": ref, "index": 0, "id": "ccbo-mini-6"}}
+        deleted = mock.Mock(return_value={"src/old.py"})
+        eng = types.SimpleNamespace(
+            recorder=types.SimpleNamespace(events=[]), tool_calls=lambda: [], deleted_base_paths=deleted, set_fatal=mock.Mock(),
+            spec=types.SimpleNamespace(seed=seed, base_side_anchors=False, head=types.SimpleNamespace(root="HEAD", manifest={}),
+                                       base=types.SimpleNamespace(root="BASE", manifest={})))
+        anchor = lambda root, manifest, path, a, b: "OLD = 1\n" if root == "BASE" else None   # src/old.py exists on the base only
+        with mock.patch("reviewer.pipeline.engine.check_finding_provenance", return_value=[]), \
+                mock.patch("reviewer.pipeline.engine.snaps.anchor_text", side_effect=anchor):
+            comments, drops, extra = Engine._judge_v26(eng, [f])
+        self.assertEqual((comments, extra), ([], []))
+        self.assertEqual(drops, [{"subjectIds": ["fnd_1"], "stage": "JUDGE", "reason": "suppressed",
+                                  "detail": "anchor lines do not exist in the pinned head file"}])
+        deleted.assert_not_called()
+        eng.set_fatal.assert_not_called()
 
 
 class Rig(C.V26Rig):
@@ -230,6 +270,10 @@ class Matching(unittest.TestCase):
         self.assertEqual(match_comments([wrong], bugs, 0, head_snapshot_id=head, run_id=run, base_snapshot_id=base).foreign, ("cmt_1",))
         plain = dict(c, anchor={k: v for k, v in c["anchor"].items() if k != "side"})  # no side: the head rule, unchanged
         self.assertEqual(match_comments([plain], bugs, 0, head_snapshot_id=head, run_id=run, base_snapshot_id=base).foreign, ("cmt_1",))
+        # gate-v27d I-D1: a caller passing ONLY the base snapshot id still checks side-'base' comments against it
+        self.assertEqual(match_comments([c], bugs, 0, run_id=run, base_snapshot_id=base).foreign, ())
+        self.assertEqual(match_comments([wrong], bugs, 0, run_id=run, base_snapshot_id=base).foreign, ("cmt_1",))
+        self.assertEqual(match_comments([plain], bugs, 0, run_id=run, base_snapshot_id=base).foreign, ())      # head side: no head id given
 
 
 class Options(TBH.Base):

@@ -2020,11 +2020,12 @@ class Engine:
 
     def deleted_base_paths(self) -> set:
         """V27-D (base_side_anchors only): the paths this change DELETES - PREPARE 'deleted', present in the pinned base manifest and
-        absent from the head manifest, and not an exact rename (no head path holds the same blob). A rename with edits is a delete +
-        an add in PREPARE's rows and is not told apart."""
+        absent from the head manifest, and not an exact rename (no ADDED head path - one absent from the base - holds the same blob;
+        an unchanged file with identical bytes is not a rename target). A rename with edits is a delete + an add in PREPARE's rows
+        and is not told apart."""
         bm = {e["path"]: e["sha256"] for e in self.spec.base.manifest["entries"]}
         hm = {e["path"]: e["sha256"] for e in self.spec.head.manifest["entries"]}
-        heads = set(hm.values())
+        heads = {h for p, h in hm.items() if p not in bm}  # gate-v27d F-D1: the added side only
         return {f["path"] for f in self.artifacts["PREPARE"]["payload"]["files"]
                 if f["status"] == "deleted" and f["path"] in bm and f["path"] not in hm and bm[f["path"]] not in heads}
 

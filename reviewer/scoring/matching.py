@@ -18,7 +18,9 @@ Rules
 - Anchor provenance: when the caller names the case's head snapshot (and the run), a scored comment
   anchored to any other snapshot, or belonging to another run, is *foreign*. A foreign comment can
   never match a bug; it is booked as a plain false positive (never a duplicate) and listed in
-  `foreign`, so a base-side or stale comment cannot earn a true positive.
+  `foreign`, so a base-side or stale comment cannot earn a true positive. V27-D: a side-'base' comment is
+  checked against the base snapshot id when the caller names one (and against the head id otherwise); a
+  caller naming only the base id checks side-'base' comments and leaves head-side ones unchecked.
 - Result tuples are canonical (sorted); they do not depend on the order labels or comments arrive in.
 """
 
@@ -83,7 +85,7 @@ def match_comments(comments: list[dict], bugs: list[dict], tolerance: int, *,
     def is_foreign(c: dict) -> bool:
         a = c["anchor"]                          # V27-D: a side-'base' comment belongs to the run's base snapshot, when one is given
         want = base_snapshot_id if a.get("side") == "base" and base_snapshot_id is not None else head_snapshot_id
-        return ((head_snapshot_id is not None and a.get("snapshotId") != want)
+        return ((want is not None and a.get("snapshotId") != want)          # gate-v27d I-D1: a base-only caller is checked too
                 or (run_id is not None and c.get("runId") != run_id))
 
     foreign = {c["id"] for c in scored if is_foreign(c)}
