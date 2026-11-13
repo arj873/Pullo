@@ -29,10 +29,11 @@ jobs:
 
       - name: Unit tests (default discovery)
         shell: bash
-        # The sandbox tests assert the child sees an empty /tmp, so scratch dirs must not live in /tmp.
-        env:
-          TMPDIR: ${{ runner.temp }}
-        run: nice -n 19 python3 -m unittest discover -s tests -t .
+        # Scratch dirs must live outside /tmp (the sandbox tests assert the child sees an empty /tmp) AND outside
+        # HOME and the checkout (snapshots must be plain dirs outside both); runner.temp is under HOME, so use /var/tmp.
+        run: |
+          export TMPDIR="$(mktemp -d /var/tmp/pullo-ci.XXXXXX)"
+          nice -n 19 python3 -m unittest discover -s tests -t .
 
       - name: Contract export is up to date
         shell: bash
