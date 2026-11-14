@@ -1,4 +1,4 @@
-"""Offline tests of the pullo-judge skill (judge v6ecc): a fake claude CLI, a scratch judge export of this checkout's reviewer tree,
+"""Offline tests of the pullo-judge skill (judge v6ecc2): a fake claude CLI, a scratch judge export of this checkout's reviewer tree,
 invented cases. No network, no model, no real CLI. Every run uses a scratch HOME and a scratch per-user state dir.
 
   * the CLI call: exact argv flags, the judge's own system prompt (+ the schema), the user message on stdin byte for byte,
@@ -9,7 +9,11 @@ invented cases. No network, no model, no real CLI. Every run uses a scratch HOME
     extra usage is refused (never used, never $0) and latches, on any rate_limit_event of a call; tool/extra-turn/version/model
     problems refuse; the script must be the job's frozen transport; no socket opens inside the run;
   * a refusal mid-batch keeps the summary; the run lock; SIGTERM still writes the result and summary; SIGKILL leaves the lock free;
-  * the seal: stdout and the calls log carry no gold or review text.
+  * the seal: stdout and the calls log carry no gold or review text;
+  * v6ecc2's answer extraction (extract_answer): all 37 real schema-invalid answers of the v6ecc calibration (failure_shapes.json:
+    run 1's 16 campaign runs + the re-run's 8; masked prose, verbatim JSON) are refused on v6ecc's path and parsed by the frozen
+    parser on v6ecc2's; mutated shapes and other answers fail closed; the bytes differ from v6ecc's only for answers the frozen
+    parser refuses on v6ecc's path; a whole campaign answered in those shapes completes with the v6e path's judgments.
 Run: TMPDIR=<scratch> nice -n 19 python3 -I -m unittest discover -s integrations/claude-code/skills/pullo-judge/tests -v"""
 import json
 import os
@@ -188,11 +192,30 @@ class TestLatchAndRefusals(unittest.TestCase):
         self.assertEqual((rc, r['status']), (0, 'completed'))
         self.assertEqual(r['calls']['fencedJson'], r['calls']['processed'])
 
-    def test_prose_answer_is_invalid_output(self):
+    def test_prose_preamble_is_handed_on_as_the_object(self):                 # v6ecc2: extract_answer rule 3
         fake_claude.set_config(self.w.fake, mode='prose')
+        j = self.w.job()
+        rc, stdout, out, _ = self.w.judge(j)
+        r = json.loads(Path(out['jobs'][0]['result']).read_text())
+        self.assertEqual((rc, r['status']), (0, 'completed'))
+        self.assertEqual((r['calls']['proseStripped'], r['calls']['fencedJson']), (r['calls']['processed'], 0))
+        rows = [json.loads(x) for x in (Path(out['jobs'][0]['result']).parent / 'v6ecc-calls.jsonl').read_text().splitlines()]
+        for x in rows:
+            self.assertEqual((x['notes'][0], x['strippedChars']), ('prose-stripped', len('Here is the answer: ')))
+            self.assertNotEqual(x['rawAnswerSha256'], x['answerSha256'])
+        v6e = T.v6e_run(self.w.root, j, self.w.dir / 'v6e-prose')
+        docs = json.loads(Path(r['documents']['path']).read_text())
+        norm = lambda ds: sorted(({**d, 'judge': {**d['judge'], 'runRef': None}} for d in ds), key=lambda d: (d['caseUrl'], d['tool']))
+        self.assertEqual(norm(docs), norm(v6e['documents']))                                 # the same judgments as v6e's answers
+        logtext = stdout + (Path(out['jobs'][0]['result']).parent / 'v6ecc-calls.jsonl').read_text() + Path(out['jobs'][0]['result']).read_text()
+        self.assertNotIn('Here is the answer', logtext)                                      # the preamble is written nowhere
+
+    def test_prose_after_the_object_is_still_invalid_output(self):
+        fake_claude.set_config(self.w.fake, mode='prose-after')
         rc, _, out, _ = self.w.judge(self.w.job())
         r = json.loads(Path(out['jobs'][0]['result']).read_text())
         self.assertEqual((rc, r['status'], r['documents']), (0, 'incomplete', None))          # the frozen strict parser refuses it
+        self.assertEqual(r['calls']['proseStripped'], 0)
 
     def test_auth_latches(self):
         fake_claude.set_config(self.w.fake, mode='auth')
@@ -344,6 +367,111 @@ class TestLatchAndRefusals(unittest.TestCase):
         self.assertEqual((rc, out['reason']), (2, 'job-already-run'))           # never re-run: score_v5 settles it, then replans
 
 
+SHAPES = json.loads((Path(__file__).resolve().parent / 'failure_shapes.json').read_text())['shapes']
+OK = '{"match": true, "confidence": 0.9}'
+
+
+def shape_text(sh, js=None):
+    return sh['prefix'] + (sh['json'] if js is None else js) + sh['suffix']
+
+
+def mutations(sh):
+    """Each real shape, broken in one way the extraction must NOT accept (it hands the answer on unchanged)."""
+    t = shape_text(sh)
+    pre, js, suf = sh['prefix'], sh['json'], sh['suffix']
+    return {'trailing-prose': t.rstrip() + '\nSo the candidate matches.',
+            'brace-in-prose': '{x} ' + t, 'bracket-in-prose': '[1] ' + t,
+            'object-in-prose': '{"match": false, "confidence": 0.1} ' + t,
+            'fence-in-prose': '```\ncode\n```\n' + t,
+            'truncated': pre + js[:-1] + suf, 'array-body': pre + '[' + js + ']' + suf,
+            'two-objects': pre + js + '\n' + js + suf, 'no-prose-unknown-fence-tag': '```python\n' + js + '\n```'}
+
+
+# The frozen provider's parse of a content string (reviewer/runtime/openrouter.py: _loads, normalize_output, local_issues) and
+# the pair rule (allpairs.parse_pair), in a child that imports the export's frozen reviewer. -> ['ok' | 'refused', ...]
+FROZEN_PARSE = r'''
+from reviewer.runtime import openrouter as OR, schemas
+from reviewer.benchmark.allpairs import parse_pair
+out = []
+for content in json.loads(sys.argv[1]):
+    try:
+        v = OR._loads(content.encode("utf-8"))
+        v = schemas.normalize_output("ScorePair", json.loads(json.dumps(v, default=float)), "anthropic")
+        ok = not schemas.local_issues("ScorePair", v) and parse_pair(v)[0] == "ok"
+    except OR._PARSE_ERRORS:
+        ok = False
+    out.append("ok" if ok else "refused")
+print(json.dumps(out))
+'''
+
+
+class TestFailureShapes(unittest.TestCase):
+    """v6ecc2's one change, on the real failures of the v6ecc calibration (offline; the shapes file has no answer text)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = Path(tempfile.mkdtemp(prefix='pj-shapes-'))
+        cls.root, _ = T.build_export(cls.dir / 'judge')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def parse(self, contents):
+        return T.child(self.root / 'export', FROZEN_PARSE, json.dumps(contents))
+
+    def test_shapes_are_the_calibration_failures(self):
+        self.assertEqual(len(SHAPES), 37)
+        runs = {(s['run'], s['campaignRun']) for s in SHAPES}
+        self.assertEqual((sum(1 for r in runs if r[0] == 'run1'), sum(1 for r in runs if r[0] == 'rerun')), (16, 8))
+        self.assertTrue(all(s['traceTextIsTheAnswer'] and s['stage'] == 'pair' for s in SHAPES))
+        self.assertEqual(len({s['answerSha256'] for s in SHAPES}), 37)
+        for s in SHAPES:                                                    # masked: no letter but x / X outside the fence tag
+            self.assertEqual({c for c in s['prefix'].replace('```json', '') if c.isalpha()} - {'x', 'X'}, set(), s['id'])
+
+    def test_real_shapes_refused_on_v6ecc_parsed_on_v6ecc2(self):
+        texts = [shape_text(s) for s in SHAPES]
+        self.assertEqual(self.parse([PJ.unfence(t)[0] for t in texts]), ['refused'] * 37)        # v6ecc: schema-invalid, as in the run
+        got = [PJ.extract_answer(t) for t in texts]
+        self.assertEqual([(b, n) for b, n in got], [(s['json'], 'prose-stripped') for s in SHAPES])  # the object's bytes, verbatim
+        self.assertEqual(self.parse([b for b, _ in got]), ['ok'] * 37)
+
+    def test_mutated_shapes_fail_closed(self):
+        for s in SHAPES:
+            for k, t in mutations(s).items():
+                for v in (t, '  ' + t + '\n\n'):                                 # handed on unchanged: not even stripped
+                    self.assertEqual(PJ.extract_answer(v), (v, None), (s['id'], k))
+
+    def test_bytes_change_only_for_answers_refused_on_v6ecc(self):
+        corpus = [shape_text(s) for s in SHAPES] + [t for s in SHAPES for t in mutations(s).values()] + [
+            OK, ' ' + OK + '\n', '```json\n' + OK + '\n```', 'Reason.\n' + OK, 'Reason.\n```json\n' + OK + '\n```', 'not json',
+            '', 'R.\n{"match": true, "match": false, "confidence": 1}', 'R.\n{"match": true, "confidence": NaN}',
+            'R.\n{"match": "true", "confidence": 0.5}', 'R.\n{"match": true}', '\x0c' + OK]
+        changed = [t for t in corpus if PJ.extract_answer(t) != PJ.unfence(t)]
+        self.assertGreaterEqual(len(changed), 37 + 2)
+        self.assertEqual(self.parse([PJ.unfence(t)[0] for t in changed]), ['refused'] * len(changed))
+        same = [t for t in corpus if PJ.extract_answer(t) == PJ.unfence(t)]
+        self.assertIn(OK, same)
+
+    def test_a_campaign_answered_in_the_real_shapes_completes(self):
+        w = World(mode='shapes')
+        try:
+            j = w.job()
+            rc, stdout, out, err = w.judge(j)
+            r = json.loads(Path(out['jobs'][0]['result']).read_text())
+            self.assertEqual((rc, r['status']), (0, 'completed'), err[-500:])
+            self.assertEqual(r['calls']['proseStripped'], r['calls']['byStage']['pair'])
+            self.assertGreater(r['calls']['byStage']['pair'], 0)
+            v6e = T.v6e_run(w.root, j, w.dir / 'v6e-shapes')
+            docs = json.loads(Path(r['documents']['path']).read_text())
+            norm = lambda ds: sorted(({**d, 'judge': {**d['judge'], 'runRef': None}} for d in ds), key=lambda d: (d['caseUrl'], d['tool']))
+            self.assertEqual(norm(docs), norm(v6e['documents']))
+            logtext = stdout + (Path(out['jobs'][0]['result']).parent / 'v6ecc-calls.jsonl').read_text() + Path(out['jobs'][0]['result']).read_text()
+            for s in SHAPES:
+                self.assertNotIn(s['prefix'].strip()[:40], logtext)                          # no preamble in any receipt
+        finally:
+            w.close()
+
+
 class TestPure(unittest.TestCase):
     def test_project_body_refuses_other_shapes(self):
         body = {'model': PJ.ROUTE_MODEL, 'messages': [{'role': 'system', 'content': 's'}, {'role': 'user', 'content': '{}'}],
@@ -359,6 +487,19 @@ class TestPure(unittest.TestCase):
         self.assertEqual(PJ.unfence('```json\n{"a":1}\n```'), ('{"a":1}', 'fenced-json'))
         self.assertEqual(PJ.unfence('x ```json\n{}\n```')[1], None)
         self.assertEqual(PJ.unfence('```json\n{}\n``` ```')[1], None)
+
+    def test_extract_answer_rules(self):
+        cases = {OK: (OK, None), '```json\n' + OK + '\n```': (OK, 'fenced-json'),
+                 'Short reasoning.\n\n' + OK: (OK, 'prose-stripped'), 'The `f()` call differs.\n' + OK: (OK, 'prose-stripped'),
+                 'Reasoning.\n```json\n' + OK + '\n```': (OK, 'prose-stripped'), 'Reasoning.\n```\n' + OK + '\n```': (OK, 'prose-stripped')}
+        for t, want in cases.items():
+            self.assertEqual(PJ.extract_answer(t), want, t)
+        for t in (OK + '\nSo it matches.', 'First {"match": false, "confidence": 0.1} then\n' + OK, 'the {x} case\n' + OK,
+                  'Reasoning.\n{"match": true, "conf', 'Reasoning.\n[1, 2]', 'No JSON here.', 'R.\n' + OK + '\n```',
+                  'R.\n```json\n' + OK + '\n```\nmore\n```json\n' + OK + '\n```', 'see [1]\n' + OK, '```\ncode\n```\n' + OK,
+                  '', '```', 'R.\n```text\n' + OK + '\n```'):
+            for v in (t, ' ' + t + '\n'):
+                self.assertEqual(PJ.extract_answer(v), (v, None), v)
 
     def test_classify(self):
         self.assertEqual(PJ.classify(429, 'rate_limit', {'status': 'rejected', 'rateLimitType': 'five_hour'}, ''), 'usage-limit')

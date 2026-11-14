@@ -4,7 +4,9 @@ environment variables). Every call is logged (argv, the system prompt, stdin, th
 
 Modes, per call number (config "modes": {"<n>": mode}, else config "mode"): ok | fenced | prose | usage-limit | overage | tool-use |
 wrong-model | max-tokens | retry | timeout | auth | invalid | no-init | overage-two (an overage rate_limit_event, then an allowed
-one: the gate's F1 probe) | term-parent / kill-parent (SIGTERM / SIGKILL the skill process mid-call)."""
+one: the gate's F1 probe) | term-parent / kill-parent (SIGTERM / SIGKILL the skill process mid-call) | prose-after (the JSON, then
+prose) | shapes (each pair answer takes the layout of a real calibration failure, failure_shapes.json: its masked preamble and
+fence around this fake's JSON; other stages answer ok)."""
 import json
 import os
 import stat
@@ -58,6 +60,12 @@ if mode == "fenced":
     text = "```json\n" + text + "\n```"
 if mode == "prose":
     text = "Here is the answer: " + text
+if mode == "prose-after":
+    text = text + "\nSo that is the answer."
+if mode == "shapes" and name == "ScorePair":
+    shapes = json.loads((Path({tests!r}) / "failure_shapes.json").read_text())["shapes"]
+    sh = shapes[n % len(shapes)]
+    text = sh["prefix"] + text + sh["suffix"]
 if mode == "invalid":
     text = "not json"
 rate = {{"status": "allowed", "rateLimitType": "five_hour", "isUsingOverage": mode == "overage"}}
