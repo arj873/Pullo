@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import unittest
 from pathlib import Path
@@ -273,6 +274,22 @@ class Ledger(RT):
         p.call(req(), KEY)
         again = RuntimeLedger(self.ledger_path, 50_000_000).totals()
         self.assertEqual(again["knownUsdMicros"], 4000)
+
+    def test_ledger_size_limit_is_64_mib(self):
+        from reviewer.runtime import receipts
+        self.assertEqual(receipts.MAX_LOG_BYTES, 64 << 20)
+        p = self.provider()
+        p.call(req(), KEY)
+        pad = b" " * 1023 + b"\n"                                  # blank lines: read, then skipped as empty rows
+        with open(self.ledger_path, "ab") as f:
+            while f.tell() <= 32 << 20:
+                f.write(pad * 1024)
+        size = self.ledger_path.stat().st_size
+        self.assertTrue(32 << 20 < size <= 64 << 20, size)          # above the old 32 MiB limit: still read
+        self.assertEqual(RuntimeLedger(self.ledger_path, 50_000_000).totals()["knownUsdMicros"], 4000)
+        os.truncate(self.ledger_path, (64 << 20) + 1)               # above the limit: refused before any row is read
+        with self.assertRaisesRegex(ValueError, "runtime ledger too large; refusing"):
+            RuntimeLedger(self.ledger_path, 50_000_000).totals()
 
     def test_cap_reached_by_real_costs(self):
         w = worst_case_router_micros(SONNET, 600, 4000)
