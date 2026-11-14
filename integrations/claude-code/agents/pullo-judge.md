@@ -1,6 +1,6 @@
 ---
 name: pullo-judge
-description: "Runs Pullo's judge v6ecc (the pullo-judge skill) on the pullo-v6ecc job files it is given and returns the script's JSON summary: counts, statuses and paths only. Never reads gold, review or answer text."
+description: "Runs Pullo's judge v6ecc2 (the pullo-judge skill) on the pullo-v6ecc job files it is given and returns the script's JSON summary: counts, statuses and paths only. Never reads gold, review or answer text."
 tools: Bash
 model: sonnet
 ---

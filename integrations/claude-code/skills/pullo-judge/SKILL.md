@@ -1,13 +1,13 @@
 ---
 name: pullo-judge
-description: "Score prepared Pullo benchmark campaigns with Pullo's judge v6ecc: the v6e scoring judge (Opus 5.5, the same prompts, parsing, matching and budgets) run through the Claude Code CLI on the subscription instead of OpenRouter. Use when you are handed one or more pullo-v6ecc job files (operator/v6ecc-job.json) to judge. Reports counts and paths only; never prints gold, review or answer text."
+description: "Score prepared Pullo benchmark campaigns with Pullo's judge v6ecc2: the v6e scoring judge (Opus 5.5, the same prompts, parsing, matching and budgets) run through the Claude Code CLI on the subscription instead of OpenRouter. Use when you are handed one or more pullo-v6ecc job files (operator/v6ecc-job.json) to judge. Reports counts and paths only; never prints gold, review or answer text."
 ---
 
-# Pullo judge (v6ecc)
+# Pullo judge (v6ecc2)
 
 A job is one campaign that Pullo's scoring tools sealed for judging: its cases, the frozen judge export and every pin. This skill
 makes the judge calls (one `claude -p` call per judge request, one at a time) and writes the judgments in the v6e format, labelled
-v6ecc. Root settles and reports them afterwards (`score_v5.py v6ecc-settle`, `replay`, `report_v5.py`).
+v6ecc2. Root settles and reports them afterwards (`score_v5.py v6ecc-settle`, `replay`, `report_v5.py`).
 
 ## 1. Run the jobs
 
@@ -52,7 +52,9 @@ The last stdout line is JSON. Report it as is: `status`, and per job `name`, `st
   - `--system-prompt` = the judge's own system message + the response schema; stdin = the judge's user message, byte for byte;
   - `--model claude-opus-5-5 --effort high`, max tokens = the request's (8000 / 4000 / 1024), the v6e per-stage timeout;
   - no tools, `--strict-mcp-config`, no settings, no session persistence, no retries; `PATH=/usr/bin:/bin`; Claude Code 2.1.322 exactly.
-- The answer text goes to the frozen parser unchanged; only one whole-answer ```json fence is removed (counted as `fencedJson`).
+- The answer text goes to the frozen parser unchanged, with two exceptions: one whole-answer ```json fence is removed (counted as
+  `fencedJson`), and a short preamble before ONE JSON object that ends the answer is dropped (counted as `proseStripped`; v6ecc2's
+  only change from v6ecc). Anything else goes on as is, and the frozen parser refuses it.
 - Writes `v6ecc-output/` in the campaign dir: `<run>.trace.jsonl` and `<run>.documents.json` (v6e format), `v6ecc-calls.jsonl`
-  (one row per call: hashes, tokens, outcome; no text) and `v6ecc-result.json`.
+  (one row per call: hashes, tokens, outcome; no text, not even the dropped preamble) and `v6ecc-result.json`.
 - `check <job.json>` verifies a job with no CLI call. `unlatch` clears the latch (root only, after the limit resets).
