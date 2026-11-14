@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pullo-judge: Pullo's v6e scoring judge run over the Claude Code CLI on the user's subscription (judge v6ecc).
+"""pullo-judge: Pullo's v6e scoring judge run over the Claude Code CLI on the user's subscription (judge v6ecc2).
 
 The judge is the frozen v6e scoring code, unchanged: the same model (Opus 5.5), the same prompts (bench.extract@v3,
 bench.dedup@v2, bench.pair@v2), the same request bodies, parsing, matching, caps and budgets. This script loads that code from a
@@ -15,8 +15,13 @@ How one request body becomes one CLI call (project_body):
     CLAUDE_CODE_MAX_OUTPUT_TOKENS = the body's max_tokens (8000 / 4000 / 1024), the per-stage timeout from the frozen score config.
   * no tools (--tools ""), --strict-mcp-config, no settings, no slash commands, no session persistence, no retries, no thinking
     key, no CLAUDE.md / memory / attachments / file mentions. PATH=/usr/bin:/bin. Never ANTHROPIC_API_KEY or any other key.
-The CLI's answer text is handed to the frozen provider as the message content (one whole-answer ```json fence is removed and
-counted); the frozen code parses and validates it exactly as it parses an OpenRouter answer.
+The CLI's answer text is handed to the frozen provider as the message content; the frozen code parses and validates it exactly as
+it parses an OpenRouter answer. extract_answer decides which bytes are handed on (judge v6ecc2 = judge v6ecc + rule 3):
+  1. an answer that is JSON goes on unchanged;  2. one whole-answer ```json fence is removed (note 'fenced-json');
+  3. prose (no '{', '[' or ```) followed by ONE JSON object that ends the answer, bare or in one fence that ends the answer: only
+     that object goes on (note 'prose-stripped'; the v6ecc calibration's 37 of 37 schema-invalid answers had this shape);
+  4. anything else goes on unchanged, and the frozen parser refuses it.
+So the bytes differ from v6ecc's only for answers that v6ecc hands on and the frozen parser refuses. Nothing is built or edited.
 
 Safety: calls are serial (one call at a time inside a run, and a per-user lock so two runs never overlap unless --parallel).
 A usage limit, rate limit, overload, auth or billing error, a missing/odd model, an isolation problem (a tool, an extra turn, a
@@ -38,7 +43,7 @@ Usage:
   python3 -I pullo_judge.py judge <job.json> [<job.json> ...]   run jobs in order; stop at the first latch, refusal or error
   python3 -I pullo_judge.py check <job.json>                     verify a job and its judge export; no CLI call
   python3 -I pullo_judge.py unlatch                              clear the per-user latch (after the limit resets)
-A job (pullo-v6ecc-job@1) is written by Pullo's scoring tools (score_v5 rescore-v6ecc / campaign-plan under judge v6ecc)."""
+A job (pullo-v6ecc-job@1) is written by Pullo's scoring tools (score_v5 rescore-v6ecc2 / campaign-plan under judge v6ecc2)."""
 
 from __future__ import annotations
 
@@ -63,8 +68,8 @@ from pathlib import Path
 SCRIPT_REL = 'integrations/claude-code/skills/pullo-judge/scripts/pullo_judge.py'   # this file's path inside a judge export
 JOB_SCHEMA = 'pullo-v6ecc-job@1'
 RESULT_SCHEMA = 'pullo-v6ecc-result@1'
-TRANSPORT = 'pullo-v6ecc-cli@1'
-JUDGE_LABEL = 'v6ecc'
+TRANSPORT = 'pullo-v6ecc-cli@2'                    # @2: extract_answer rule 3 (v6ecc2)
+JUDGE_LABEL = 'v6ecc2'
 CLI_VERSION = '2.1.322'
 CLI_MODEL = 'claude-opus-5-5'
 ROUTE_MODEL = 'anthropic/claude-opus-5.5'          # the frozen judge's model id; the CLI's model is its 1:1 first-party id
@@ -87,6 +92,7 @@ ENV_PASS = ('HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'X
             'XDG_STATE_HOME')                                               # the user's own Claude Code login; never a key
 SCHEMA_NOTE = '\n\nThe schema ({name}, JSON Schema):\n'
 FENCE_NOTE = 'fenced-json'
+PROSE_NOTE = 'prose-stripped'
 CONTINUATION_PREFIX = 'Output token limit hit'
 LATCH_TYPES = ('usage-limit', 'rate-limit', 'overloaded', 'auth', 'billing', 'extra-usage', 'model-unavailable', 'isolation',
                'cli-missing')
@@ -401,6 +407,47 @@ def unfence(text: str):
     return text, None
 
 
+def _is_json(s: str) -> bool:
+    try:
+        json.loads(s)
+    except ValueError:
+        return False
+    return True
+
+
+def extract_answer(text: str):
+    """-> (the bytes handed to the frozen parser, note). Rules 1-2 are v6ecc's path (unfence); rule 3 is v6ecc2's one change:
+    prose with no '{', '[' or ``` (inline `code` is allowed), then ONE JSON object that ends the answer, bare or as the whole body of
+    one ```json / ``` fence that ends the answer -> that object's text (note 'prose-stripped'). Anything else -> unchanged. Only
+    chooses bytes: never builds, edits or coerces JSON (the frozen parser still refuses duplicate keys, NaN and every schema fault)."""
+    s = text.strip()
+    if _is_json(s):
+        return text, None                                                    # 1. JSON: unchanged (as v6ecc)
+    u, note = unfence(text)
+    if note:
+        return u, note                                                       # 2. a whole-answer fence (as v6ecc)
+    if s.endswith('```'):
+        i = s.rfind('```', 0, len(s) - 3)
+        nl = s.find('\n', i) if i >= 0 else -1
+        if nl < 0 or s[i + 3:nl].strip() not in ('', 'json', 'JSON'):
+            return text, None
+        prose, body = s[:i], s[nl + 1:-3].strip()
+    else:
+        j = s.find('{')
+        if j < 0:
+            return text, None
+        prose, body = s[:j], s[j:]
+    if not prose.strip() or '{' in prose or '[' in prose or '```' in prose:
+        return text, None
+    try:
+        obj, end = json.JSONDecoder().raw_decode(body)
+    except ValueError:
+        return text, None
+    if end != len(body) or not isinstance(obj, dict):
+        return text, None
+    return body, PROSE_NOTE                                                  # 3. v6ecc2
+
+
 class CliJudge:
     """The CaptureTransport `respond` callback of the frozen ScoreHost: one CLI call per request body, serial."""
 
@@ -548,10 +595,10 @@ class CliJudge:
         return self.H.HttpResponse(status, {}, json.dumps(doc).encode())
 
     def _answer(self, row, r, stream, finish):
-        text = (r or {}).get('result') if isinstance(r, dict) else None
-        if not isinstance(text, str):
-            text = ''
-        text, note = unfence(text)
+        raw = (r or {}).get('result') if isinstance(r, dict) else None
+        if not isinstance(raw, str):
+            raw = ''
+        text, note = extract_answer(raw)
         u = (r or {}).get('usage') if isinstance((r or {}).get('usage'), dict) else {}
         inp, cw, cr, out = (u.get(k) if type(u.get(k)) is int and u.get(k) >= 0 else 0 for k in
                             ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'))
@@ -564,7 +611,7 @@ class CliJudge:
         doc = {'id': gid, 'model': ROUTE_MODEL, 'provider': 'Anthropic',
                'choices': [{'index': 0, 'finish_reason': finish, 'message': {'role': 'assistant', 'content': text}}], 'usage': usage}
         row.update(outcome='processed', finish=finish, stopReason=(r or {}).get('stop_reason'), apiEquivalentUsdMicros=micros,
-                   answerSha256=sha(text.encode()), notes=[n for n in (note, 'continuation-killed' if stream.continuation else None,
+                   answerSha256=sha(text.encode()), rawAnswerSha256=sha(raw.encode()), strippedChars=len(raw) - len(text), notes=[n for n in (note, 'continuation-killed' if stream.continuation else None,
                                                                      'adaptive-thinking' if stream.thinking_blocks else None) if n],
                    numTurns=(r or {}).get('num_turns'), modelUsage=sorted(((r or {}).get('modelUsage') or {}).keys()))
         self._row(row)
@@ -722,6 +769,7 @@ def _run_host(job_path, job, jraw, claude, tmp, out, state, cfg, launch, units, 
               'calls': {'total': len(rows), 'processed': len(processed), 'byStage': by_stage,
                         'outcomes': {o: sum(1 for r in rows if r.get('outcome') == o) for o in sorted({r.get('outcome') for r in rows})},
                         'fencedJson': sum(1 for r in processed if FENCE_NOTE in r.get('notes', [])),
+                        'proseStripped': sum(1 for r in processed if PROSE_NOTE in r.get('notes', [])),
                         'finishLength': sum(1 for r in processed if r.get('finish') == 'length')},
               'callsSha256': sha(calls_path.read_bytes()) if calls_path.exists() else None,
               'latch': latch, 'extraUsage': extra, 'error': err,
