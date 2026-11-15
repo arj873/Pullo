@@ -33,7 +33,7 @@ from reviewer.contracts.redaction import redact_json
 
 from .scoring_budget import CATEGORIES, DEFAULT_CATEGORY, validate_admission
 
-MAX_LOG_BYTES = 32 << 20
+MAX_LOG_BYTES = 64 << 20
 SAFE_KEYS = frozenset({
     "type", "at", "callKey", "kind", "model", "resolvedModel", "resolvedModelSource", "generationId",
     "httpStatus", "outcome", "errorKind", "finishReason", "usage", "routerCostUsd", "routerCostUsdMicros",
