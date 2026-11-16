@@ -218,8 +218,14 @@ class RuntimeLedger:
         V6D (ack of an unknown call with no generation): a call whose last result row has outcome `unknown`, a null
         generation id and no cost facts at all (unknown-worst-case, no reconcile row) is passed over when an
         `acknowledge` row names its call key with a null generation id. Any other result without a generation id is
-        never acknowledged."""
+        never acknowledged.
+        V6G (ack of an orphan intent of a host-killed run): a scoring intent with NO result row at all (its process died
+        with the call in flight, e.g. a machine reboot; counted at its worst case) is passed over when an `acknowledge`
+        row names its call key with a null generation id and `orphanIntent` true. A result row written later for that
+        call key ends it: the call is then judged by the rules above."""
         acks = cls._acknowledged(rows)
+        orphans = {r.get("callKey") for r in rows if r["type"] == "acknowledge" and r.get("generationId") is None
+                   and r.get("orphanIntent") is True}
         recon = {r.get("callKey") for r in rows if r["type"] == "reconcile"}
         facts = ("routerCostUsd", "routerCostUsdMicros", "upstreamInferenceCostUsd", "upstreamInferenceCostUsdMicros",
                  "tokenPricedUsdMicros", "accountableUsdMicros", "accountableBasis", "isByok")
@@ -230,6 +236,8 @@ class RuntimeLedger:
             if (res is not None and "generationId" in res and gid is None and res.get("outcome") == "unknown"
                     and b == "unknown-worst-case" and all(res.get(f) is None for f in facts) and k not in recon
                     and (k, None) in acks):
+                continue
+            if res is None and b is None and k in orphans:          # V6G: an acknowledged orphan intent
                 continue
             return {"reason": "prior-unresolved-scoring-exposure"}
         return None
@@ -404,6 +412,12 @@ class RuntimeLedger:
         id and no cost facts at all (e.g. an HTTP 503 with no generation: nothing to look up), named by call key alone;
         the row records a null generation id. Every other rule below is unchanged.
 
+        V6G: `generation_id` None also acknowledges an ORPHAN: a scoring intent with no result row at all, whose process
+        died with the call in flight (the host proves that, e.g. a reboot after the run started, and settles the run;
+        the ledger only sees the intent, counted at its worst case). It is never a call this ledger instance admitted.
+        The row records a null generation id and `orphanIntent` true; `countedBasis` is null (no result, no basis). The
+        evidence rule is the same: the implied charge lies within [0, the worst case counted].
+
         Refuses (ValueError) unless: the ledger exists (never created); the call's last result row carries
         `generation_id` (None: the V6D shape above); the call is a scoring intent; its cost basis is `unknown-worst-case` (no cost facts at all,
         not overlaid by a reconcile row; estimated bases are refused); and the evidence is
@@ -430,9 +444,10 @@ class RuntimeLedger:
 
         def f(rows):
             res = [r for r in rows if r["type"] == "result" and r.get("callKey") == call_key]
-            if not res or res[-1].get("generationId") != generation_id:
+            orphan = generation_id is None and not res       # V6G: a scoring intent with NO result row
+            if not orphan and (not res or res[-1].get("generationId") != generation_id):
                 raise ValueError("no result row for this call key carries that generation id")
-            if generation_id is None:                        # V6D: only the unknown / no-generation / no-cost-facts shape
+            if generation_id is None and not orphan:         # V6D: only the unknown / no-generation / no-cost-facts shape
                 last = res[-1]
                 facts = ("routerCostUsd", "routerCostUsdMicros", "upstreamInferenceCostUsd", "upstreamInferenceCostUsdMicros",
                          "tokenPricedUsdMicros", "accountableUsdMicros", "accountableBasis", "isByok")
@@ -442,6 +457,8 @@ class RuntimeLedger:
             intent = next((r for r in reversed(rows) if r["type"] == "intent" and r.get("callKey") == call_key), None)
             if intent is None or intent.get("category") != "scoring":
                 raise ValueError("not a scoring call; only the scoring startup hold can be acknowledged")
+            if orphan and call_key in self._owned:           # V6G: this instance admitted it, so it may still be in flight
+                raise ValueError("an intent admitted by this ledger instance is not an orphan")
             before, sb, hb = self._tally(rows), self._tally(rows, "scoring"), self._hold(rows)
             if (call_key, generation_id) in self._acknowledged(rows):
                 prior = [r for r in rows if r["type"] == "acknowledge" and r.get("callKey") == call_key
@@ -454,11 +471,12 @@ class RuntimeLedger:
             if call_key not in unresolved:
                 raise ValueError("call cost is resolved (known, reconciled or not processed); nothing to acknowledge")
             _r, counted, basis = unresolved[call_key]
-            if basis != "unknown-worst-case":            # only a call with no cost facts at all; estimates stay held
+            if basis != "unknown-worst-case" and not (orphan and basis is None):   # estimates stay held; V6G: an orphan
                 raise ValueError("only an unknown-worst-case call can be acknowledged")
             if implied < 0 or implied > counted:
                 raise ValueError("evidence is inconsistent: implied charge is outside [0, counted charge]")
-            full = {**row, "countedUsdMicros": counted, "countedBasis": basis}     # audit only; never read as cost
+            full = {**row, "countedUsdMicros": counted, "countedBasis": basis,     # audit only; never read as cost
+                    **({"orphanIntent": True} if orphan else {})}
             new = rows + [full]
             after, sa = self._tally(new), self._tally(new, "scoring")
             if after != before or sa != sb:                  # defence in depth: an acknowledgement never moves money
