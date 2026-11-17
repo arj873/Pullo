@@ -6,7 +6,7 @@ Pullo is a read-only AI code reviewer. It reviews a pull request and returns com
 
 The Python package is named `reviewer`; the product name is Pullo. The package is stdlib-only (Python 3.14).
 
-**License:** none chosen yet. Until one is added, all rights are reserved.
+**License:** [GNU Affero General Public License v3.0 only](LICENSE) (SPDX: `AGPL-3.0-only`). If you run a modified Pullo for other people, including as a hosted review service, you must offer them its source.
 
 ## How it reviews (v26)
 
